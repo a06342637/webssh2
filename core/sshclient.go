@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/proxy"
 )
 
 func DecodedMsgToSSHClient(sshInfo string) (SSHClient, error) {
@@ -84,6 +85,33 @@ func (sclient *SSHClient) GenerateClient() error {
 		sclient.Port = 22
 	}
 	addr = fmt.Sprintf("%s:%d", sclient.Hostname, sclient.Port)
+
+	if sclient.ProxyHost != "" {
+		if sclient.ProxyPort == 0 {
+			sclient.ProxyPort = 1080
+		}
+		proxyAddr := fmt.Sprintf("%s:%d", sclient.ProxyHost, sclient.ProxyPort)
+		var proxyAuth *proxy.Auth
+		if sclient.ProxyUser != "" {
+			proxyAuth = &proxy.Auth{User: sclient.ProxyUser, Password: sclient.ProxyPass}
+		}
+		dialer, err := proxy.SOCKS5("tcp", proxyAddr, proxyAuth, proxy.Direct)
+		if err != nil {
+			return fmt.Errorf("failed to create socks5 proxy: %v", err)
+		}
+		conn, err := dialer.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to connect via proxy: %v", err)
+		}
+		c, chans, reqs, err := ssh.NewClientConn(conn, addr, clientConfig)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("failed to ssh handshake via proxy: %v", err)
+		}
+		sclient.Client = ssh.NewClient(c, chans, reqs)
+		return nil
+	}
+
 	if client, err = ssh.Dial("tcp", addr, clientConfig); err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}

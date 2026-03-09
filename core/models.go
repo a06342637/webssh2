@@ -51,6 +51,10 @@ type SSHClient struct {
 	LoginType  int    `json:"logintype"`
 	PrivateKey string `json:"privateKey"`
 	Passphrase string `json:"passphrase"`
+	ProxyHost  string `json:"proxyHost"`
+	ProxyPort  int    `json:"proxyPort"`
+	ProxyUser  string `json:"proxyUser"`
+	ProxyPass  string `json:"proxyPass"`
 	Client     *ssh.Client
 	Sftp       *sftp.Client
 	StdinPipe  io.WriteCloser

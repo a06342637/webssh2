@@ -89,6 +89,58 @@ document.addEventListener('keydown', function (e) {
     }
 });
 
+// ==================== Proxy Config ====================
+var PROXY_KEY = 'webssh_proxy';
+
+function toggleProxyPanel() {
+    var checked = document.getElementById('enableProxy').checked;
+    var panel = document.getElementById('proxyPanel');
+    if (checked) { panel.classList.add('show'); }
+    else { panel.classList.remove('show'); }
+}
+
+function saveProxyConfig() {
+    if (document.getElementById('rememberProxy').checked) {
+        var cfg = {
+            host: document.getElementById('proxyHost').value,
+            port: document.getElementById('proxyPort').value,
+            user: document.getElementById('proxyUser').value,
+            pass: document.getElementById('proxyPass').value
+        };
+        localStorage.setItem(PROXY_KEY, JSON.stringify(cfg));
+        showToast('代理配置已保存', 'success');
+    } else {
+        localStorage.removeItem(PROXY_KEY);
+    }
+}
+
+function loadProxyConfig() {
+    try {
+        var cfg = JSON.parse(localStorage.getItem(PROXY_KEY));
+        if (cfg) {
+            document.getElementById('proxyHost').value = cfg.host || '';
+            document.getElementById('proxyPort').value = cfg.port || '1080';
+            document.getElementById('proxyUser').value = cfg.user || '';
+            document.getElementById('proxyPass').value = cfg.pass || '';
+            document.getElementById('enableProxy').checked = true;
+            document.getElementById('rememberProxy').checked = true;
+            document.getElementById('proxyPanel').classList.add('show');
+        }
+    } catch (e) { }
+}
+
+function getProxyInfo() {
+    if (!document.getElementById('enableProxy').checked) return {};
+    var h = document.getElementById('proxyHost').value.trim();
+    if (!h) return {};
+    return {
+        proxyHost: h,
+        proxyPort: parseInt(document.getElementById('proxyPort').value) || 1080,
+        proxyUser: document.getElementById('proxyUser').value,
+        proxyPass: document.getElementById('proxyPass').value
+    };
+}
+
 // ==================== Build SSH Info ====================
 function buildSSHInfoFromForm() {
     var at = document.querySelector('.auth-tab.active').dataset.tab;
@@ -100,11 +152,15 @@ function buildSSHInfoFromForm() {
     };
     if (at === 'password') { info.password = document.getElementById('password').value; }
     else { info.privateKey = document.getElementById('privateKey').value; info.passphrase = document.getElementById('passphrase').value; }
+    var proxy = getProxyInfo();
+    if (proxy.proxyHost) { info.proxyHost = proxy.proxyHost; info.proxyPort = proxy.proxyPort; info.proxyUser = proxy.proxyUser; info.proxyPass = proxy.proxyPass; }
     return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
 }
 
 function buildSSHInfoDirect(host, port, user, pass) {
     var info = { hostname: host, port: parseInt(port) || 22, username: user || 'root', logintype: 0, password: pass || '' };
+    var proxy = getProxyInfo();
+    if (proxy.proxyHost) { info.proxyHost = proxy.proxyHost; info.proxyPort = proxy.proxyPort; info.proxyUser = proxy.proxyUser; info.proxyPass = proxy.proxyPass; }
     return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
 }
 
@@ -460,3 +516,4 @@ document.getElementById('sftpPath').addEventListener('keydown', function (e) { i
 
 // ==================== Init ====================
 renderConnBookmarks();
+loadProxyConfig();

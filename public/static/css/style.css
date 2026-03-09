@@ -204,6 +204,10 @@ textarea{padding:9px 10px;resize:vertical;min-height:60px;font-family:'JetBrains
 input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none}
 input[type="number"]{-moz-appearance:textfield}
 
+/* ==================== PROXY PANEL ==================== */
+.proxy-panel{display:none;flex-direction:column;gap:8px;padding:10px;background:rgba(123,47,247,.05);border:1px solid rgba(123,47,247,.15);border-radius:var(--rs);animation:fi .3s ease}
+.proxy-panel.show{display:flex}
+
 /* ==================== TAB BAR ==================== */
 .tab-bar{display:flex;align-items:center;gap:3px;flex:0 1 auto;overflow-x:auto;scrollbar-width:none;max-width:40%}
 .tab-bar::-webkit-scrollbar{display:none}
