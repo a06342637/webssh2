@@ -1,0 +1,8 @@
+webssh
+*.exe
+*.test
+*.out
+.idea/
+.vscode/
+.DS_Store
+tmp/
