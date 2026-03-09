@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"webssh/core"
@@ -50,7 +51,7 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`echo "===UPTIME==="`,
 		`uptime -p 2>/dev/null || uptime | sed 's/.*up //' | sed 's/,.*//g'`,
 		`echo "===CPU_USAGE==="`,
-		`top -bn1 2>/dev/null | grep '%Cpu' | awk '{print 100-$8}' || echo 0`,
+		`cat /proc/stat 2>/dev/null | awk '/^cpu /{a=$2+$3+$4; t=$2+$3+$4+$5+$6+$7+$8; print a" "t}'; sleep 0.5; cat /proc/stat 2>/dev/null | awk '/^cpu /{a=$2+$3+$4; t=$2+$3+$4+$5+$6+$7+$8; print a" "t}'`,
 		`echo "===TRAFFIC==="`,
 		`cat /proc/net/dev 2>/dev/null | awk 'NR>2 && $1!~"lo:" {gsub(/:$/,"",$1); rx+=$2; tx+=$10} END{print rx" "tx}' || echo "0 0"`,
 		`echo "===END==="`,
@@ -85,6 +86,7 @@ func parseSysInfo(raw string) map[string]string {
 	}
 
 	sections := map[string]string{}
+	multiSections := map[string][]string{}
 	currentKey := ""
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -126,8 +128,11 @@ func parseSysInfo(raw string) map[string]string {
 			currentKey = ""
 			continue
 		}
-		if currentKey != "" && sections[currentKey] == "" {
-			sections[currentKey] = line
+		if currentKey != "" {
+			if sections[currentKey] == "" {
+				sections[currentKey] = line
+			}
+			multiSections[currentKey] = append(multiSections[currentKey], line)
 		}
 	}
 
@@ -163,8 +168,8 @@ func parseSysInfo(raw string) map[string]string {
 	if v, ok := sections["uptime"]; ok && v != "" {
 		info["uptime"] = v
 	}
-	if v, ok := sections["cpuUsage"]; ok && v != "" {
-		info["cpuUsage"] = v
+	if lines, ok := multiSections["cpuUsage"]; ok && len(lines) >= 2 {
+		info["cpuUsage"] = calcCPUUsage(lines[0], lines[1])
 	}
 	if v, ok := sections["traffic"]; ok && v != "" {
 		parts := strings.Fields(v)
@@ -174,4 +179,28 @@ func parseSysInfo(raw string) map[string]string {
 		}
 	}
 	return info
+}
+
+func calcCPUUsage(line1, line2 string) string {
+	p1 := strings.Fields(line1)
+	p2 := strings.Fields(line2)
+	if len(p1) < 2 || len(p2) < 2 {
+		return "0"
+	}
+	a1, _ := strconv.ParseFloat(p1[0], 64)
+	t1, _ := strconv.ParseFloat(p1[1], 64)
+	a2, _ := strconv.ParseFloat(p2[0], 64)
+	t2, _ := strconv.ParseFloat(p2[1], 64)
+	dt := t2 - t1
+	if dt <= 0 {
+		return "0"
+	}
+	usage := (a2 - a1) / dt * 100
+	if usage < 0 {
+		usage = 0
+	}
+	if usage > 100 {
+		usage = 100
+	}
+	return fmt.Sprintf("%.1f", usage)
 }
