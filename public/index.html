@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=6">
+    <link rel="stylesheet" href="/static/css/style.css?v=7">
 </head>
 <body>
     <div class="bg-animation">
@@ -95,7 +95,7 @@
                         <label class="checkbox-field" for="enableSysInfo">
                             <input type="checkbox" id="enableSysInfo">
                             <span class="checkbox-custom"></span>
-                            <span>连接后检测系统信息</span>
+                            <span>连接后检测系统信息（每分钟检测一次）</span>
                         </label>
                         <label class="checkbox-field" for="enableProxy">
                             <input type="checkbox" id="enableProxy" onchange="toggleProxyPanel()">
@@ -247,6 +247,6 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=6"></script>
+    <script src="/static/js/app.js?v=7"></script>
 </body>
 </html>

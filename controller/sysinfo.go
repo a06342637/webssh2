@@ -51,6 +51,8 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`uptime -p 2>/dev/null || uptime | sed 's/.*up //' | sed 's/,.*//g'`,
 		`echo "===CPU_USAGE==="`,
 		`top -bn1 2>/dev/null | grep '%Cpu' | awk '{print 100-$8}' || echo 0`,
+		`echo "===TRAFFIC==="`,
+		`cat /proc/net/dev 2>/dev/null | awk 'NR>2 && $1!~"lo:" {gsub(/:$/,"",$1); rx+=$2; tx+=$10} END{print rx" "tx}' || echo "0 0"`,
 		`echo "===END==="`,
 	}, "; ")
 
@@ -78,6 +80,8 @@ func parseSysInfo(raw string) map[string]string {
 		"load":      "0 0 0",
 		"uptime":    "unknown",
 		"cpuUsage":  "0",
+		"rxTotal":   "0",
+		"txTotal":   "0",
 	}
 
 	sections := map[string]string{}
@@ -114,6 +118,9 @@ func parseSysInfo(raw string) map[string]string {
 			continue
 		case "===CPU_USAGE===":
 			currentKey = "cpuUsage"
+			continue
+		case "===TRAFFIC===":
+			currentKey = "traffic"
 			continue
 		case "===END===":
 			currentKey = ""
@@ -158,6 +165,13 @@ func parseSysInfo(raw string) map[string]string {
 	}
 	if v, ok := sections["cpuUsage"]; ok && v != "" {
 		info["cpuUsage"] = v
+	}
+	if v, ok := sections["traffic"]; ok && v != "" {
+		parts := strings.Fields(v)
+		if len(parts) >= 2 {
+			info["rxTotal"] = parts[0]
+			info["txTotal"] = parts[1]
+		}
 	}
 	return info
 }

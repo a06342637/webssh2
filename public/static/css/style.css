@@ -101,8 +101,9 @@ textarea{padding:9px 10px;resize:vertical;min-height:60px;font-family:'JetBrains
 .conn-drawer,.script-drawer{position:absolute;right:0;top:0;bottom:0;width:0;overflow:visible;transition:width var(--tr);z-index:30;display:flex}
 .conn-drawer{z-index:20}
 .conn-drawer.open,.script-drawer.open{width:230px}
-.drawer-tab{position:absolute;left:-32px;top:50%;transform:translateY(-50%);width:32px;height:52px;background:var(--card);backdrop-filter:blur(var(--blur));border:1px solid var(--brd);border-right:none;border-radius:8px 0 0 8px;color:var(--t2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all var(--tr);z-index:31}
-.drawer-tab:hover{background:rgba(0,212,255,.1);color:var(--c1);box-shadow:0 0 12px rgba(0,212,255,.1)}
+.drawer-tab{position:absolute;left:-32px;top:50%;transform:translateY(-50%);width:32px;height:52px;background:var(--card);backdrop-filter:blur(var(--blur));border:1px solid var(--brd);border-right:none;border-radius:8px 0 0 8px;color:var(--t2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all var(--tr);z-index:31;animation:breathe 3s ease-in-out infinite}
+.drawer-tab:hover{background:rgba(0,212,255,.15);color:var(--c1);box-shadow:0 0 16px rgba(0,212,255,.2);animation:none}
+@keyframes breathe{0%,100%{border-color:var(--brd);box-shadow:0 0 4px rgba(0,212,255,0);color:var(--t2)}50%{border-color:rgba(0,212,255,.25);box-shadow:0 0 10px rgba(0,212,255,.1);color:rgba(0,212,255,.7)}}
 .drawer-body{width:230px;flex-shrink:0;display:flex;flex-direction:column;border-radius:0;border-top:none;border-right:none;border-bottom:none;overflow:hidden;height:100%}
 .drawer-hd{display:flex;align-items:center;gap:6px;padding:11px 12px;font-size:12px;font-weight:600;color:var(--t1);border-bottom:1px solid var(--brd);flex-shrink:0}
 .drawer-hd svg{color:var(--c1)}
