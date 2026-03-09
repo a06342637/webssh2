@@ -20,7 +20,7 @@ import (
 var f embed.FS
 
 var (
-	port     = flag.Int("p", 8888, "服务运行端口")
+	port     = flag.Int("p", 8008, "服务运行端口")
 	v        = flag.Bool("v", false, "显示版本号")
 	authInfo = flag.String("a", "", "开启账号密码登录验证, '-a user:pass'的格式传参")
 	timeout  int
