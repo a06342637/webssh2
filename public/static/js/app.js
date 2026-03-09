@@ -1,5 +1,5 @@
 /* ============================================================
-   WebSSH - Frontend Application v2
+   WebSSH - Frontend Application v3
    ============================================================ */
 
 let term = null;
@@ -123,9 +123,6 @@ function showToast(message, type = 'info') {
     setTimeout(() => { toast.classList.add('removing'); setTimeout(() => toast.remove(), 300); }, 3500);
 }
 
-// ============================================================
-// Status
-// ============================================================
 function setStatus(status, text) {
     const el = document.getElementById('statusIndicator');
     el.className = `status-indicator ${status}`;
@@ -212,6 +209,17 @@ function stopSysInfoPolling() {
 }
 
 // ============================================================
+// Bookmark Drawer
+// ============================================================
+function toggleDrawer() {
+    const drawer = document.getElementById('bookmarkDrawer');
+    drawer.classList.toggle('open');
+    setTimeout(() => {
+        if (fitAddon && term) fitAddon.fit();
+    }, 350);
+}
+
+// ============================================================
 // SSH Connection
 // ============================================================
 function buildSSHInfo() {
@@ -228,7 +236,7 @@ function buildSSHInfo() {
         info.privateKey = document.getElementById('privateKey').value;
         info.passphrase = document.getElementById('passphrase').value;
     }
-    return btoa(JSON.stringify(info));
+    return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
 }
 
 function initTerminal() {
@@ -237,7 +245,7 @@ function initTerminal() {
     const isMobile = window.innerWidth <= 520;
     term = new Terminal({
         cursorBlink: true, cursorStyle: 'bar',
-        fontSize: isMobile ? 12 : 14,
+        fontSize: isMobile ? 13 : 15,
         fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
         theme: {
             background: 'rgba(10, 10, 26, 0.0)',
@@ -259,7 +267,7 @@ function initTerminal() {
     const termEl = document.getElementById('terminal');
     termEl.innerHTML = '';
     term.open(termEl);
-    setTimeout(() => fitAddon.fit(), 100);
+    setTimeout(() => fitAddon.fit(), 50);
 }
 
 function connect() {
@@ -272,44 +280,56 @@ function connect() {
 
     const cols = term.cols, rows = term.rows;
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${location.host}/term?sshInfo=${encodeURIComponent(currentSSHInfo)}&cols=${cols}&rows=${rows}`;
+    const wsUrl = `${protocol}//${location.host}/term?cols=${cols}&rows=${rows}`;
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-        btn.classList.remove('loading');
-        setStatus('', '就绪');
-
-        const hostname = document.getElementById('hostname').value.trim();
-        const username = document.getElementById('username').value.trim();
-        document.getElementById('topbarUser').textContent = `${username}@${hostname}`;
-        document.getElementById('topbarMetrics').innerHTML = '';
-
-        showView('terminalView');
-        showToast('连接成功', 'success');
-
-        setTimeout(() => { fitAddon.fit(); term.focus(); }, 200);
-
-        heartbeatTimer = setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
-        }, 30000);
-
-        if (document.getElementById('enableSysInfo').checked) {
-            startSysInfoPolling();
-        }
+        ws.send(currentSSHInfo);
     };
 
-    ws.onmessage = (evt) => { term.write(evt.data); };
+    let gotFirstData = false;
+
+    ws.onmessage = (evt) => {
+        if (!gotFirstData) {
+            gotFirstData = true;
+            btn.classList.remove('loading');
+            setStatus('', '已连接');
+
+            const hostname = document.getElementById('hostname').value.trim();
+            const username = document.getElementById('username').value.trim();
+            document.getElementById('topbarUser').textContent = `${username}@${hostname}`;
+            document.getElementById('topbarMetrics').innerHTML = '';
+
+            showView('terminalView');
+            showToast('连接成功', 'success');
+
+            setTimeout(() => { fitAddon.fit(); term.focus(); }, 150);
+
+            heartbeatTimer = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+            }, 30000);
+
+            if (document.getElementById('enableSysInfo').checked) {
+                startSysInfoPolling();
+            }
+        }
+        term.write(evt.data);
+    };
 
     ws.onerror = () => {
         btn.classList.remove('loading');
         setStatus('error', '连接失败');
-        showToast('连接失败，请检查参数', 'error');
+        showToast('WebSocket 连接失败', 'error');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
         btn.classList.remove('loading');
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         stopSysInfoPolling();
+        if (!gotFirstData) {
+            setStatus('error', '连接失败');
+            showToast('无法连接到服务器', 'error');
+        }
     };
 
     term.onData((data) => {
@@ -334,6 +354,8 @@ function disconnect() {
     stopSysInfoPolling();
     if (term) { term.dispose(); term = null; }
     if (resizeHandler) { window.removeEventListener('resize', resizeHandler); resizeHandler = null; }
+    const drawer = document.getElementById('bookmarkDrawer');
+    if (drawer) drawer.classList.remove('open');
     showView('loginView');
     setStatus('', '就绪');
     showToast('已断开连接', 'info');
@@ -383,11 +405,11 @@ function renderBookmarks() {
     const list = document.getElementById('bookmarkList');
     const bms = loadBookmarks();
     if (bms.length === 0) {
-        list.innerHTML = '<div class="bm-empty">暂无书签<br>填写连接信息后点击下方保存</div>';
+        list.innerHTML = '<div class="bm-empty">暂无书签<br>点击下方保存当前连接</div>';
         return;
     }
     list.innerHTML = bms.map((b, i) => `
-        <div class="bm-item" onclick="applyBookmark(${i})" title="点击填入">
+        <div class="bm-item" onclick="applyBookmark(${i})" title="点击填入并连接">
             <div class="bm-item-info">
                 <div class="bm-item-name">${escHtml(b.name || b.username + '@' + b.hostname)}</div>
                 <div class="bm-item-host">${escHtml(b.hostname)}:${b.port || 22}</div>
@@ -415,7 +437,6 @@ function saveCurrentAsBookmark() {
         authType: activeTab,
         name: username + '@' + hostname,
     };
-
     if (activeTab === 'password') {
         bm.password = document.getElementById('password').value;
     }
@@ -448,12 +469,13 @@ function applyBookmark(index) {
         switchAuthTab('password');
         if (b.password) document.getElementById('password').value = b.password;
     }
+
     showToast('已填入: ' + b.name, 'info');
 
-    // Close mobile bookmark panel
-    const panel = document.getElementById('bookmarkPanel');
-    if (panel.classList.contains('mobile-open')) {
-        panel.classList.remove('mobile-open');
+    if (document.getElementById('terminalView').classList.contains('active')) {
+        setTimeout(() => {
+            reconnect();
+        }, 200);
     }
 }
 
@@ -469,12 +491,4 @@ function escHtml(s) {
     const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
 
-function toggleBookmarkPanel() {
-    const panel = document.getElementById('bookmarkPanel');
-    if (window.innerWidth <= 520) {
-        panel.classList.toggle('mobile-open');
-    }
-}
-
-// Init bookmarks on load
 renderBookmarks();
