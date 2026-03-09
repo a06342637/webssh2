@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=5">
 </head>
 <body>
     <div class="bg-animation">
@@ -56,7 +56,7 @@
                             <label>用户名</label>
                             <div class="input-wrapper">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                                <input type="text" id="username" placeholder="root" required>
+                                <input type="text" id="username" placeholder="root" value="root" required>
                             </div>
                         </div>
                         <div class="auth-tabs">
@@ -127,21 +127,22 @@
     <div id="terminalView" class="view">
         <div class="term-topbar glass-bar">
             <div class="topbar-left">
-                <div class="term-dots"><span class="dot red" onclick="disconnect()"></span><span class="dot yellow" onclick="reconnect()"></span><span class="dot green"></span></div>
-                <span class="topbar-user" id="topbarUser">root@host</span>
+                <div class="term-dots"><span class="dot red" onclick="closeActiveTab()"></span><span class="dot yellow" onclick="reconnectTab()"></span><span class="dot green"></span></div>
             </div>
+            <div class="tab-bar" id="tabBar"></div>
+            <button class="tab-add-btn" onclick="showAddTab()" title="新建连接">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
             <div class="topbar-metrics" id="topbarMetrics"></div>
             <div class="topbar-right">
                 <button class="tb-btn" onclick="toggleScriptDrawer()" title="脚本书签"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
-                <button class="tb-btn" onclick="toggleSftp()" title="SFTP文件管理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></button>
-                <button class="tb-btn" onclick="reconnect()" title="重连"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg></button>
-                <button class="tb-btn danger" onclick="disconnect()" title="断开"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M18.36 6.64a9 9 0 11-12.73 0M12 2v10"/></svg></button>
+                <button class="tb-btn" onclick="toggleSftp()" title="SFTP"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></button>
+                <button class="tb-btn" onclick="reconnectTab()" title="重连"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg></button>
+                <button class="tb-btn danger" onclick="closeActiveTab()" title="断开"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M18.36 6.64a9 9 0 11-12.73 0M12 2v10"/></svg></button>
             </div>
         </div>
         <div class="term-main">
-            <div class="term-body" id="terminalContainer">
-                <div id="terminal"></div>
-            </div>
+            <div class="term-body" id="terminalContainer"></div>
             <!-- Script Bookmark Drawer -->
             <div class="script-drawer" id="scriptDrawer">
                 <button class="drawer-tab" onclick="toggleScriptDrawer()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
@@ -176,11 +177,32 @@
         </div>
     </div>
 
+    <!-- Quick Connect Dialog -->
+    <div class="modal-overlay" id="addTabModal">
+        <div class="glass-card modal-card">
+            <div class="drawer-hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span>新建 SSH 连接</span></div>
+            <div class="modal-body">
+                <div class="input-row">
+                    <div class="input-field flex-3"><input type="text" id="newTabHost" placeholder="主机地址" class="script-input"></div>
+                    <div class="input-field flex-1"><input type="number" id="newTabPort" value="22" class="script-input"></div>
+                </div>
+                <div class="input-row">
+                    <div class="input-field flex-1"><input type="text" id="newTabUser" value="root" placeholder="用户名" class="script-input"></div>
+                    <div class="input-field flex-1"><input type="password" id="newTabPass" placeholder="密码" class="script-input"></div>
+                </div>
+                <div class="input-row" style="gap:6px">
+                    <button class="drawer-add" style="flex:1;margin:0" onclick="addNewTab()">连接</button>
+                    <button class="drawer-add" style="flex:1;margin:0;border-style:solid" onclick="hideAddTab()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="toastContainer" class="toast-container"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=5"></script>
 </body>
 </html>

@@ -204,6 +204,29 @@ textarea{padding:9px 10px;resize:vertical;min-height:60px;font-family:'JetBrains
 input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none}
 input[type="number"]{-moz-appearance:textfield}
 
+/* ==================== TAB BAR ==================== */
+.tab-bar{display:flex;align-items:center;gap:3px;flex:0 1 auto;overflow-x:auto;scrollbar-width:none;max-width:40%}
+.tab-bar::-webkit-scrollbar{display:none}
+.ssh-tab{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:var(--rx);background:rgba(255,255,255,.04);border:1px solid transparent;cursor:pointer;transition:all var(--tr);white-space:nowrap;flex-shrink:0;font-size:11px;color:var(--t2);font-family:'JetBrains Mono',monospace}
+.ssh-tab:hover{background:rgba(255,255,255,.08)}
+.ssh-tab.active{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.25);color:var(--c1)}
+.ssh-tab .tab-close{width:14px;height:14px;border:none;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all var(--tr);padding:0;font-size:0}
+.ssh-tab .tab-close:hover{background:rgba(255,0,110,.2);color:var(--err)}
+.ssh-tab .tab-close svg{width:10px;height:10px}
+.tab-add-btn{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px dashed var(--brd);border-radius:var(--rx);color:var(--t3);cursor:pointer;transition:all var(--tr);flex-shrink:0}
+.tab-add-btn:hover{border-color:var(--c1);color:var(--c1);background:rgba(0,212,255,.05)}
+
+/* Terminal containers per tab */
+.term-instance{position:absolute;inset:0;display:none}
+.term-instance.active{display:flex;flex-direction:column}
+.term-instance .xterm{flex:1}
+
+/* ==================== MODAL ==================== */
+.modal-overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px)}
+.modal-overlay.show{display:flex}
+.modal-card{width:360px;max-width:90vw;padding:0;overflow:hidden}
+.modal-body{padding:12px;display:flex;flex-direction:column;gap:8px}
+
 /* ==================== RESPONSIVE ==================== */
 @media(max-width:860px){
     .conn-drawer.open,.script-drawer.open{width:200px}
