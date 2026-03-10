@@ -75,6 +75,12 @@ git pull && docker compose up -d --build
 environment:
   - authInfo=admin:your_password
 ```
+### 更新
+```yaml
+cd webssh2
+git pull
+docker compose up -d --build
+```
 
 ### 3. 从源码运行
 
