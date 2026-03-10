@@ -3,9 +3,9 @@
 一个基于 Go + WebSocket 的 Web SSH 终端，支持密码和密钥认证，带有炫酷的毛玻璃 UI。
 
 ## 一键部署
-
+免费
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/a06342637/webssh2)
-
+付费
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/github?repo=https://github.com/a06342637/webssh2)
 
 ## 功能特性
