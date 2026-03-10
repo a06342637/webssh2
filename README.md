@@ -4,9 +4,9 @@
 
 ## 一键部署
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template?template=https://github.com/a06342637/webssh2&envs=PORT&PORTDesc=服务端口&PORTDefault=8008)
-
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/a06342637/webssh2)
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/github?repo=https://github.com/a06342637/webssh2)
 
 ## 功能特性
 
