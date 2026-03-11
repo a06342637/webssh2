@@ -814,11 +814,28 @@ function initTheme() {
 
 // ==================== Click outside to close drawers ====================
 document.addEventListener('click', function (e) {
+    // Close connection bookmark drawer
     var connDrawer = document.getElementById('connDrawer');
     var edgeBtns = document.getElementById('edgeBtns');
     if (connDrawer && connDrawer.classList.contains('open')) {
         if (!connDrawer.contains(e.target) && !edgeBtns.contains(e.target)) {
             connDrawer.classList.remove('open');
+        }
+    }
+    // Close script bookmark drawer
+    var scriptDrawer = document.getElementById('scriptDrawer');
+    if (scriptDrawer && scriptDrawer.classList.contains('open')) {
+        if (!scriptDrawer.contains(e.target) && !e.target.closest('.tb-btn')) {
+            scriptDrawer.classList.remove('open');
+            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
+        }
+    }
+    // Close SFTP panel
+    var sftpPanel = document.getElementById('sftpPanel');
+    if (sftpPanel && sftpPanel.classList.contains('open')) {
+        if (!sftpPanel.contains(e.target) && !e.target.closest('.tb-btn')) {
+            sftpPanel.classList.remove('open');
+            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
         }
     }
 });
@@ -848,7 +865,7 @@ function changeZoom(delta) {
     s.zoom = nv;
     saveSettings(s);
     document.getElementById('zoomLabel').textContent = nv + '%';
-    document.documentElement.style.fontSize = (nv / 100 * 16) + 'px';
+    document.body.style.zoom = (nv / 100);
 }
 
 function applyBgImage() {
@@ -856,15 +873,19 @@ function applyBgImage() {
     var s = loadSettings();
     s.bgImage = url;
     saveSettings(s);
+    setBgImage(url);
+    showToast(url ? '背景已设置' : '背景已清除', 'success');
+}
+
+function setBgImage(url) {
     var el = document.getElementById('customBg');
     if (url) {
-        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.backgroundImage = 'url("' + url + '")';
         el.style.display = 'block';
     } else {
         el.style.backgroundImage = '';
         el.style.display = 'none';
     }
-    showToast(url ? '背景已设置' : '背景已清除', 'success');
 }
 
 function renderBgSwatches() {
@@ -917,11 +938,10 @@ function changeBlur(val) {
 
 function resetAllSettings() {
     localStorage.removeItem(SETTINGS_KEY);
-    document.documentElement.style.fontSize = '';
+    document.body.style.zoom = '';
     document.documentElement.style.removeProperty('--bg');
     document.documentElement.style.removeProperty('--blur');
-    document.getElementById('customBg').style.display = 'none';
-    document.getElementById('customBg').style.backgroundImage = '';
+    setBgImage('');
     document.getElementById('particles').style.display = '';
     document.querySelector('.bg-animation').style.display = '';
     renderBgSwatches();
@@ -931,12 +951,10 @@ function resetAllSettings() {
 function initSettings() {
     var s = loadSettings();
     if (s.zoom && s.zoom !== 100) {
-        document.documentElement.style.fontSize = (s.zoom / 100 * 16) + 'px';
+        document.body.style.zoom = (s.zoom / 100);
     }
     if (s.bgImage) {
-        var el = document.getElementById('customBg');
-        el.style.backgroundImage = 'url(' + s.bgImage + ')';
-        el.style.display = 'block';
+        setBgImage(s.bgImage);
     }
     if (s.bgColor) {
         document.documentElement.style.setProperty('--bg', s.bgColor);
