@@ -884,11 +884,11 @@ var _sysIntervalTemp = 60;
 
 function getSysInterval() {
     var v = parseInt(localStorage.getItem(SYS_INTERVAL_KEY));
-    return (v && v >= 10 && v <= 600) ? v : 60;
+    return (v && v >= 5 && v <= 600) ? v : 60;
 }
 
 function changeSysInterval(delta) {
-    _sysIntervalTemp = Math.max(10, Math.min(600, _sysIntervalTemp + delta));
+    _sysIntervalTemp = Math.max(5, Math.min(600, _sysIntervalTemp + delta));
     document.getElementById('sysIntervalLabel').textContent = _sysIntervalTemp + 's';
     var btn = document.getElementById('sysIntervalSaveBtn');
     btn.classList.remove('saved');
@@ -896,14 +896,18 @@ function changeSysInterval(delta) {
 }
 
 function saveSysInterval() {
-    localStorage.setItem(SYS_INTERVAL_KEY, _sysIntervalTemp);
     var btn = document.getElementById('sysIntervalSaveBtn');
-    btn.classList.add('saved');
-    btn.textContent = '已保存';
-    setTimeout(function () {
+    if (btn.classList.contains('saved')) {
         btn.classList.remove('saved');
         btn.textContent = '保存';
-    }, 1500);
+        return;
+    }
+    localStorage.setItem(SYS_INTERVAL_KEY, _sysIntervalTemp);
+    btn.classList.add('saved');
+    btn.textContent = '已保存';
+
+    // Update login page hint text
+    updateSysInfoHint();
 
     // Restart polling for all active sessions
     sessions.forEach(function (s) {
@@ -915,9 +919,21 @@ function saveSysInterval() {
     showToast('检测间隔已设为 ' + _sysIntervalTemp + ' 秒', 'success');
 }
 
+function updateSysInfoHint() {
+    var el = document.querySelector('label[for="enableSysInfo"] span:last-child');
+    if (!el) return;
+    var sec = getSysInterval();
+    if (sec >= 60 && sec % 60 === 0) {
+        el.textContent = '连接后检测系统信息（每' + (sec / 60) + '分钟检测一次）';
+    } else {
+        el.textContent = '连接后检测系统信息（每' + sec + '秒检测一次）';
+    }
+}
+
 function initSysInterval() {
     _sysIntervalTemp = getSysInterval();
     document.getElementById('sysIntervalLabel').textContent = _sysIntervalTemp + 's';
+    updateSysInfoHint();
 }
 
 // ==================== Settings Panel ====================
@@ -984,11 +1000,14 @@ function applyEdgeScale(val) {
 }
 
 function applyBgImage() {
+    var btn = document.getElementById('bgImageSaveBtn');
+    if (btn.classList.contains('saved')) { btn.classList.remove('saved'); btn.textContent = '保存'; return; }
     var url = document.getElementById('bgImageUrl').value.trim();
     var s = loadSettings();
     s.bgImage = url;
     saveSettings(s);
     setBgImage(url);
+    btn.classList.add('saved'); btn.textContent = '已保存';
     showToast(url ? '背景已设置' : '背景已清除', 'success');
 }
 
@@ -1032,8 +1051,11 @@ function applyBgColorPreset(color) {
 }
 
 function applyBgColorCustom() {
+    var btn = document.getElementById('bgColorSaveBtn');
+    if (btn.classList.contains('saved')) { btn.classList.remove('saved'); btn.textContent = '保存'; return; }
     var color = document.getElementById('bgColorPicker').value;
     applyBgColorPreset(color);
+    btn.classList.add('saved'); btn.textContent = '已保存';
 }
 
 function toggleParticlesEffect() {
