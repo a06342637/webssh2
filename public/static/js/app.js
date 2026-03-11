@@ -1037,8 +1037,86 @@ function initSettings() {
     if (s.edgeScale && s.edgeScale !== 100) applyEdgeScale(s.edgeScale);
 }
 
+// ==================== URL Auto-Login ====================
+function parseUrlLogin() {
+    var path = location.pathname;
+    if (!path || path === '/') return null;
+    path = path.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!path) return null;
+
+    var parts = path.split('/');
+    var host, port, user, pass;
+
+    // Format: ip:port/password (2 parts, host:port/pass)
+    // Format: ip:port/user/password (3 parts)
+    // Format: ip/port/password (3 parts, all numeric port)
+    // Format: ip/port/user/password (4 parts)
+
+    if (parts.length === 2) {
+        // ip:port/password OR ip/password
+        var hp = parts[0].split(':');
+        host = hp[0];
+        port = hp[1] ? parseInt(hp[1]) : 22;
+        pass = decodeURIComponent(parts[1]);
+        user = 'root';
+    } else if (parts.length === 3) {
+        var hp = parts[0].split(':');
+        if (hp.length === 2) {
+            // ip:port/user/password
+            host = hp[0];
+            port = parseInt(hp[1]);
+            user = decodeURIComponent(parts[1]);
+            pass = decodeURIComponent(parts[2]);
+        } else if (/^\d+$/.test(parts[1])) {
+            // ip/port/password
+            host = parts[0];
+            port = parseInt(parts[1]);
+            pass = decodeURIComponent(parts[2]);
+            user = 'root';
+        } else {
+            // ip/user/password
+            host = parts[0];
+            port = 22;
+            user = decodeURIComponent(parts[1]);
+            pass = decodeURIComponent(parts[2]);
+        }
+    } else if (parts.length === 4) {
+        // ip/port/user/password
+        host = parts[0];
+        port = parseInt(parts[1]);
+        user = decodeURIComponent(parts[2]);
+        pass = decodeURIComponent(parts[3]);
+    } else {
+        return null;
+    }
+
+    if (!host) return null;
+    return { host: host, port: port || 22, user: user || 'root', pass: pass || '' };
+}
+
+function tryAutoLogin() {
+    var info = parseUrlLogin();
+    if (!info) return;
+
+    // Fill form
+    document.getElementById('hostname').value = info.host;
+    document.getElementById('port').value = info.port;
+    document.getElementById('username').value = info.user;
+    switchAuthTab('password');
+    document.getElementById('password').value = info.pass;
+
+    // Clean URL without reload
+    history.replaceState(null, '', '/');
+
+    // Auto connect after short delay
+    setTimeout(function () {
+        connectFromLogin();
+    }, 500);
+}
+
 // ==================== Init ====================
 initTheme();
 initSettings();
 renderConnBookmarks();
 loadProxyConfig();
+tryAutoLogin();
