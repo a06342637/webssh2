@@ -823,7 +823,135 @@ document.addEventListener('click', function (e) {
     }
 });
 
+// ==================== Settings Panel ====================
+var SETTINGS_KEY = 'webssh_settings';
+var BG_PRESETS = ['#0a0a1a','#0d1117','#1a1a2e','#000000','#1e1e2e','#282a36','#002b36','#2e3440','#e8eaf0','#f0f0f5','#ffffff','#fdf6e3'];
+
+function loadSettings() {
+    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) { return {}; }
+}
+function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+
+function toggleSettings() {
+    var p = document.getElementById('settingsPanel');
+    var o = document.getElementById('settingsOverlay');
+    var show = !p.classList.contains('show');
+    p.classList.toggle('show');
+    o.classList.toggle('show');
+    if (show) renderBgSwatches();
+}
+
+function changeZoom(delta) {
+    var s = loadSettings();
+    var cur = s.zoom || 100;
+    var nv = Math.max(50, Math.min(150, cur + delta));
+    s.zoom = nv;
+    saveSettings(s);
+    document.getElementById('zoomLabel').textContent = nv + '%';
+    document.documentElement.style.fontSize = (nv / 100 * 16) + 'px';
+}
+
+function applyBgImage() {
+    var url = document.getElementById('bgImageUrl').value.trim();
+    var s = loadSettings();
+    s.bgImage = url;
+    saveSettings(s);
+    var el = document.getElementById('customBg');
+    if (url) {
+        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.display = 'block';
+    } else {
+        el.style.backgroundImage = '';
+        el.style.display = 'none';
+    }
+    showToast(url ? '背景已设置' : '背景已清除', 'success');
+}
+
+function renderBgSwatches() {
+    var s = loadSettings();
+    var el = document.getElementById('bgColorSwatches');
+    el.innerHTML = BG_PRESETS.map(function (c) {
+        var cls = (s.bgColor && s.bgColor === c) ? ' active' : '';
+        return '<div class="set-color-swatch' + cls + '" style="background:' + c + '" data-color="' + c + '"></div>';
+    }).join('');
+    el.querySelectorAll('.set-color-swatch').forEach(function (sw) {
+        sw.addEventListener('click', function () { applyBgColorPreset(this.dataset.color); });
+    });
+    document.getElementById('zoomLabel').textContent = (s.zoom || 100) + '%';
+    document.getElementById('bgImageUrl').value = s.bgImage || '';
+    document.getElementById('blurRange').value = s.blur != null ? s.blur : 20;
+    document.getElementById('blurLabel').textContent = (s.blur != null ? s.blur : 20) + 'px';
+    document.getElementById('toggleParticles').checked = s.particles !== false;
+}
+
+function applyBgColorPreset(color) {
+    var s = loadSettings();
+    s.bgColor = color;
+    saveSettings(s);
+    document.documentElement.style.setProperty('--bg', color);
+    renderBgSwatches();
+    showToast('背景颜色已更新', 'success');
+}
+
+function applyBgColorCustom() {
+    var color = document.getElementById('bgColorPicker').value;
+    applyBgColorPreset(color);
+}
+
+function toggleParticlesEffect() {
+    var show = document.getElementById('toggleParticles').checked;
+    var s = loadSettings();
+    s.particles = show;
+    saveSettings(s);
+    document.getElementById('particles').style.display = show ? '' : 'none';
+    document.querySelector('.bg-animation').style.display = show ? '' : 'none';
+}
+
+function changeBlur(val) {
+    var s = loadSettings();
+    s.blur = parseInt(val);
+    saveSettings(s);
+    document.documentElement.style.setProperty('--blur', val + 'px');
+    document.getElementById('blurLabel').textContent = val + 'px';
+}
+
+function resetAllSettings() {
+    localStorage.removeItem(SETTINGS_KEY);
+    document.documentElement.style.fontSize = '';
+    document.documentElement.style.removeProperty('--bg');
+    document.documentElement.style.removeProperty('--blur');
+    document.getElementById('customBg').style.display = 'none';
+    document.getElementById('customBg').style.backgroundImage = '';
+    document.getElementById('particles').style.display = '';
+    document.querySelector('.bg-animation').style.display = '';
+    renderBgSwatches();
+    showToast('已恢复默认', 'success');
+}
+
+function initSettings() {
+    var s = loadSettings();
+    if (s.zoom && s.zoom !== 100) {
+        document.documentElement.style.fontSize = (s.zoom / 100 * 16) + 'px';
+    }
+    if (s.bgImage) {
+        var el = document.getElementById('customBg');
+        el.style.backgroundImage = 'url(' + s.bgImage + ')';
+        el.style.display = 'block';
+    }
+    if (s.bgColor) {
+        document.documentElement.style.setProperty('--bg', s.bgColor);
+    }
+    if (s.particles === false) {
+        document.getElementById('particles').style.display = 'none';
+        document.querySelector('.bg-animation').style.display = 'none';
+    }
+    if (s.blur != null) {
+        document.documentElement.style.setProperty('--blur', s.blur + 'px');
+    }
+}
+
 // ==================== Init ====================
 initTheme();
+initSettings();
 renderConnBookmarks();
 loadProxyConfig();
