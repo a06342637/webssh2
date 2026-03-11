@@ -162,6 +162,9 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 .tb-btn.sm{width:30px;height:30px}
 .upload-label{cursor:pointer}
 
+.term-edge-btns{position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:20;display:flex;flex-direction:column;gap:0}
+.term-edge-btns .edge-btn{width:36px;height:44px;border-right:none}
+.term-edge-btns .edge-btn:first-child{border-bottom:none}
 .term-main{flex:1;display:flex;overflow:hidden;position:relative;min-height:0}
 .term-body{flex:1;display:flex;flex-direction:column;background:var(--term-bg);overflow:hidden;min-width:0;min-height:0;padding:2px 6px}
 #terminal{flex:1;min-height:0}

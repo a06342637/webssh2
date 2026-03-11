@@ -492,9 +492,9 @@ function renderScriptBookmarks() {
 
     // Preset entry
     if (!showPresets) {
-        html += '<div class="bm-item preset-entry" onclick="showPresets=true;renderScriptBookmarks()"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">📦 推荐脚本</div><div class="bm-item-host">点击查看常用命令</div></div><span class="bm-item-run" style="color:var(--c1)">›</span></div>';
+        html += '<div class="bm-item preset-entry" onclick="event.stopPropagation();showPresets=true;renderScriptBookmarks()"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">📦 推荐脚本</div><div class="bm-item-host">点击查看常用命令</div></div><span class="bm-item-run" style="color:var(--c1)">›</span></div>';
     } else {
-        html += '<div class="bm-item" onclick="showPresets=false;renderScriptBookmarks()" style="border-color:rgba(0,212,255,.15)"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回</div></div></div>';
+        html += '<div class="bm-item" onclick="event.stopPropagation();showPresets=false;renderScriptBookmarks()" style="border-color:rgba(0,212,255,.15)"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回</div></div></div>';
         html += PRESET_SCRIPTS.map(function (p) {
             return '<div class="bm-item" onclick="runPresetScript(\'' + p.cmd.replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')" title="' + esc(p.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span></div>';
         }).join('');
@@ -851,8 +851,9 @@ document.addEventListener('click', function (e) {
     }
     // Close script bookmark drawer
     var scriptDrawer = document.getElementById('scriptDrawer');
+    var termEdge = document.getElementById('termEdgeBtns');
     if (scriptDrawer && scriptDrawer.classList.contains('open')) {
-        if (!scriptDrawer.contains(e.target) && !e.target.closest('.tb-btn')) {
+        if (!scriptDrawer.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
             scriptDrawer.classList.remove('open');
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
         }
@@ -860,7 +861,7 @@ document.addEventListener('click', function (e) {
     // Close SFTP panel
     var sftpPanel = document.getElementById('sftpPanel');
     if (sftpPanel && sftpPanel.classList.contains('open')) {
-        if (!sftpPanel.contains(e.target) && !e.target.closest('.tb-btn')) {
+        if (!sftpPanel.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
             sftpPanel.classList.remove('open');
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
         }
@@ -895,6 +896,38 @@ function changeZoom(delta) {
     document.body.style.zoom = (nv / 100);
 }
 
+function changeCardScale(delta) {
+    var s = loadSettings();
+    var cur = s.cardScale || 100;
+    var nv = Math.max(50, Math.min(150, cur + delta));
+    s.cardScale = nv;
+    saveSettings(s);
+    document.getElementById('cardScaleLabel').textContent = nv + '%';
+    applyCardScale(nv);
+}
+
+function applyCardScale(val) {
+    var el = document.querySelector('.login-card');
+    if (el) el.style.transform = val === 100 ? '' : 'scale(' + (val / 100) + ')';
+}
+
+function changeEdgeScale(delta) {
+    var s = loadSettings();
+    var cur = s.edgeScale || 100;
+    var nv = Math.max(50, Math.min(150, cur + delta));
+    s.edgeScale = nv;
+    saveSettings(s);
+    document.getElementById('edgeScaleLabel').textContent = nv + '%';
+    applyEdgeScale(nv);
+}
+
+function applyEdgeScale(val) {
+    var ratio = val / 100;
+    document.querySelectorAll('.edge-btns, .term-edge-btns').forEach(function (el) {
+        el.style.transform = 'translateY(-50%) scale(' + ratio + ')';
+    });
+}
+
 function applyBgImage() {
     var url = document.getElementById('bgImageUrl').value.trim();
     var s = loadSettings();
@@ -926,6 +959,8 @@ function renderBgSwatches() {
         sw.addEventListener('click', function () { applyBgColorPreset(this.dataset.color); });
     });
     document.getElementById('zoomLabel').textContent = (s.zoom || 100) + '%';
+    document.getElementById('cardScaleLabel').textContent = (s.cardScale || 100) + '%';
+    document.getElementById('edgeScaleLabel').textContent = (s.edgeScale || 100) + '%';
     document.getElementById('bgImageUrl').value = s.bgImage || '';
     document.getElementById('blurRange').value = s.blur != null ? s.blur : 20;
     document.getElementById('blurLabel').textContent = (s.blur != null ? s.blur : 20) + 'px';
@@ -971,6 +1006,8 @@ function resetAllSettings() {
     setBgImage('');
     document.getElementById('particles').style.display = '';
     document.querySelector('.bg-animation').style.display = '';
+    applyCardScale(100);
+    applyEdgeScale(100);
     renderBgSwatches();
     showToast('已恢复默认', 'success');
 }
@@ -993,6 +1030,8 @@ function initSettings() {
     if (s.blur != null) {
         document.documentElement.style.setProperty('--blur', s.blur + 'px');
     }
+    if (s.cardScale && s.cardScale !== 100) applyCardScale(s.cardScale);
+    if (s.edgeScale && s.edgeScale !== 100) applyEdgeScale(s.edgeScale);
 }
 
 // ==================== Init ====================

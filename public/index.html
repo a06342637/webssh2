@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=16">
+    <link rel="stylesheet" href="/static/css/style.css?v=17">
 </head>
 <body>
     <!-- Custom background image -->
@@ -30,6 +30,22 @@
                         <button class="set-zoom-btn" onclick="changeZoom(-1)">−</button>
                         <span class="set-zoom-label" id="zoomLabel">100%</span>
                         <button class="set-zoom-btn" onclick="changeZoom(1)">+</button>
+                    </div>
+                </div>
+                <div class="set-row">
+                    <label>SSH 登录框</label>
+                    <div class="set-zoom-btns">
+                        <button class="set-zoom-btn" onclick="changeCardScale(-1)">−</button>
+                        <span class="set-zoom-label" id="cardScaleLabel">100%</span>
+                        <button class="set-zoom-btn" onclick="changeCardScale(1)">+</button>
+                    </div>
+                </div>
+                <div class="set-row">
+                    <label>侧边按钮</label>
+                    <div class="set-zoom-btns">
+                        <button class="set-zoom-btn" onclick="changeEdgeScale(-1)">−</button>
+                        <span class="set-zoom-label" id="edgeScaleLabel">100%</span>
+                        <button class="set-zoom-btn" onclick="changeEdgeScale(1)">+</button>
                     </div>
                 </div>
             </div>
@@ -295,8 +311,16 @@
                 <div class="ctx-item" onclick="termClear()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>清屏</div>
             </div>
             <!-- Script Bookmark Drawer -->
+            <!-- Right edge: script + sftp buttons -->
+            <div class="term-edge-btns" id="termEdgeBtns">
+                <button class="edge-btn" onclick="toggleScriptDrawer()" title="脚本书签" style="border-radius:10px 0 0 0">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                </button>
+                <button class="edge-btn" onclick="toggleSftp()" title="SFTP 文件管理" style="border-radius:0 0 0 10px">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+                </button>
+            </div>
             <div class="script-drawer" id="scriptDrawer">
-                <button class="drawer-tab" onclick="toggleScriptDrawer()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
                 <div class="drawer-body glass-card">
                     <div class="drawer-hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg><span>脚本书签</span></div>
                     <div class="drawer-list" id="scriptBookmarkList"></div>
@@ -354,6 +378,6 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=16"></script>
+    <script src="/static/js/app.js?v=17"></script>
 </body>
 </html>
