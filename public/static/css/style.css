@@ -207,7 +207,9 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 @keyframes ti{0%{opacity:0;transform:translateX(60px) scale(.8)}100%{opacity:1;transform:translateX(0) scale(1)}}
 @keyframes to{to{opacity:0;transform:translateX(60px)}}
 
-.global-footer{position:fixed;bottom:6px;left:0;right:0;text-align:center;font-size:10px;color:var(--t3);z-index:5;pointer-events:none;letter-spacing:.5px}
+.global-footer{position:fixed;bottom:8px;left:0;right:0;text-align:center;font-size:13px;color:var(--t3);z-index:5;letter-spacing:.5px}
+.global-footer a{color:var(--t3);text-decoration:none;transition:color var(--tr)}
+.global-footer a:hover{color:var(--c1)}
 ::selection{background:rgba(0,212,255,.3);color:#fff}
 input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none}
 input[type="number"]{-moz-appearance:textfield}
