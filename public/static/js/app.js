@@ -445,13 +445,52 @@ function applyConn(i) {
 
 function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); saveBM(CBK, bms); renderConnBookmarks(); showToast('已删除', 'info'); }
 
-// ==================== Script Bookmarks ====================
+// ==================== Preset Scripts ====================
+var PRESET_SCRIPTS = [
+    { name: '切换到 root', cmd: 'sudo -i' },
+    { name: '重新启动', cmd: 'reboot' },
+    { name: '修改密码', cmd: 'passwd' },
+    { name: '查看系统时间', cmd: 'date && timedatectl 2>/dev/null' },
+    { name: 'Debian 切换阿里云源', cmd: "sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && apt update" },
+    { name: 'Ubuntu 切换阿里云源', cmd: "sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && apt update" },
+    { name: 'Debian 安装常用工具', cmd: 'apt update && apt install -y sudo wget curl' },
+    { name: 'Ubuntu 安装常用工具', cmd: 'apt update && apt install -y sudo wget curl' },
+    { name: '安装 Docker', cmd: 'curl -fsSL https://get.docker.com | sh' }
+];
+var showPresets = false;
+
 function renderScriptBookmarks() {
     var l = document.getElementById('scriptBookmarkList'), bms = loadBM(SBK);
-    if (!bms.length) { l.innerHTML = '<div class="bm-empty">暂无脚本</div>'; return; }
-    l.innerHTML = bms.map(function (b, i) {
-        return '<div class="bm-item" onclick="runScript(' + i + ')" title="' + esc(b.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(b.name) + '</div><div class="bm-item-host">' + esc(b.cmd.substring(0, 40)) + '</div></div><span class="bm-item-run">▶</span><button class="bm-item-del" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
-    }).join('');
+    var html = '';
+
+    // Preset entry
+    if (!showPresets) {
+        html += '<div class="bm-item preset-entry" onclick="showPresets=true;renderScriptBookmarks()"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">📦 推荐脚本</div><div class="bm-item-host">点击查看常用命令</div></div><span class="bm-item-run" style="color:var(--c1)">›</span></div>';
+    } else {
+        html += '<div class="bm-item" onclick="showPresets=false;renderScriptBookmarks()" style="border-color:rgba(0,212,255,.15)"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回</div></div></div>';
+        html += PRESET_SCRIPTS.map(function (p) {
+            return '<div class="bm-item" onclick="runPresetScript(\'' + p.cmd.replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')" title="' + esc(p.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span></div>';
+        }).join('');
+        l.innerHTML = html;
+        return;
+    }
+
+    // User scripts
+    if (bms.length) {
+        html += bms.map(function (b, i) {
+            return '<div class="bm-item" onclick="runScript(' + i + ')" title="' + esc(b.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(b.name) + '</div><div class="bm-item-host">' + esc(b.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span><button class="bm-item-del" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+        }).join('');
+    } else {
+        html += '<div class="bm-empty">暂无自定义脚本</div>';
+    }
+    l.innerHTML = html;
+}
+
+function runPresetScript(cmd) {
+    if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].ws || sessions[activeIdx].ws.readyState !== 1) { showToast('无活动连接', 'error'); return; }
+    sessions[activeIdx].ws.send(cmd + '\n');
+    showToast('已执行', 'success');
+    sessions[activeIdx].term.focus();
 }
 
 function saveScriptBookmark() {
@@ -772,6 +811,17 @@ function initTheme() {
     var saved = localStorage.getItem(THEME_KEY) || 'dark';
     applyTheme(saved);
 }
+
+// ==================== Click outside to close drawers ====================
+document.addEventListener('click', function (e) {
+    var connDrawer = document.getElementById('connDrawer');
+    var edgeBtns = document.getElementById('edgeBtns');
+    if (connDrawer && connDrawer.classList.contains('open')) {
+        if (!connDrawer.contains(e.target) && !edgeBtns.contains(e.target)) {
+            connDrawer.classList.remove('open');
+        }
+    }
+});
 
 // ==================== Init ====================
 initTheme();
