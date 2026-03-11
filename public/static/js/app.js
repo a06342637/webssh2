@@ -449,13 +449,40 @@ function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); saveBM(CBK, bms);
 var PRESET_SCRIPTS = [
     { name: '切换到 root', cmd: 'sudo -i' },
     { name: '重新启动', cmd: 'reboot' },
-    { name: '修改密码', cmd: 'passwd' },
+    { name: '关机', cmd: 'shutdown -h now' },
+    { name: '修改 root 密码', cmd: 'passwd root' },
+    { name: '查看系统信息', cmd: 'uname -a' },
     { name: '查看系统时间', cmd: 'date && timedatectl 2>/dev/null' },
+    { name: '查看磁盘使用', cmd: 'df -h' },
+    { name: '查看内存使用', cmd: 'free -h' },
+    { name: '查看 CPU 信息', cmd: 'lscpu | head -20' },
+    { name: '查看网络接口', cmd: 'ip addr show' },
+    { name: '查看端口监听', cmd: 'ss -tlnp' },
+    { name: '查看进程列表', cmd: 'ps aux --sort=-%mem | head -20' },
+    { name: '查看登录记录', cmd: 'last -20' },
+    { name: '查看系统日志', cmd: 'journalctl -xe --no-pager | tail -50' },
     { name: 'Debian 切换阿里云源', cmd: "sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && apt update" },
     { name: 'Ubuntu 切换阿里云源', cmd: "sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && apt update" },
-    { name: 'Debian 安装常用工具', cmd: 'apt update && apt install -y sudo wget curl' },
-    { name: 'Ubuntu 安装常用工具', cmd: 'apt update && apt install -y sudo wget curl' },
-    { name: '安装 Docker', cmd: 'curl -fsSL https://get.docker.com | sh' }
+    { name: 'CentOS 切换阿里云源', cmd: "sed -i 's|mirror.centos.org|mirrors.aliyun.com|g' /etc/yum.repos.d/CentOS-*.repo && yum makecache" },
+    { name: 'Debian/Ubuntu 安装常用工具', cmd: 'apt update && apt install -y sudo wget curl vim net-tools' },
+    { name: 'CentOS 安装常用工具', cmd: 'yum install -y sudo wget curl vim net-tools' },
+    { name: '安装 Docker', cmd: 'curl -fsSL https://get.docker.com | sh' },
+    { name: '启动 Docker', cmd: 'systemctl enable docker && systemctl start docker' },
+    { name: '查看 Docker 容器', cmd: 'docker ps -a' },
+    { name: '查看 Docker 镜像', cmd: 'docker images' },
+    { name: '安装 Docker Compose', cmd: 'curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose' },
+    { name: '开启 BBR 加速', cmd: 'echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf && echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf && sysctl -p' },
+    { name: '查看 BBR 状态', cmd: 'sysctl net.ipv4.tcp_congestion_control && lsmod | grep bbr' },
+    { name: '防火墙关闭 (Debian)', cmd: 'systemctl stop ufw 2>/dev/null; iptables -F; echo "防火墙已关闭"' },
+    { name: '防火墙关闭 (CentOS)', cmd: 'systemctl stop firewalld && systemctl disable firewalld && echo "防火墙已关闭"' },
+    { name: '修改 SSH 端口', cmd: 'read -p "输入新端口: " p && sed -i "s/^#*Port .*/Port $p/" /etc/ssh/sshd_config && systemctl restart sshd && echo "SSH端口已改为 $p"' },
+    { name: '允许 root SSH 登录', cmd: 'sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config && systemctl restart sshd && echo "已允许root登录"' },
+    { name: '测速 (speedtest)', cmd: 'curl -sL https://raw.githubusercontent.com/sivel/speedtest-cli/master/speedtest.py | python3' },
+    { name: '查看公网 IP', cmd: 'curl -s ip.sb && echo ""' },
+    { name: '清理系统日志', cmd: 'journalctl --vacuum-size=50M && echo "日志已清理"' },
+    { name: '更新系统 (Debian/Ubuntu)', cmd: 'apt update && apt upgrade -y' },
+    { name: '更新系统 (CentOS)', cmd: 'yum update -y' },
+    { name: '查看定时任务', cmd: 'crontab -l 2>/dev/null; echo "---系统级---"; cat /etc/crontab' }
 ];
 var showPresets = false;
 
@@ -861,7 +888,7 @@ function toggleSettings() {
 function changeZoom(delta) {
     var s = loadSettings();
     var cur = s.zoom || 100;
-    var nv = Math.max(50, Math.min(150, cur + delta));
+    var nv = Math.max(50, Math.min(200, cur + delta));
     s.zoom = nv;
     saveSettings(s);
     document.getElementById('zoomLabel').textContent = nv + '%';

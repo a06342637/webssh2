@@ -331,31 +331,29 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
     .card-header{margin-bottom:14px}
     .conn-drawer.open,.script-drawer.open{width:220px}
     .sftp-panel.open{width:100%}
-    .term-topbar{padding:4px 6px;min-height:auto;gap:2px;flex-wrap:nowrap}
+    .term-topbar{padding:3px 6px;height:36px;min-height:36px;max-height:36px;gap:2px;flex-wrap:nowrap;overflow:hidden}
     .topbar-left{gap:4px;flex-shrink:0}
     .topbar-right{gap:1px;flex-shrink:0}
-    .tb-btn{width:26px;height:26px}
-    .tb-btn.sm{width:22px;height:22px}
-    .tb-btn svg{width:12px!important;height:12px!important}
-    .font-size-label{font-size:10px;min-width:12px}
+    .tb-btn{width:24px;height:24px}
+    .tb-btn.sm{width:20px;height:20px}
+    .tb-btn svg{width:11px!important;height:11px!important}
+    .font-size-label{font-size:9px;min-width:12px}
     .topbar-sep{display:none}
-    .tab-bar{max-width:35%;gap:2px}
-    .ssh-tab{font-size:10px;padding:2px 5px}
-    .tab-add-btn{width:22px;height:22px}
-    .tab-add-btn svg{width:10px!important;height:10px!important}
-    .term-dots{gap:4px}
-    .dot{width:8px;height:8px}
-    .topbar-user{font-size:10px;max-width:60px;overflow:hidden;text-overflow:ellipsis}
-    .topbar-metrics{order:99;width:100%;gap:3px 6px;padding:3px 0;flex-wrap:wrap;justify-content:flex-start}
-    .metric-pill{padding:2px 6px;font-size:10px;flex:0 0 auto}
-    .metric-pill svg{width:10px;height:10px}
+    .tab-bar{max-width:30%;gap:2px}
+    .ssh-tab{font-size:9px;padding:2px 5px}
+    .tab-add-btn{width:20px;height:20px}
+    .tab-add-btn svg{width:9px!important;height:9px!important}
+    .term-dots{gap:3px}
+    .dot{width:7px;height:7px}
+    .topbar-user{display:none}
+    .topbar-metrics{display:none}
     .term-body{padding:1px 2px}
-    .toast-container{top:6px;right:6px;left:6px}
-    .toast{max-width:100%;font-size:10px;padding:8px 10px}
-    .edge-btns{transform:translateY(-50%) scale(.8)}
+    .toast-container{top:4px;right:4px;left:4px}
+    .toast{max-width:100%;font-size:10px;padding:6px 8px}
+    .edge-btns{transform:translateY(-50%) scale(.75)}
     .color-panel{width:200px;right:-10px}
     .settings-panel{width:85vw}
-    .script-drawer.open{width:60vw}
+    .script-drawer.open{width:65vw}
     .sftp-panel.open{width:85vw}
 }
 @media(max-width:360px){

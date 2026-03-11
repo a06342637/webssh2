@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=15">
+    <link rel="stylesheet" href="/static/css/style.css?v=16">
 </head>
 <body>
     <!-- Custom background image -->
@@ -27,9 +27,9 @@
                 <div class="set-row">
                     <label>全局缩放</label>
                     <div class="set-zoom-btns">
-                        <button class="set-zoom-btn" onclick="changeZoom(-10)">−</button>
+                        <button class="set-zoom-btn" onclick="changeZoom(-1)">−</button>
                         <span class="set-zoom-label" id="zoomLabel">100%</span>
-                        <button class="set-zoom-btn" onclick="changeZoom(10)">+</button>
+                        <button class="set-zoom-btn" onclick="changeZoom(1)">+</button>
                     </div>
                 </div>
             </div>
@@ -354,6 +354,6 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=15"></script>
+    <script src="/static/js/app.js?v=16"></script>
 </body>
 </html>
