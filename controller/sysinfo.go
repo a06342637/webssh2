@@ -49,7 +49,7 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`echo "===LOAD==="`,
 		`cat /proc/loadavg 2>/dev/null | awk '{print $1" "$2" "$3}' || uptime | sed 's/.*load average[s]*: //' | tr ',' ' ' | awk '{print $1" "$2" "$3}'`,
 		`echo "===UPTIME==="`,
-		`uptime -p 2>/dev/null || uptime | sed 's/.*up //' | sed 's/,.*//g'`,
+		`cat /proc/uptime 2>/dev/null | awk '{print int($1)}' || echo "0"`,
 		`echo "===CPU_USAGE==="`,
 		`cat /proc/stat 2>/dev/null | awk '/^cpu /{a=$2+$3+$4; t=$2+$3+$4+$5+$6+$7+$8; print a" "t}'; sleep 0.5; cat /proc/stat 2>/dev/null | awk '/^cpu /{a=$2+$3+$4; t=$2+$3+$4+$5+$6+$7+$8; print a" "t}'`,
 		`echo "===TRAFFIC==="`,

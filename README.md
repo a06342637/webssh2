@@ -96,7 +96,12 @@ git pull && docker compose up -d --build
 
 #### 启用 Web 页面登录验证
 
-编辑 `docker-compose.yml`，取消 `authInfo` 那行的注释并设置账号密码：
+> **什么是 Web 登录验证？**
+> 这是一道浏览器级别的门禁。启用后，访问 WebSSH 页面时浏览器会先弹出一个账号密码对话框，输入正确才能看到 SSH 登录界面。
+> 适用于把 WebSSH 暴露在公网时，防止陌生人直接访问你的 SSH 工具页面。
+> **注意**：这和 SSH 本身的账号密码是两回事，是两层独立的验证。
+
+通过 `setup.sh` 部署时向导会直接询问是否启用。也可以手动编辑 `docker-compose.yml`，取消 `authInfo` 那行的注释并设置账号密码：
 
 ```yaml
 environment:
