@@ -328,11 +328,16 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 .tab-add-btn{width:32px;height:32px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px dashed var(--brd);border-radius:var(--rx);color:var(--t3);cursor:pointer;transition:all var(--tr);flex-shrink:0}
 .tab-add-btn:hover{border-color:var(--c1);color:var(--c1);background:rgba(0,212,255,.05)}
 
-/* Terminal containers per tab – normal flex children, never overflow */
-.term-instance{display:none;flex-direction:column;flex:1;min-height:0;padding:12px 16px;overflow:hidden}
+/* Terminal containers per tab – normal flex children, never overflow.
+   NO padding on .term-instance: FitAddon reads parentElement computed height
+   (content-box only) — padding here would be ignored by FitAddon but still
+   consume real pixels, causing row overflow.
+   Padding goes on .xterm instead: FitAddon explicitly reads and subtracts
+   xterm.paddingTop + xterm.paddingBottom from the available height. */
+.term-instance{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .term-instance.active{display:flex}
-.term-instance .xterm{flex:1;min-height:0;overflow:hidden}
-.term-instance .xterm-screen{max-height:100%}
+.term-instance .xterm{flex:1;min-height:0;overflow:hidden;padding:10px 14px !important}
+.term-instance .xterm-screen{overflow:hidden}
 
 /* ==================== MODAL ==================== */
 .modal-overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px)}
