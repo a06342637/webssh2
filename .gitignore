@@ -6,3 +6,4 @@ webssh
 .vscode/
 .DS_Store
 tmp/
+data/

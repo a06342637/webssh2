@@ -411,17 +411,22 @@
             </div>
             <div class="script-drawer" id="scriptDrawer">
                 <div class="drawer-body glass-card">
-                    <div class="drawer-hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg><span>脚本书签</span></div>
+                    <div class="drawer-hd script-hd">
+                        <span class="script-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>脚本书签</span>
+                        <button class="script-account-btn" id="scriptAccountBtn" type="button" onclick="openAuthModal()">登录/注册</button>
+                    </div>
+                    <div class="script-toolbar">
+                        <button class="script-tool-btn" type="button" onclick="exportScriptBookmarks()">导出脚本</button>
+                        <button class="script-tool-btn" type="button" onclick="triggerScriptImport()">导入脚本</button>
+                        <button class="script-tool-btn primary" type="button" onclick="syncScriptBookmarks('auto')">同步书签</button>
+                    </div>
+                    <div class="script-cloud-status" id="scriptCloudStatus">未登录：脚本书签只保存在当前浏览器</div>
+                    <input type="file" id="scriptImportFile" accept="application/json,.json" style="display:none" onchange="importScriptBookmarks(this)">
                     <div class="drawer-list" id="scriptBookmarkList"></div>
                     <div class="script-form" id="scriptForm">
                         <input type="text" id="scriptName" placeholder="脚本名称" class="script-input">
                         <textarea id="scriptContent" placeholder="输入命令..." rows="3" class="script-textarea"></textarea>
                         <button class="drawer-add" onclick="saveScriptBookmark()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>保存脚本</button>
-                        <div class="script-backup-actions">
-                            <button class="drawer-add script-backup-btn" type="button" onclick="exportScriptBookmarks()">导出脚本</button>
-                            <button class="drawer-add script-backup-btn" type="button" onclick="triggerScriptImport()">导入脚本</button>
-                        </div>
-                        <input type="file" id="scriptImportFile" accept="application/json,.json" style="display:none" onchange="importScriptBookmarks(this)">
                     </div>
                 </div>
             </div>
@@ -467,12 +472,55 @@
         </div>
     </div>
 
+    <!-- Account Dialog -->
+    <div class="modal-overlay" id="authModal">
+        <div class="glass-card modal-card auth-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>账号同步</span>
+                <button class="settings-close" type="button" onclick="hideAuthModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body auth-body">
+                <div id="authLoggedOut">
+                    <div class="auth-tabs auth-mode-tabs">
+                        <button type="button" class="auth-tab active" id="authLoginTab" onclick="switchAuthMode('login')">登录</button>
+                        <button type="button" class="auth-tab" id="authRegisterTab" onclick="switchAuthMode('register')">注册</button>
+                    </div>
+                    <div class="input-field">
+                        <label>用户名</label>
+                        <input type="text" id="authUsername" class="script-input" placeholder="6-32 位字母或数字" autocomplete="username">
+                    </div>
+                    <div class="input-field">
+                        <label>密码</label>
+                        <input type="password" id="authPassword" class="script-input" placeholder="至少 6 位" autocomplete="current-password">
+                    </div>
+                    <div class="auth-hint" id="authHint">登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。</div>
+                    <button class="drawer-add auth-submit-btn" type="button" onclick="submitAuthForm()">登录</button>
+                </div>
+                <div id="authLoggedIn" style="display:none">
+                    <div class="auth-user-card">
+                        <div class="auth-user-avatar">☁</div>
+                        <div>
+                            <div class="auth-user-name" id="authUserName">-</div>
+                            <div class="auth-hint">已登录：脚本书签可以在不同浏览器之间同步。</div>
+                        </div>
+                    </div>
+                    <div class="auth-sync-actions">
+                        <button class="script-tool-btn primary" type="button" onclick="syncScriptBookmarks('auto')">智能同步</button>
+                        <button class="script-tool-btn" type="button" onclick="syncScriptBookmarks('push')">本地上传</button>
+                        <button class="script-tool-btn" type="button" onclick="syncScriptBookmarks('pull')">云端拉取</button>
+                    </div>
+                    <button class="drawer-add auth-submit-btn danger-inline" type="button" onclick="logoutAccount()">退出登录</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="toastContainer" class="toast-container"></div>
     <div class="global-footer">© 2026 <a href="https://t.me/ok_gy" target="_blank" rel="noopener">棍之勇者</a>. <a href="https://github.com/a06342637/webssh2" target="_blank" rel="noopener">All Rights Reserved</a></div>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=35"></script>
+    <script src="/static/js/app.js?v=36"></script>
 </body>
 </html>

@@ -95,6 +95,12 @@ document.getElementById('loginForm').addEventListener('submit', function (e) {
 });
 
 document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+        var authModal = document.getElementById('authModal');
+        if (authModal && authModal.classList.contains('show')) { hideAuthModal(); return; }
+        var addTabModal = document.getElementById('addTabModal');
+        if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
+    }
     if (e.key === 'Escape' && document.getElementById('terminalView').classList.contains('active')) {
         closeActiveTab();
     }
@@ -432,9 +438,25 @@ function toggleSftp() {
 // ==================== Connection Bookmarks ====================
 var CBK = 'webssh_conn_bm';
 var SBK = 'webssh_script_bm';
+var SBK_UPDATED = 'webssh_script_bm_updated_at';
+var currentAccount = null;
+var authMode = 'login';
+var accountAutoSynced = false;
 
 function loadBM(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch (e) { return []; } }
-function saveBM(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+function getScriptUpdatedAt() { return parseInt(localStorage.getItem(SBK_UPDATED)) || 0; }
+function setScriptUpdatedAt(ts) { localStorage.setItem(SBK_UPDATED, parseInt(ts) || Date.now()); }
+function saveScriptBookmarksData(v, ts) {
+    localStorage.setItem(SBK, JSON.stringify(v || []));
+    setScriptUpdatedAt(ts || Date.now());
+}
+function saveBM(k, v) {
+    localStorage.setItem(k, JSON.stringify(v));
+    if (k === SBK) setScriptUpdatedAt(Date.now());
+}
+function ensureScriptBookmarkClock() {
+    if (loadBM(SBK).length && !getScriptUpdatedAt()) setScriptUpdatedAt(Date.now());
+}
 
 function exportScriptBookmarks() {
     var scripts = loadBM(SBK);
@@ -445,6 +467,7 @@ function exportScriptBookmarks() {
         version: 1,
         exportedAt: new Date().toISOString(),
         origin: location.origin,
+        updatedAt: getScriptUpdatedAt(),
         scripts: scripts
     };
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -457,7 +480,7 @@ function exportScriptBookmarks() {
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    showToast('已导出 ' + scripts.length + ' 个脚本', 'success');
+    showToast('导出成功：已下载 ' + scripts.length + ' 个脚本', 'success');
 }
 
 function triggerScriptImport() {
@@ -515,9 +538,12 @@ function importScriptBookmarks(input) {
                 seen[key] = true;
                 added++;
             });
-            saveBM(SBK, current);
-            showPresets = false;
-            renderScriptBookmarks();
+            if (added) {
+                saveBM(SBK, current);
+                showPresets = false;
+                renderScriptBookmarks();
+                syncLocalScriptsIfLogged();
+            }
             showToast(added ? ('已导入 ' + added + ' 个脚本') : ('没有新增脚本，跳过 ' + skipped + ' 个重复项'), added ? 'success' : 'info');
         } catch (e) {
             showToast('导入失败：JSON 文件无效', 'error');
@@ -530,6 +556,166 @@ function importScriptBookmarks(input) {
         showToast('导入失败：无法读取文件', 'error');
     };
     reader.readAsText(file, 'utf-8');
+}
+
+function setCloudStatus(text, cls) {
+    var el = document.getElementById('scriptCloudStatus');
+    if (!el) return;
+    el.className = 'script-cloud-status' + (cls ? ' ' + cls : '');
+    el.textContent = text;
+}
+
+function updateAccountUI() {
+    var btn = document.getElementById('scriptAccountBtn');
+    if (btn) {
+        if (currentAccount && currentAccount.username) {
+            btn.textContent = '☁ ' + currentAccount.username;
+            btn.classList.add('logged-in');
+        } else {
+            btn.textContent = '登录/注册';
+            btn.classList.remove('logged-in');
+        }
+    }
+    var loggedIn = document.getElementById('authLoggedIn');
+    var loggedOut = document.getElementById('authLoggedOut');
+    var name = document.getElementById('authUserName');
+    if (currentAccount && currentAccount.username) {
+        if (loggedIn) loggedIn.style.display = '';
+        if (loggedOut) loggedOut.style.display = 'none';
+        if (name) name.textContent = currentAccount.username;
+        setCloudStatus('已登录：可同步云端脚本书签', 'synced');
+    } else {
+        if (loggedIn) loggedIn.style.display = 'none';
+        if (loggedOut) loggedOut.style.display = '';
+        setCloudStatus('未登录：脚本书签只保存在当前浏览器', '');
+    }
+}
+
+function apiJSON(url, options) {
+    options = options || {};
+    options.credentials = 'same-origin';
+    options.headers = options.headers || {};
+    if (options.body && typeof options.body !== 'string') {
+        options.headers['Content-Type'] = 'application/json';
+        options.body = JSON.stringify(options.body);
+    }
+    return fetch(url, options).then(function (r) {
+        return r.text().then(function (txt) {
+            var data = {};
+            try { data = txt ? JSON.parse(txt) : {}; } catch (e) { data = { ok: false, msg: txt || '请求失败' }; }
+            if (!r.ok || data.ok === false) throw data;
+            return data;
+        });
+    });
+}
+
+function openAuthModal(mode) {
+    if (mode) switchAuthMode(mode);
+    updateAccountUI();
+    document.getElementById('authModal').classList.add('show');
+    setTimeout(function () {
+        var u = document.getElementById('authUsername');
+        if (u && (!currentAccount || !currentAccount.username)) u.focus();
+    }, 60);
+}
+
+function hideAuthModal() {
+    document.getElementById('authModal').classList.remove('show');
+}
+
+function switchAuthMode(mode) {
+    authMode = mode === 'register' ? 'register' : 'login';
+    var loginTab = document.getElementById('authLoginTab');
+    var registerTab = document.getElementById('authRegisterTab');
+    var submit = document.querySelector('.auth-submit-btn');
+    var hint = document.getElementById('authHint');
+    if (loginTab) loginTab.classList.toggle('active', authMode === 'login');
+    if (registerTab) registerTab.classList.toggle('active', authMode === 'register');
+    if (submit) submit.textContent = authMode === 'register' ? '注册并登录' : '登录';
+    if (hint) hint.textContent = authMode === 'register' ? '用户名只能用字母或数字，用户名和密码都至少 6 位。' : '登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。';
+}
+
+function submitAuthForm() {
+    var username = document.getElementById('authUsername').value.trim();
+    var password = document.getElementById('authPassword').value.trim();
+    if (!/^[A-Za-z0-9]{6,32}$/.test(username)) { showToast('用户名只能使用 6-32 位字母或数字', 'error'); return; }
+    if (password.length < 6) { showToast('密码必须至少 6 位', 'error'); return; }
+    var path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+    apiJSON(path, { method: 'POST', body: { username: username, password: password } })
+        .then(function (res) {
+            currentAccount = { username: res.data && res.data.username ? res.data.username : username.toLowerCase() };
+            accountAutoSynced = false;
+            updateAccountUI();
+            hideAuthModal();
+            showToast((authMode === 'register' ? '注册成功' : '登录成功') + '，正在同步书签...', 'success');
+            syncScriptBookmarks('auto');
+        })
+        .catch(function (err) { showToast(err.msg || '登录失败', 'error'); });
+}
+
+function logoutAccount() {
+    apiJSON('/api/auth/logout', { method: 'POST' })
+        .then(function () {
+            currentAccount = null;
+            accountAutoSynced = false;
+            updateAccountUI();
+            hideAuthModal();
+            showToast('已退出登录，本地书签仍保留在浏览器', 'info');
+        })
+        .catch(function (err) { showToast(err.msg || '退出失败', 'error'); });
+}
+
+function refreshAccountState() {
+    apiJSON('/api/auth/me')
+        .then(function (res) {
+            var d = res.data || {};
+            currentAccount = d.loggedIn ? { username: d.username } : null;
+            updateAccountUI();
+            if (currentAccount && !accountAutoSynced) {
+                accountAutoSynced = true;
+                syncScriptBookmarks('auto', true);
+            }
+        })
+        .catch(function () {
+            currentAccount = null;
+            updateAccountUI();
+        });
+}
+
+function normalizeCloudScripts(items) {
+    return normalizeImportedScripts(Array.isArray(items) ? items : []);
+}
+
+function syncScriptBookmarks(mode, silent) {
+    mode = mode || 'auto';
+    if (!currentAccount || !currentAccount.username) {
+        openAuthModal('login');
+        showToast('请先登录账号再同步云端书签', 'info');
+        return;
+    }
+    var payload = { mode: mode, scripts: loadBM(SBK), updatedAt: getScriptUpdatedAt() };
+    apiJSON('/api/scripts/sync', { method: 'POST', body: payload })
+        .then(function (res) {
+            var d = res.data || {};
+            var scripts = normalizeCloudScripts(d.scripts);
+            saveScriptBookmarksData(scripts, d.updatedAt || Date.now());
+            renderScriptBookmarks();
+            updateAccountUI();
+            var msg = '书签已是最新';
+            if (d.mode === 'push') msg = '本地书签已同步到云端';
+            else if (d.mode === 'pull') msg = '云端书签已同步到本地';
+            setCloudStatus(msg + ' · ' + scripts.length + ' 个脚本', 'synced');
+            if (!silent) showToast(msg + '（' + scripts.length + ' 个）', 'success');
+        })
+        .catch(function (err) {
+            setCloudStatus('同步失败：' + (err.msg || '请稍后重试'), 'warn');
+            if (!silent) showToast(err.msg || '同步失败', 'error');
+        });
+}
+
+function syncLocalScriptsIfLogged() {
+    if (!currentAccount || !currentAccount.username) return;
+    setTimeout(function () { syncScriptBookmarks('push', true); }, 80);
 }
 
 function renderConnBookmarks() {
@@ -643,7 +829,7 @@ function saveScriptBookmark() {
     if (!n || !c) { showToast('名称和命令不能为空', 'error'); return; }
     var bms = loadBM(SBK); bms.push({ name: n, cmd: c }); saveBM(SBK, bms);
     document.getElementById('scriptName').value = ''; document.getElementById('scriptContent').value = '';
-    renderScriptBookmarks(); showToast('脚本已保存', 'success');
+    renderScriptBookmarks(); syncLocalScriptsIfLogged(); showToast('脚本已保存', 'success');
 }
 
 function runScript(i) {
@@ -654,7 +840,7 @@ function runScript(i) {
     sessions[activeIdx].term.focus();
 }
 
-function delScript(i) { var bms = loadBM(SBK); bms.splice(i, 1); saveBM(SBK, bms); renderScriptBookmarks(); showToast('已删除', 'info'); }
+function delScript(i) { var bms = loadBM(SBK); bms.splice(i, 1); saveBM(SBK, bms); renderScriptBookmarks(); syncLocalScriptsIfLogged(); showToast('已删除', 'info'); }
 
 // ==================== SFTP ====================
 function sftpLoad(path) {
@@ -1018,7 +1204,7 @@ document.addEventListener('click', function (e) {
     // Close SFTP panel
     var sftpPanel = document.getElementById('sftpPanel');
     if (sftpPanel && sftpPanel.classList.contains('open')) {
-        if (!sftpPanel.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
+        if (!sftpPanel.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && e.target.closest('.term-body')) {
             sftpPanel.classList.remove('open');
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
         }
@@ -1414,9 +1600,26 @@ function tryAutoLogin() {
 initTheme();
 initSettings();
 initSysInterval();
+ensureScriptBookmarkClock();
 renderConnBookmarks();
+renderScriptBookmarks();
+updateAccountUI();
+refreshAccountState();
 loadProxyConfig();
 tryAutoLogin();
+
+var authModalEl = document.getElementById('authModal');
+if (authModalEl) {
+    authModalEl.addEventListener('click', function (e) {
+        if (e.target === authModalEl) hideAuthModal();
+    });
+}
+['authUsername', 'authPassword'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') submitAuthForm();
+    });
+});
 
 // Fetch server config (footer visibility etc.), then dismiss splash
 (function () {

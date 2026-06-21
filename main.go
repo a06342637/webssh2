@@ -87,9 +87,24 @@ func main() {
 	server.SetTrustedProxies(nil)
 	server.Use(gzip.Gzip(gzip.DefaultCompression))
 
+	if err := controller.InitAccountStore(""); err != nil {
+		fmt.Println("账号数据库初始化失败:", err)
+		os.Exit(1)
+	}
+
 	server.GET("/config", func(c *gin.Context) {
 		c.JSON(200, gin.H{"showFooter": showFooter})
 	})
+
+	api := server.Group("/api")
+	{
+		api.GET("/auth/me", controller.AuthMe)
+		api.POST("/auth/register", controller.AuthRegister)
+		api.POST("/auth/login", controller.AuthLogin)
+		api.POST("/auth/logout", controller.AuthLogout)
+		api.GET("/scripts", controller.GetScriptBookmarks)
+		api.POST("/scripts/sync", controller.SyncScriptBookmarks)
+	}
 
 	server.GET("/term", func(c *gin.Context) {
 		controller.TermWs(c, time.Duration(timeout)*time.Minute)
