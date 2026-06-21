@@ -26,7 +26,7 @@ var (
 	timeout    int
 	savePass   bool
 	showFooter bool
-	version    = "1.0.0"
+	version    = controller.AppVersion
 	username   string
 	password   string
 )

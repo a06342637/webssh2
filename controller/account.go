@@ -28,6 +28,7 @@ const (
 var (
 	accountStore *AccountStore
 	usernameRule = regexp.MustCompile(`^[A-Za-z0-9]{5,32}$`)
+	versionRule  = regexp.MustCompile(`^\d+(?:\.\d+){1,3}$`)
 )
 
 type StoredUser struct {
@@ -694,6 +695,51 @@ func validHostProjectDir(dir string) bool {
 	return dir != "" && dir != "." && filepath.IsAbs(dir)
 }
 
+func cleanAppVersion(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if idx := strings.IndexAny(value, "\r\n"); idx >= 0 {
+		value = strings.TrimSpace(value[:idx])
+	}
+	if versionRule.MatchString(value) {
+		return value
+	}
+	fallback = strings.TrimSpace(fallback)
+	if versionRule.MatchString(fallback) {
+		return fallback
+	}
+	return "0.0.0"
+}
+
+func localAppVersion(dir string) string {
+	if dir != "" {
+		if data, err := os.ReadFile(filepath.Join(dir, "VERSION")); err == nil {
+			return cleanAppVersion(string(data), AppVersion)
+		}
+	}
+	return cleanAppVersion(AppVersion, "0.0.0")
+}
+
+func gitRefAppVersion(ctx context.Context, dir, ref, fallback string) string {
+	out, err := gitOutput(ctx, dir, "show", ref+":VERSION")
+	if err != nil {
+		return fallback
+	}
+	return cleanAppVersion(out, fallback)
+}
+
+func versionDisplayInfo(currentVersion, latestVersion string) gin.H {
+	currentVersion = cleanAppVersion(currentVersion, AppVersion)
+	latestVersion = cleanAppVersion(latestVersion, currentVersion)
+	return gin.H{
+		"current":        currentVersion,
+		"currentShort":   currentVersion,
+		"currentVersion": currentVersion,
+		"latest":         latestVersion,
+		"latestShort":    latestVersion,
+		"latestVersion":  latestVersion,
+	}
+}
+
 func selfUpdateEnabled() bool {
 	value := strings.TrimSpace(os.Getenv("WEBSSH_ENABLE_SELF_UPDATE"))
 	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
@@ -779,35 +825,36 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 
 func readVersionInfo() (gin.H, error) {
 	dir := sourceDir()
+	currentVersion := localAppVersion(dir)
 	if !selfUpdateEnabled() {
-		return gin.H{
-			"available": false,
-			"sourceDir": dir,
-			"msg":       "当前部署未启用页面更新。Docker Compose 可开启 WEBSSH_ENABLE_SELF_UPDATE=true；Render/Railway 请使用平台重新部署。",
-		}, nil
+		info := versionDisplayInfo(currentVersion, currentVersion)
+		info["available"] = false
+		info["sourceDir"] = dir
+		info["msg"] = "当前部署未启用页面更新。Docker Compose 可开启 WEBSSH_ENABLE_SELF_UPDATE=true；Render/Railway 请使用平台重新部署。"
+		return info, nil
 	}
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		return gin.H{
-			"available": false,
-			"sourceDir": dir,
-			"msg":       "源代码目录未挂载，无法在线更新",
-		}, nil
+		info := versionDisplayInfo(currentVersion, currentVersion)
+		info["available"] = false
+		info["sourceDir"] = dir
+		info["msg"] = "源代码目录未挂载，无法在线更新"
+		return info, nil
 	}
 	if !validHostProjectDir(hostProjectDir()) {
-		return gin.H{
-			"available": false,
-			"sourceDir": dir,
-			"msg":       "WEBSSH_HOST_PROJECT_DIR 未设置为宿主机绝对路径，无法安全执行页面更新。请使用 setup.sh 部署，或在 .env 中设置宿主机源码目录。",
-		}, nil
+		info := versionDisplayInfo(currentVersion, currentVersion)
+		info["available"] = false
+		info["sourceDir"] = dir
+		info["msg"] = "WEBSSH_HOST_PROJECT_DIR 未设置为宿主机绝对路径，无法安全执行页面更新。请使用 setup.sh 部署，或在 .env 中设置宿主机源码目录。"
+		return info, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	current, err := gitOutput(ctx, dir, "rev-parse", "HEAD")
+	currentCommit, err := gitOutput(ctx, dir, "rev-parse", "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("读取当前版本失败: %s", current)
+		return nil, fmt.Errorf("读取当前版本失败: %s", currentCommit)
 	}
-	currentShort, _ := gitOutput(ctx, dir, "rev-parse", "--short", "HEAD")
+	currentCommitShort, _ := gitOutput(ctx, dir, "rev-parse", "--short", "HEAD")
 	branch, _ := gitOutput(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	remoteURL, _ := gitOutput(ctx, dir, "remote", "get-url", "origin")
 	latestLine, err := gitOutput(ctx, dir, "ls-remote", "origin", "HEAD")
@@ -815,26 +862,32 @@ func readVersionInfo() (gin.H, error) {
 		return nil, fmt.Errorf("检测远端版本失败: %s", latestLine)
 	}
 	latestFields := strings.Fields(latestLine)
-	latest := ""
+	latestCommit := ""
 	if len(latestFields) > 0 {
-		latest = latestFields[0]
+		latestCommit = latestFields[0]
 	}
-	latestShort := latest
-	if len(latestShort) > 12 {
-		latestShort = latestShort[:12]
+	latestCommitShort := latestCommit
+	if len(latestCommitShort) > 12 {
+		latestCommitShort = latestCommitShort[:12]
 	}
-	return gin.H{
-		"available":    true,
-		"sourceDir":    dir,
-		"hostDir":      hostProjectDir(),
-		"branch":       branch,
-		"remote":       remoteURL,
-		"current":      current,
-		"currentShort": currentShort,
-		"latest":       latest,
-		"latestShort":  latestShort,
-		"hasUpdate":    latest != "" && latest != current,
-	}, nil
+	latestVersion := currentVersion
+	if latestCommit != "" && latestCommit != currentCommit {
+		if _, err := gitOutput(ctx, dir, "fetch", "--depth=1", "origin", "HEAD"); err == nil {
+			latestVersion = gitRefAppVersion(ctx, dir, "FETCH_HEAD", currentVersion)
+		}
+	}
+	info := versionDisplayInfo(currentVersion, latestVersion)
+	info["available"] = true
+	info["sourceDir"] = dir
+	info["hostDir"] = hostProjectDir()
+	info["branch"] = branch
+	info["remote"] = remoteURL
+	info["currentCommit"] = currentCommit
+	info["currentCommitShort"] = currentCommitShort
+	info["latestCommit"] = latestCommit
+	info["latestCommitShort"] = latestCommitShort
+	info["hasUpdate"] = latestCommit != "" && latestCommit != currentCommit
+	return info, nil
 }
 
 func AdminVersion(c *gin.Context) {

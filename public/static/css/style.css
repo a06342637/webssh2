@@ -111,6 +111,8 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 .drawer-body{width:270px;flex-shrink:0;display:flex;flex-direction:column;border-radius:0;border-top:none;border-right:none;border-bottom:none;overflow:hidden;height:100%}
 .drawer-hd{display:flex;align-items:center;gap:8px;padding:14px 16px;font-size:14px;font-weight:600;color:var(--t1);border-bottom:1px solid var(--brd);flex-shrink:0}
 .drawer-hd svg{color:var(--c1)}
+.conn-security-note{margin:10px 10px 4px;padding:9px 10px;border:1px solid rgba(255,190,11,.16);border-radius:var(--rx);background:rgba(255,190,11,.06);color:var(--t2);font-size:11px;line-height:1.55;flex-shrink:0}
+.conn-security-note::before{content:'安全提示';display:block;margin-bottom:3px;color:var(--warn);font-size:10px;font-weight:700;letter-spacing:.5px}
 .script-drawer .drawer-body{width:320px}
 .script-hd{justify-content:space-between;padding:13px 14px 11px;background:rgba(0,0,0,.08)}
 .script-title{display:flex;align-items:center;gap:8px;min-width:0}
@@ -122,7 +124,8 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 .script-tool-btn:hover{border-color:var(--c1);color:var(--c1);background:rgba(0,212,255,.08)}
 .script-tool-btn.primary{border-color:rgba(0,212,255,.28);color:var(--c1);background:rgba(0,212,255,.08)}
 .script-tool-btn.primary:hover{background:rgba(0,212,255,.16);box-shadow:0 0 12px rgba(0,212,255,.12)}
-.script-cloud-status{padding:0 12px 10px;color:var(--t3);font-size:10px;line-height:1.45;border-bottom:1px solid var(--brd);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
+.script-cloud-status{display:none;padding:0 12px 10px;color:var(--t3);font-size:10px;line-height:1.45;border-bottom:1px solid var(--brd);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
+.script-cloud-status.show{display:block}
 .script-cloud-status.synced{color:var(--ok)}
 .script-cloud-status.warn{color:var(--warn)}
 .drawer-list{flex:1;overflow-y:auto;padding:6px;display:flex;flex-direction:column;gap:4px}
@@ -136,9 +139,13 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 .bm-item-info{flex:1;min-width:0}
 .bm-item-name{font-size:13px;font-weight:500;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bm-item-host{font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bm-item-del{width:18px;height:18px;flex-shrink:0;border:none;background:transparent;color:var(--t3);border-radius:3px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all var(--tr);opacity:0}
-.bm-item:hover .bm-item-del{opacity:1}
-.bm-item-del:hover{background:rgba(255,0,110,.15);color:var(--err)}
+.bm-item-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.bm-item-icon-btn,.bm-item-del{width:20px;height:20px;flex-shrink:0;border:none;background:transparent;color:var(--t3);border-radius:4px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all var(--tr)}
+.bm-item-edit{opacity:.72}
+.bm-item-del{opacity:0}
+.bm-item:hover .bm-item-del{opacity:.72}
+.bm-item-edit:hover{background:rgba(0,212,255,.12);color:var(--c1);opacity:1}
+.bm-item-del:hover{background:rgba(255,0,110,.15);color:var(--err);opacity:1}
 .bm-empty{text-align:center;padding:18px 8px;color:var(--t3);font-size:11px;line-height:1.6}
 
 /* Script form */
@@ -371,6 +378,11 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 .modal-overlay.show{display:flex}
 .modal-card{width:360px;max-width:90vw;padding:0;overflow:hidden}
 .modal-body{padding:14px;display:flex;flex-direction:column;gap:10px}
+.script-edit-card{width:440px;max-width:min(92vw,440px)}
+.script-edit-body .script-input{font-size:13px;padding:9px 10px}
+.script-edit-body .script-textarea{min-height:132px;font-size:12px;line-height:1.55}
+.edit-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:2px}
+.edit-actions .drawer-add{margin:0;border-style:solid;padding:10px}
 .auth-card{width:400px;max-width:min(92vw,400px)}
 .auth-hd{justify-content:space-between;padding:14px 16px}
 .auth-body{gap:10px;padding:14px}

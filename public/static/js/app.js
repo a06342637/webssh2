@@ -98,6 +98,8 @@ document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
         var authModal = document.getElementById('authModal');
         if (authModal && authModal.classList.contains('show')) { hideAuthModal(); return; }
+        var editScriptModal = document.getElementById('editScriptModal');
+        if (editScriptModal && editScriptModal.classList.contains('show')) { hideEditScriptModal(); return; }
         var addTabModal = document.getElementById('addTabModal');
         if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
     }
@@ -555,11 +557,30 @@ function importScriptBookmarks(input) {
     reader.readAsText(file, 'utf-8');
 }
 
-function setCloudStatus(text, cls) {
+var _cloudStatusTimer = null;
+function hideCloudStatus() {
     var el = document.getElementById('scriptCloudStatus');
     if (!el) return;
-    el.className = 'script-cloud-status' + (cls ? ' ' + cls : '');
+    if (_cloudStatusTimer) {
+        clearTimeout(_cloudStatusTimer);
+        _cloudStatusTimer = null;
+    }
+    el.className = 'script-cloud-status';
+    el.textContent = '';
+}
+
+function setCloudStatus(text, cls, autoHideMs) {
+    var el = document.getElementById('scriptCloudStatus');
+    if (!el) return;
+    if (_cloudStatusTimer) {
+        clearTimeout(_cloudStatusTimer);
+        _cloudStatusTimer = null;
+    }
+    el.className = 'script-cloud-status show' + (cls ? ' ' + cls : '');
     el.textContent = text;
+    if (autoHideMs) {
+        _cloudStatusTimer = setTimeout(hideCloudStatus, autoHideMs);
+    }
 }
 
 function updateAccountUI() {
@@ -580,11 +601,11 @@ function updateAccountUI() {
         if (loggedIn) loggedIn.style.display = '';
         if (loggedOut) loggedOut.style.display = 'none';
         if (name) name.textContent = currentAccount.username + (currentAccount.isAdmin ? '（管理员）' : '');
-        setCloudStatus('已登录：可同步云端脚本书签', 'synced');
+        hideCloudStatus();
     } else {
         if (loggedIn) loggedIn.style.display = 'none';
         if (loggedOut) loggedOut.style.display = '';
-        setCloudStatus('未登录：脚本书签只保存在当前浏览器', '');
+        hideCloudStatus();
     }
 }
 
@@ -725,6 +746,7 @@ function syncScriptBookmarks(mode, silent) {
         showToast('请先登录账号再同步云端书签', 'info');
         return;
     }
+    if (!silent) setCloudStatus('正在同步书签...', '');
     var payload = { mode: mode, scripts: loadBM(SBK), updatedAt: getScriptUpdatedAt() };
     apiJSON('/api/scripts/sync', { method: 'POST', body: payload })
         .then(function (res) {
@@ -736,11 +758,11 @@ function syncScriptBookmarks(mode, silent) {
             var msg = '书签已是最新';
             if (d.mode === 'push') msg = '本地书签已同步到云端';
             else if (d.mode === 'pull') msg = '云端书签已同步到本地';
-            setCloudStatus(msg + ' · ' + scripts.length + ' 个脚本', 'synced');
+            if (!silent) setCloudStatus(msg + ' · ' + scripts.length + ' 个脚本', 'synced', 3500);
             if (!silent) showToast(msg + '（' + scripts.length + ' 个）', 'success');
         })
         .catch(function (err) {
-            setCloudStatus('同步失败：' + (err.msg || '请稍后重试'), 'warn');
+            if (!silent) setCloudStatus('同步失败：' + (err.msg || '请稍后重试'), 'warn', 5000);
             if (!silent) showToast(err.msg || '同步失败', 'error');
         });
 }
@@ -761,8 +783,14 @@ function setVersionLabels(data) {
     data = data || {};
     var cur = document.getElementById('currentVersionLabel');
     var remote = document.getElementById('remoteVersionLabel');
-    if (cur) cur.textContent = data.currentShort || data.current || '未知';
-    if (remote) remote.textContent = data.latestShort || data.latest || '未知';
+    function clean(v, fallback) {
+        v = (v == null ? '' : String(v)).trim();
+        return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
+    }
+    var current = clean(data.currentVersion || data.current, '0.5.2');
+    var latest = clean(data.latestVersion || data.latest, current);
+    if (cur) cur.textContent = current;
+    if (remote) remote.textContent = latest;
 }
 
 function requireAdminForUpdate() {
@@ -915,7 +943,9 @@ function renderScriptBookmarks() {
     // User scripts
     if (bms.length) {
         html += bms.map(function (b, i) {
-            return '<div class="bm-item" onclick="runScript(' + i + ')" title="' + esc(b.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(b.name) + '</div><div class="bm-item-host">' + esc(b.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span><button class="bm-item-del" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+            var name = b.name || '';
+            var cmd = b.cmd || '';
+            return '<div class="bm-item" onclick="runScript(' + i + ')" title="' + esc(cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(name) + '</div><div class="bm-item-host">' + esc(cmd.substring(0, 35)) + '</div></div><div class="bm-item-actions"><span class="bm-item-run">▶</span><button class="bm-item-icon-btn bm-item-edit" title="编辑脚本" onclick="event.stopPropagation();openEditScriptModal(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button><button class="bm-item-del" title="删除脚本" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>';
         }).join('');
     } else {
         html += '<div class="bm-empty">暂无自定义脚本</div>';
@@ -936,6 +966,46 @@ function saveScriptBookmark() {
     var bms = loadBM(SBK); bms.push({ name: n, cmd: c }); saveBM(SBK, bms);
     document.getElementById('scriptName').value = ''; document.getElementById('scriptContent').value = '';
     renderScriptBookmarks(); syncLocalScriptsIfLogged(); showToast('脚本已保存', 'success');
+}
+
+function openEditScriptModal(i) {
+    var b = loadBM(SBK)[i];
+    if (!b) return;
+    document.getElementById('editScriptIndex').value = i;
+    document.getElementById('editScriptName').value = b.name || '';
+    document.getElementById('editScriptContent').value = b.cmd || '';
+    document.getElementById('editScriptModal').classList.add('show');
+    setTimeout(function () {
+        var input = document.getElementById('editScriptName');
+        if (input) input.focus();
+    }, 60);
+}
+
+function hideEditScriptModal() {
+    var modal = document.getElementById('editScriptModal');
+    if (modal) modal.classList.remove('show');
+    var idx = document.getElementById('editScriptIndex');
+    var name = document.getElementById('editScriptName');
+    var content = document.getElementById('editScriptContent');
+    if (idx) idx.value = '-1';
+    if (name) name.value = '';
+    if (content) content.value = '';
+}
+
+function saveEditedScriptBookmark() {
+    var idx = parseInt(document.getElementById('editScriptIndex').value, 10);
+    var name = document.getElementById('editScriptName').value.trim();
+    var cmd = document.getElementById('editScriptContent').value.trim();
+    if (idx < 0 || !isFinite(idx)) { hideEditScriptModal(); return; }
+    if (!name || !cmd) { showToast('名称和命令不能为空', 'error'); return; }
+    var bms = loadBM(SBK);
+    if (!bms[idx]) { hideEditScriptModal(); return; }
+    bms[idx] = Object.assign({}, bms[idx], { name: name, cmd: cmd });
+    saveBM(SBK, bms);
+    hideEditScriptModal();
+    renderScriptBookmarks();
+    syncLocalScriptsIfLogged();
+    showToast('脚本已更新', 'success');
 }
 
 function runScript(i) {
@@ -1290,6 +1360,8 @@ function initTheme() {
 
 // ==================== Click outside to close drawers ====================
 document.addEventListener('click', function (e) {
+    if (e.target.closest('.modal-overlay')) return;
+
     // Close connection bookmark drawer
     var connDrawer = document.getElementById('connDrawer');
     var edgeBtns = document.getElementById('edgeBtns');
@@ -1747,10 +1819,22 @@ if (authModalEl) {
         if (e.target === authModalEl) hideAuthModal();
     });
 }
+var editScriptModalEl = document.getElementById('editScriptModal');
+if (editScriptModalEl) {
+    editScriptModalEl.addEventListener('click', function (e) {
+        if (e.target === editScriptModalEl) hideEditScriptModal();
+    });
+}
 ['authUsername', 'authPassword'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') submitAuthForm();
+    });
+});
+['editScriptName', 'editScriptContent'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') saveEditedScriptBookmark();
     });
 });
 ['oldPassword', 'newPassword', 'confirmNewPassword'].forEach(function (id) {
