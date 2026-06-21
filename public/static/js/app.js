@@ -253,7 +253,7 @@ function renderTabs() {
 function keepActiveTabVisible() {
     var bar = document.getElementById('tabBar');
     if (!bar) return;
-    requestAnimationFrame(function () {
+    function align() {
         var active = bar.querySelector('.ssh-tab.active');
         if (!active) return;
         var isColumn = getComputedStyle(bar).flexDirection === 'column';
@@ -262,11 +262,17 @@ function keepActiveTabVisible() {
             return;
         }
         if (activeIdx === sessions.length - 1) {
-            bar.scrollLeft = bar.scrollWidth;
-            setTimeout(function () { bar.scrollLeft = bar.scrollWidth; }, 30);
+            var addBtn = bar.querySelector('.tab-add-btn');
+            if (addBtn) addBtn.scrollIntoView({ block: 'nearest', inline: 'end' });
+            bar.scrollLeft = Math.max(0, bar.scrollWidth - bar.clientWidth);
         } else {
             active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
         }
+    }
+    requestAnimationFrame(function () {
+        align();
+        setTimeout(align, 40);
+        setTimeout(align, 140);
     });
 }
 
@@ -1012,7 +1018,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.4');
+    var current = clean(data.currentVersion || data.current, '0.5.5');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
