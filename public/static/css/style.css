@@ -153,12 +153,13 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'JetBrain
 
 /* ==================== TERMINAL ==================== */
 #terminalView{flex-direction:column}
-.term-topbar{display:flex;align-items:center;padding:7px 16px;min-height:52px;z-index:20;gap:10px;flex-shrink:0}
+.term-topbar{display:flex;align-items:center;padding:7px 16px;min-height:52px;z-index:20;gap:10px;flex-shrink:0;overflow:hidden}
 .topbar-left{display:flex;align-items:center;gap:10px;flex-shrink:0}
-.topbar-right{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.topbar-right{display:flex;align-items:center;gap:4px;flex:0 0 auto;margin-left:auto}
 .topbar-user{font-size:14px;font-weight:600;color:var(--t1);font-family:'JetBrains Mono',monospace}
-.topbar-metrics{display:flex;align-items:center;gap:4px;flex:1;justify-content:center;overflow-x:auto;scrollbar-width:none}
-.topbar-metrics::-webkit-scrollbar{display:none}
+.topbar-metrics{display:flex;align-items:center;gap:4px;flex:1 1 240px;min-width:0;justify-content:flex-start;overflow-x:auto;scrollbar-width:thin;scrollbar-color:rgba(0,212,255,.35) transparent}
+.topbar-metrics::-webkit-scrollbar{height:4px}
+.topbar-metrics::-webkit-scrollbar-thumb{background:rgba(0,212,255,.28);border-radius:999px}
 .term-dots{display:flex;gap:8px}
 .dot{width:13px;height:13px;border-radius:50%;cursor:pointer;transition:all var(--tr)}
 .dot:hover{transform:scale(1.3)}
@@ -340,12 +341,13 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 .proxy-panel.show{display:flex}
 
 /* ==================== TAB BAR ==================== */
-.tab-bar{display:flex;align-items:center;gap:3px;flex:0 1 auto;overflow-x:auto;scrollbar-width:none;max-width:40%}
-.tab-bar::-webkit-scrollbar{display:none}
+.tab-bar{display:flex;align-items:center;gap:3px;flex:0 1 clamp(220px,42vw,760px);min-width:180px;max-width:clamp(220px,42vw,760px);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:rgba(0,212,255,.45) transparent;padding-bottom:4px;overscroll-behavior-inline:contain}
+.tab-bar::-webkit-scrollbar{height:5px}
+.tab-bar::-webkit-scrollbar-thumb{background:rgba(0,212,255,.34);border-radius:999px}
 .ssh-tab{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:var(--rx);background:var(--inp);border:1px solid transparent;cursor:pointer;transition:all var(--tr);white-space:nowrap;flex-shrink:0;font-size:14px;color:var(--t2);font-family:'JetBrains Mono',monospace}
 .ssh-tab:hover{background:rgba(255,255,255,.08)}
 .ssh-tab.active{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.25);color:var(--c1)}
-.ssh-tab .tab-ip{cursor:pointer;transition:color var(--tr);font-weight:700;text-decoration:none}
+.ssh-tab .tab-ip{cursor:inherit;transition:color var(--tr);font-weight:700;text-decoration:none}
 .ssh-tab .tab-ip:hover{color:var(--c1)}
 .ssh-tab .tab-close{width:14px;height:14px;border:none;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all var(--tr);padding:0;font-size:0}
 .ssh-tab .tab-close:hover{background:rgba(255,0,110,.2);color:var(--err)}
@@ -406,22 +408,27 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
     .card-header{margin-bottom:14px}
     .conn-drawer.open{width:220px}
     .sftp-panel.open{width:100%}
-    .term-topbar{padding:3px 6px;height:36px;min-height:36px;max-height:36px;gap:2px;flex-wrap:nowrap;overflow:hidden}
-    .topbar-left{gap:4px;flex-shrink:0}
-    .topbar-right{gap:1px;flex-shrink:0}
+    .term-topbar{padding:6px;height:auto;min-height:0;max-height:45dvh;gap:6px;flex-wrap:wrap;align-items:flex-start;overflow-y:auto}
+    .topbar-left{order:1;gap:4px;flex:0 0 auto}
+    .topbar-right{order:5;width:100%;display:grid;grid-template-columns:repeat(8,24px);justify-content:start;gap:4px;margin-left:0;flex:1 0 100%}
     .tb-btn{width:24px;height:24px}
     .tb-btn.sm{width:20px;height:20px}
     .tb-btn svg{width:11px!important;height:11px!important}
-    .font-size-label{font-size:9px;min-width:12px}
+    .font-size-label{font-size:9px;min-width:24px;height:24px;display:flex;align-items:center;justify-content:center}
     .topbar-sep{display:none}
-    .tab-bar{max-width:30%;gap:2px}
-    .ssh-tab{font-size:9px;padding:2px 5px}
-    .tab-add-btn{width:20px;height:20px}
+    .tab-bar{order:2;width:100%;min-width:0;max-width:none;flex:1 0 100%;flex-direction:column;align-items:stretch;gap:4px;max-height:118px;overflow-y:auto;overflow-x:hidden;padding-bottom:0}
+    .tab-bar::-webkit-scrollbar{width:4px;height:0}
+    .ssh-tab{width:100%;font-size:11px;padding:6px 8px;justify-content:space-between}
+    .ssh-tab .tab-ip{min-width:0;overflow:hidden;text-overflow:ellipsis}
+    .tab-add-btn{order:3;width:100%;height:26px}
     .tab-add-btn svg{width:9px!important;height:9px!important}
     .term-dots{gap:3px}
     .dot{width:7px;height:7px}
     .topbar-user{display:none}
-    .topbar-metrics{display:none}
+    .topbar-metrics{order:4;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;flex:1 0 100%;gap:4px;overflow:visible}
+    .metric-pill{font-size:9px;padding:4px 5px;min-width:0;overflow:hidden;text-overflow:ellipsis}
+    .metric-pill svg{width:10px;height:10px}
+    .metric-value{font-size:9px;overflow:hidden;text-overflow:ellipsis}
     .term-body{padding:8px 10px}
     .cmd-bar{padding:4px 10px}
     .cmd-input{font-size:12px;padding:7px 10px}

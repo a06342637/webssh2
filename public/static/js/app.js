@@ -101,9 +101,6 @@ document.addEventListener('keydown', function (e) {
         var addTabModal = document.getElementById('addTabModal');
         if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
     }
-    if (e.key === 'Escape' && document.getElementById('terminalView').classList.contains('active')) {
-        closeActiveTab();
-    }
 });
 
 // ==================== Proxy Config ====================
@@ -238,7 +235,7 @@ function renderTabs() {
     bar.innerHTML = sessions.map(function (s, i) {
         var cls = i === activeIdx ? 'ssh-tab active' : 'ssh-tab';
         return '<div class="' + cls + '" onclick="switchTab(' + i + ')">' +
-            '<span class="tab-ip" onclick="event.stopPropagation();copyIP(\'' + esc(s.hostname) + '\')" title="点击复制IP">' + esc(s.hostname) + '</span>' +
+            '<span class="tab-ip" ondblclick="event.stopPropagation();copyIP(\'' + esc(s.hostname) + '\')" title="双击复制IP">' + esc(s.hostname) + '</span>' +
             '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
     }).join('');
