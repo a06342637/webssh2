@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=45">
+    <link rel="stylesheet" href="/static/css/style.css?v=48">
     <style>
     /* Splash screen – shown from first byte, hides FOUC */
     #splash{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0a0a1a;transition:opacity .55s ease,visibility .55s ease}
@@ -645,12 +645,27 @@
         </div>
     </div>
 
+    <div class="modal-overlay server-info-overlay" id="serverInfoModal">
+        <div class="glass-card modal-card server-info-card-modal">
+            <div class="drawer-hd auth-hd server-info-hd">
+                <div class="server-info-title-wrap">
+                    <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><b id="serverInfoTitle">服务器详情</b></span>
+                    <small id="serverInfoSub">-</small>
+                </div>
+                <button class="settings-close" type="button" onclick="hideServerInfoModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body server-info-body" id="serverInfoBody">
+                <div class="server-info-loading">正在读取服务器信息...</div>
+            </div>
+        </div>
+    </div>
+
     <div id="toastContainer" class="toast-container"></div>
     <div class="global-footer">© 2026 <a href="https://t.me/ok_gy" target="_blank" rel="noopener">棍之勇者</a>. <a href="https://github.com/a06342637/webssh2" target="_blank" rel="noopener">All Rights Reserved</a></div>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=50"></script>
+    <script src="/static/js/app.js?v=51"></script>
 </body>
 </html>

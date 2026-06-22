@@ -6,6 +6,9 @@
 var sessions = [];
 var activeIdx = -1;
 var sftpCurrentPath = '/';
+var serverInfoModalIdx = -1;
+var serverInfoTimer = null;
+var serverInfoSelectedIface = {};
 
 // ==================== Particles ====================
 (function () {
@@ -104,8 +107,17 @@ document.addEventListener('keydown', function (e) {
         if (accountEditModal && accountEditModal.classList.contains('show')) { hideAccountEditModal(); return; }
         var accountAdminModal = document.getElementById('accountAdminModal');
         if (accountAdminModal && accountAdminModal.classList.contains('show')) { hideAccountAdminModal(); return; }
+        var serverInfoModal = document.getElementById('serverInfoModal');
+        if (serverInfoModal && serverInfoModal.classList.contains('show')) { hideServerInfoModal(); return; }
         var addTabModal = document.getElementById('addTabModal');
         if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
+    }
+});
+
+document.addEventListener('click', function (e) {
+    var serverInfoModal = document.getElementById('serverInfoModal');
+    if (serverInfoModal && serverInfoModal.classList.contains('show') && e.target === serverInfoModal) {
+        hideServerInfoModal();
     }
 });
 
@@ -244,6 +256,8 @@ function renderTabs() {
         var cls = i === activeIdx ? 'ssh-tab active' : 'ssh-tab';
         return '<div class="' + cls + '" onclick="switchTab(' + i + ')">' +
             '<span class="tab-ip" ondblclick="event.stopPropagation();copyIP(\'' + esc(s.hostname) + '\')" title="双击复制IP">' + esc(s.hostname) + '</span>' +
+            '<button class="tab-info" onclick="event.stopPropagation();openServerInfoModal(' + i + ')" title="服务器详情">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="10" x2="12" y2="16"/><circle cx="12" cy="7" r="1"/></svg></button>' +
             '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
     }).join('') + addBtn;
@@ -353,6 +367,7 @@ function connectFromLogin() {
 // ==================== Tab Actions ====================
 function closeTab(idx) {
     if (idx < 0 || idx >= sessions.length) return;
+    if (serverInfoModalIdx === idx) hideServerInfoModal();
     var s = sessions[idx];
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
@@ -371,6 +386,7 @@ function closeTab(idx) {
         setStatus('', '就绪');
         showToast('已断开', 'info');
     } else {
+        if (serverInfoModalIdx > idx) serverInfoModalIdx--;
         activeIdx = Math.min(idx, sessions.length - 1);
         switchTab(activeIdx);
     }
@@ -411,15 +427,23 @@ function addNewTab() {
 // ==================== System Info ====================
 function fetchSysInfoFor(session) {
     if (!session.sshInfo) return;
-    fetch('/sysinfo?sshInfo=' + encodeURIComponent(session.sshInfo))
+    return fetch('/sysinfo?sshInfo=' + encodeURIComponent(session.sshInfo))
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg === 'success' && d.Data) {
                 session._lastMetrics = d.Data;
                 if (sessions[activeIdx] === session) renderMetrics(d.Data);
+                if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) renderServerInfo(d.Data, session);
+            } else if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
+                renderServerInfoError(d && d.Msg ? d.Msg : '读取服务器信息失败');
             }
+            return d;
         })
-        .catch(function () { });
+        .catch(function () {
+            if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
+                renderServerInfoError('网络请求失败，请稍后重试');
+            }
+        });
 }
 
 function fmtUptime(secs) {
@@ -442,8 +466,8 @@ function renderMetrics(d) {
         { i: 'memory', l: 'MEM', v: fmtB(d.memUsed) + '/' + fmtB(d.memTotal), c: pillCls(mp) },
         { i: 'hdd', l: 'DISK', v: fmtB(d.diskUsed) + '/' + fmtB(d.diskTotal), c: pillCls(dp) },
         { i: 'zap', l: 'Load', v: d.load || '0' },
-        { i: 'down', l: 'IN', v: fmtB(d.rxTotal) },
-        { i: 'up', l: 'OUT', v: fmtB(d.txTotal) },
+        { i: 'down', l: '↓', v: fmtBps(d.rxRate) },
+        { i: 'up', l: '↑', v: fmtBps(d.txRate) },
         { i: 'clock', l: 'UP', v: fmtUptime(d.uptime) }
     ];
     var sv = { server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>', cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>', activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>', memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg>', hdd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>', zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>', down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>', up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>', clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>' };
@@ -451,6 +475,142 @@ function renderMetrics(d) {
         var cls = p.c ? ' ' + p.c : '';
         return '<div class="metric-pill' + cls + '">' + (sv[p.i] || '') + p.l + (p.v ? ' <span class="metric-value">' + p.v + '</span>' : '') + '</div>';
     }).join('');
+}
+
+function fmtBps(v) {
+    return fmtB(v) + '/s';
+}
+
+function fmtKb(kb) {
+    return fmtB((parseFloat(kb) || 0) * 1024);
+}
+
+function fmtPct(v) {
+    v = parseFloat(v) || 0;
+    return v.toFixed(v >= 10 ? 0 : 1) + '%';
+}
+
+function fmtUptimeLong(secs) {
+    secs = parseInt(secs) || 0;
+    var d = Math.floor(secs / 86400);
+    var h = Math.floor((secs % 86400) / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var out = [];
+    if (d) out.push(d + '天');
+    if (h) out.push(h + '小时');
+    out.push(m + '分钟');
+    return out.join(' ');
+}
+
+function percentOf(used, total) {
+    return Math.max(0, Math.min(100, pct(used, total)));
+}
+
+function meterHtml(label, used, total, color) {
+    var p = percentOf(used, total);
+    return '<div class="srv-meter"><div class="srv-meter-top"><span>' + esc(label) + '</span><b>' + p + '%</b></div>' +
+        '<div class="srv-meter-bar"><i style="width:' + p + '%;background:' + color + '"></i></div></div>';
+}
+
+function getSelectedInterface(d) {
+    var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
+    var current = serverInfoSelectedIface[(sessions[serverInfoModalIdx] || {}).id] || d.mainIface || '';
+    var found = ifaces.find(function (n) { return n.name === current; });
+    return found || ifaces.find(function (n) { return n.main === 'true'; }) || ifaces[0] || null;
+}
+
+function openServerInfoModal(idx) {
+    if (idx < 0 || idx >= sessions.length) return;
+    serverInfoModalIdx = idx;
+    var s = sessions[idx];
+    var modal = document.getElementById('serverInfoModal');
+    var title = document.getElementById('serverInfoTitle');
+    var sub = document.getElementById('serverInfoSub');
+    if (title) title.textContent = s.hostname;
+    if (sub) sub.textContent = (s.username || 'root') + '@' + s.hostname + ':' + (s.port || 22);
+    if (s._lastMetrics) renderServerInfo(s._lastMetrics, s);
+    else document.getElementById('serverInfoBody').innerHTML = '<div class="server-info-loading"><span></span>正在读取服务器信息...</div>';
+    modal.classList.add('show');
+    fetchSysInfoFor(s);
+    restartServerInfoTimer();
+}
+
+function hideServerInfoModal() {
+    serverInfoModalIdx = -1;
+    stopServerInfoTimer();
+    var modal = document.getElementById('serverInfoModal');
+    if (modal) modal.classList.remove('show');
+}
+
+function stopServerInfoTimer() {
+    if (serverInfoTimer) {
+        clearInterval(serverInfoTimer);
+        serverInfoTimer = null;
+    }
+}
+
+function restartServerInfoTimer() {
+    stopServerInfoTimer();
+    if (serverInfoModalIdx < 0 || !sessions[serverInfoModalIdx]) return;
+    serverInfoTimer = setInterval(function () {
+        if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx]) fetchSysInfoFor(sessions[serverInfoModalIdx]);
+    }, getSysInterval() * 1000);
+}
+
+function changeServerInfoIface(name) {
+    var s = sessions[serverInfoModalIdx];
+    if (!s) return;
+    serverInfoSelectedIface[s.id] = name;
+    if (s._lastMetrics) renderServerInfo(s._lastMetrics, s);
+}
+
+function renderServerInfoError(message) {
+    var body = document.getElementById('serverInfoBody');
+    if (!body) return;
+    body.innerHTML = '<div class="server-info-error"><b>读取失败</b><span>' + esc(message || '服务器信息暂时不可用') + '</span></div>';
+}
+
+function renderServerInfo(d, session) {
+    var body = document.getElementById('serverInfoBody');
+    if (!body) return;
+    var diskPct = percentOf(d.diskUsed, d.diskTotal);
+    var cpu = parseFloat(d.cpuUsage) || 0;
+    var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
+    var selectedIface = getSelectedInterface(d);
+    var ifaceName = selectedIface ? selectedIface.name : (d.mainIface || '-');
+    var ifaceOptions = ifaces.map(function (n) {
+        return '<option value="' + esc(n.name) + '"' + (selectedIface && n.name === selectedIface.name ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
+    }).join('');
+    var procRows = (Array.isArray(d.processes) ? d.processes : []).slice(0, 12).map(function (p) {
+        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + esc(p.cmd || p.name) + '">' + esc(p.name || p.cmd || '-') + '</td></tr>';
+    }).join('') || '<tr><td colspan="5">暂无进程数据</td></tr>';
+    var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).slice(0, 12).map(function (fs) {
+        return '<tr><td title="' + esc(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + '/' + esc(fmtB(fs.size)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
+    }).join('') || '<tr><td colspan="3">暂无文件系统数据</td></tr>';
+    var cb = d.cpuBreakdown || {};
+    body.innerHTML =
+        '<div class="server-info-hero">' +
+        '<div><div class="server-info-kicker">当前连接</div><h3>' + esc(session.hostname) + '</h3><p>' + esc(d.hostname || '-') + ' · ' + esc(d.os || '-') + '</p></div>' +
+        '<div class="server-info-live"><span></span>每 ' + getSysInterval() + ' 秒刷新</div>' +
+        '</div>' +
+        '<div class="server-info-grid">' +
+        '<div class="server-info-card wide"><h4>事实信息</h4><div class="server-info-facts">' +
+        '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div><div><span>内核版本</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
+        '<div><span>主机名</span><b>' + esc(d.hostname || '-') + '</b></div><div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div>' +
+        '<div><span>运行时间</span><b>' + esc(fmtUptimeLong(d.uptime)) + '</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
+        '</div></div>' +
+        '<div class="server-info-card"><h4>CPU</h4><div class="srv-big">' + cpu.toFixed(1) + '%</div>' + meterHtml('CPU 使用率', cpu, 100, 'linear-gradient(90deg,#00d4ff,#7b2ff7)') +
+        '<div class="server-info-mini">用户 ' + esc(cb.user || '0') + '% · 系统 ' + esc(cb.system || '0') + '% · IO ' + esc(cb.iowait || '0') + '%</div><div class="server-info-mini">' + esc(d.cpuCores || '?') + ' 核 · ' + esc(d.cpuModel || '-') + '</div></div>' +
+        '<div class="server-info-card"><h4>内存/交换</h4>' + meterHtml('内存 ' + fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal), d.memUsed, d.memTotal, 'linear-gradient(90deg,#ff006e,#ffbe0b)') +
+        meterHtml('Swap ' + fmtB(d.swapUsed) + ' / ' + fmtB(d.swapTotal), d.swapUsed, d.swapTotal, 'linear-gradient(90deg,#7b2ff7,#00d4ff)') +
+        '<div class="server-info-mini">可用 ' + fmtB(d.memAvailable || d.memFree) + '</div></div>' +
+        '<div class="server-info-card"><h4>磁盘</h4><div class="srv-big">' + diskPct + '%</div>' + meterHtml('根分区 ' + fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal), d.diskUsed, d.diskTotal, 'linear-gradient(90deg,#00ff88,#00d4ff)') + '<div class="server-info-mini">剩余 ' + fmtB(d.diskFree) + '</div></div>' +
+        '<div class="server-info-card"><h4>连接</h4><div class="srv-big small">' + esc((parseInt(d.tcpCount) || 0) + (parseInt(d.udpCount) || 0)) + '</div><div class="server-net-pair compact"><div><span>TCP</span><b>' + esc(d.tcpCount || '0') + '</b></div><div><span>UDP</span><b>' + esc(d.udpCount || '0') + '</b></div></div></div>' +
+        '<div class="server-info-card wide"><div class="server-info-card-head"><h4>网络</h4><div class="server-iface-control">' + (ifaces.length > 1 ? '<select class="server-iface-select" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div></div>' +
+        '<div class="server-net-pair"><div><span>接收速度</span><b>↓ ' + fmtBps(selectedIface ? selectedIface.rxRate : d.rxRate) + '</b></div><div><span>发送速度</span><b>↑ ' + fmtBps(selectedIface ? selectedIface.txRate : d.txRate) + '</b></div><div><span>总接收</span><b>' + fmtB(selectedIface ? selectedIface.rxTotal : d.rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(selectedIface ? selectedIface.txTotal : d.txTotal) + '</b></div></div></div>' +
+        '<div class="server-info-card wide"><h4>进程</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div></div>' +
+        '<div class="server-info-card wide"><h4>文件系统</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>挂载点</th><th>已用/大小</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div></div>' +
+        '</div>';
 }
 
 // ==================== Drawers ====================
@@ -1711,6 +1871,10 @@ function saveSysInterval() {
             s.sysInfoTimer = setInterval(function () { fetchSysInfoFor(s); }, _sysIntervalTemp * 1000);
         }
     });
+    restartServerInfoTimer();
+    if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] && sessions[serverInfoModalIdx]._lastMetrics) {
+        renderServerInfo(sessions[serverInfoModalIdx]._lastMetrics, sessions[serverInfoModalIdx]);
+    }
     showToast('检测间隔已设为 ' + _sysIntervalTemp + ' 秒', 'success');
 }
 
