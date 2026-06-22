@@ -214,16 +214,12 @@ function createSession(hostname, port, username, sshInfo) {
     document.getElementById('terminalContainer').appendChild(termDiv);
 
     var savedFont = getCurrentFontSize();
-    var savedColors = getSavedColors();
-    var isLight = document.documentElement.getAttribute('data-theme') === 'light' || (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: light)').matches);
-    var defaultFg = isLight ? '#1a1a2e' : '#e8e8f0';
-    var defaultBg = isLight ? 'rgba(0,0,0,0)' : 'rgba(10,10,26,0)';
-    var defaultCursor = isLight ? '#0088cc' : '#00d4ff';
+    var termTheme = buildTerminalTheme(getSavedColors());
     var t = new Terminal({
         cursorBlink: true, cursorStyle: 'bar',
         fontSize: savedFont,
         fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace",
-        theme: { background: savedColors.bg === '#0a0a1a' || savedColors.bg === '#e8eaf0' ? defaultBg : savedColors.bg, foreground: savedColors.fg === '#e8e8f0' || savedColors.fg === '#1a1a2e' ? defaultFg : savedColors.fg, cursor: savedColors.cursor === '#00d4ff' || savedColors.cursor === '#0088cc' ? defaultCursor : savedColors.cursor, cursorAccent: isLight ? '#e8eaf0' : '#0a0a1a', selectionBackground: 'rgba(0,136,204,.25)', black: isLight ? '#e8e8f0' : '#1a1a2e', red: '#ff006e', green: isLight ? '#008844' : '#00ff88', yellow: isLight ? '#996600' : '#ffbe0b', blue: isLight ? '#0066cc' : '#00d4ff', magenta: '#7b2ff7', cyan: isLight ? '#0088aa' : '#00d4ff', white: isLight ? '#1a1a2e' : '#e8e8f0', brightBlack: isLight ? '#999' : '#3a3a5e', brightRed: '#ff4488', brightGreen: isLight ? '#00aa55' : '#33ffaa', brightYellow: isLight ? '#aa7700' : '#ffdd33', brightBlue: isLight ? '#0088ff' : '#33ddff', brightMagenta: '#9955ff', brightCyan: isLight ? '#00aacc' : '#33ddff', brightWhite: isLight ? '#000' : '#fff' },
+        theme: termTheme,
         allowTransparency: true, scrollback: 10000
     });
     var fa = new FitAddon.FitAddon();
@@ -598,7 +594,7 @@ function recordNetworkSample(session, d) {
         name = name || '__main__';
         if (!session._netHistory[name]) session._netHistory[name] = [];
         session._netHistory[name].push({ t: now, rx: Math.max(0, parseFloat(rx) || 0), tx: Math.max(0, parseFloat(tx) || 0) });
-        if (session._netHistory[name].length > 80) session._netHistory[name].shift();
+        if (session._netHistory[name].length > 600) session._netHistory[name].shift();
     }
     if (ifaces.length) {
         ifaces.forEach(function (n) { push(n.name, n.rxRate, n.txRate); });
@@ -612,34 +608,96 @@ function getNetworkHistory(session, ifaceName) {
     return session._netHistory[ifaceName] || session._netHistory.__main__ || [];
 }
 
-function buildNetPath(items, key, max, width, height, pad) {
-    if (!items.length) return '';
+function netPointX(item, idx, items, width, pad, domainStart, domainEnd) {
+    if (domainEnd > domainStart && item && item.t) {
+        var ratio = (item.t - domainStart) / (domainEnd - domainStart);
+        ratio = Math.max(0, Math.min(1, ratio));
+        return pad + ratio * (width - pad * 2);
+    }
     var span = Math.max(1, items.length - 1);
+    return pad + (idx / span) * (width - pad * 2);
+}
+
+function buildNetPath(items, key, max, width, height, pad, domainStart, domainEnd) {
+    if (!items.length) return '';
     return items.map(function (item, idx) {
-        var x = pad + (idx / span) * (width - pad * 2);
+        var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
         var y = height - pad - ((parseFloat(item[key]) || 0) / max) * (height - pad * 2);
         return (idx ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
     }).join(' ');
 }
 
-function buildNetArea(path, items, width, height, pad) {
+function buildNetArea(path, items, width, height, pad, domainStart, domainEnd) {
     if (!path || !items.length) return '';
-    var firstX = pad;
-    var lastX = width - pad;
+    var firstX = netPointX(items[0], 0, items, width, pad, domainStart, domainEnd);
+    var lastX = netPointX(items[items.length - 1], items.length - 1, items, width, pad, domainStart, domainEnd);
     return path + ' L' + lastX + ' ' + (height - pad) + ' L' + firstX + ' ' + (height - pad) + ' Z';
 }
 
+function formatBeijingMinute(ts) {
+    try {
+        return new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).format(new Date(ts)).replace(/\s/g, '');
+    } catch (e) {
+        var d = new Date(ts + 8 * 60 * 60 * 1000);
+        return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    }
+}
+
+function networkDomain(history) {
+    var end = history.length && history[history.length - 1].t ? history[history.length - 1].t : Date.now();
+    var first = history.length && history[0].t ? history[0].t : end;
+    var rawSpan = Math.max(0, end - first);
+    var span = Math.max(60 * 1000, Math.min(6 * 60 * 1000, rawSpan || 60 * 1000));
+    return { start: end - span, end: end, span: span };
+}
+
+function networkSpanText(ms) {
+    if (ms >= 60 * 1000) return Math.ceil(ms / 60000) + ' 分钟';
+    return Math.max(1, Math.ceil(ms / 1000)) + ' 秒';
+}
+
+function networkTimeAxisHtml(domain) {
+    var ticks = [domain.start];
+    var firstMinute = Math.ceil(domain.start / 60000) * 60000;
+    for (var t = firstMinute; t < domain.end; t += 60000) ticks.push(t);
+    ticks.push(domain.end);
+    if (ticks.length > 7) {
+        var step = Math.ceil((ticks.length - 1) / 6);
+        var compact = ticks.filter(function (_, i) { return i === 0 || i === ticks.length - 1 || i % step === 0; });
+        if (compact[compact.length - 1] !== domain.end) compact.push(domain.end);
+        ticks = compact;
+    }
+    return ticks.map(function (t, i) {
+        var left = domain.end > domain.start ? ((t - domain.start) / (domain.end - domain.start)) * 100 : 0;
+        left = Math.max(0, Math.min(100, left));
+        var cls = 'time-tick' + (left <= 1 ? ' left-edge' : '') + (left >= 99 ? ' right-edge' : '');
+        return '<span class="' + cls + '" style="left:' + left.toFixed(2) + '%">' + formatBeijingMinute(t) + '</span>';
+    }).join('');
+}
+
 function networkChartHtml(session, ifaceName) {
-    var history = getNetworkHistory(session, ifaceName).slice(-120);
+    var history = getNetworkHistory(session, ifaceName).slice(-360);
+    var domain = networkDomain(history);
+    history = history.filter(function (p) { return !p.t || (p.t >= domain.start && p.t <= domain.end); });
     var width = 720, height = 210, pad = 22;
     var max = 1;
+    var rxPeak = 0, txPeak = 0;
     history.forEach(function (p) {
-        max = Math.max(max, parseFloat(p.rx) || 0, parseFloat(p.tx) || 0);
+        var rx = parseFloat(p.rx) || 0;
+        var tx = parseFloat(p.tx) || 0;
+        rxPeak = Math.max(rxPeak, rx);
+        txPeak = Math.max(txPeak, tx);
+        max = Math.max(max, rx, tx);
     });
-    var rxPath = buildNetPath(history, 'rx', max, width, height, pad);
-    var txPath = buildNetPath(history, 'tx', max, width, height, pad);
-    var rxArea = buildNetArea(rxPath, history, width, height, pad);
-    var txArea = buildNetArea(txPath, history, width, height, pad);
+    var rxPath = buildNetPath(history, 'rx', max, width, height, pad, domain.start, domain.end);
+    var txPath = buildNetPath(history, 'tx', max, width, height, pad, domain.start, domain.end);
+    var rxArea = buildNetArea(rxPath, history, width, height, pad, domain.start, domain.end);
+    var txArea = buildNetArea(txPath, history, width, height, pad, domain.start, domain.end);
     var empty = history.length < 2 ? '<div class="server-net-empty">等待下一次刷新后生成实时曲线</div>' : '';
     var grid = '';
     for (var gi = 0; gi <= 4; gi++) {
@@ -651,7 +709,8 @@ function networkChartHtml(session, ifaceName) {
         grid += '<line class="net-grid-v" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>';
     }
     return '<div class="server-net-chart">' +
-        '<div class="server-net-chart-head"><div><b>实时网络曲线</b><span>最近 ' + Math.max(0, history.length - 1) + ' 秒 · 当前单位：' + (serverInfoNetUnit === 'bits' ? 'Mbps' : 'MB/s') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
+        '<div class="server-net-chart-head"><div><b>实时网络曲线</b><span>最近 ' + networkSpanText(domain.span) + ' · 北京时间 · 当前单位：' + (serverInfoNetUnit === 'bits' ? 'bits/s' : 'B/s') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
+        '<div class="server-net-peaks"><span class="server-net-peak rx"><em>接收峰值</em><b>' + fmtNetRate(rxPeak) + '</b></span><span class="server-net-peak tx"><em>发送峰值</em><b>' + fmtNetRate(txPeak) + '</b></span></div>' +
         '<div class="server-net-canvas">' + empty +
         '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
         grid +
@@ -660,7 +719,7 @@ function networkChartHtml(session, ifaceName) {
         (rxPath ? '<path class="net-line rx" d="' + rxPath + '"/>' : '') +
         (txPath ? '<path class="net-line tx" d="' + txPath + '"/>' : '') +
         '</svg></div>' +
-        '<div class="server-net-axis"><span>0</span><span>峰值 ' + fmtNetRate(max) + '</span></div>' +
+        '<div class="server-net-axis">' + networkTimeAxisHtml(domain) + '</div>' +
         '</div>';
 }
 
@@ -1451,7 +1510,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.13');
+    var current = clean(data.currentVersion || data.current, '0.5.14');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -2021,6 +2080,114 @@ function copyIP(ip) {
 var FONT_KEY = 'webssh_fontsize';
 var COLOR_KEY = 'webssh_colors';
 
+function normColor(c) {
+    return String(c || '').trim().toLowerCase();
+}
+
+function colorIn(c, list) {
+    c = normColor(c);
+    return list.indexOf(c) >= 0;
+}
+
+function isLightThemeActive() {
+    var theme = document.documentElement.getAttribute('data-theme');
+    if (theme) return theme === 'light';
+    try { return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches; } catch (e) { return false; }
+}
+
+function defaultSavedTermColors() {
+    return isLightThemeActive()
+        ? { fg: '#1a1a2e', bg: '#e8eaf0', cursor: '#0088cc' }
+        : { fg: '#e8e8f0', bg: '#0a0a1a', cursor: '#00d4ff' };
+}
+
+function isDefaultTermFg(c) {
+    return !c || colorIn(c, ['#e8e8f0', '#ffffff', '#fff', '#1a1a2e', '#0f172a']);
+}
+
+function isDefaultTermBg(c) {
+    return !c || colorIn(c, ['#0a0a1a', '#000000', '#000', '#1a1a2e', '#0d1117', '#1e1e2e', '#282a36', '#002b36', '#2e3440', '#1a1b26', '#161616', '#0c0c1d', '#121212', '#0f172a', '#18181b', '#27272a', '#1c1917', '#e8eaf0', '#f8fafc', '#ffffff', '#fff']);
+}
+
+function isDefaultTermCursor(c) {
+    return !c || colorIn(c, ['#00d4ff', '#0088cc']);
+}
+
+function buildTerminalTheme(savedColors) {
+    savedColors = savedColors || {};
+    var isLight = isLightThemeActive();
+    var defaults = defaultSavedTermColors();
+    var fg = isDefaultTermFg(savedColors.fg) ? defaults.fg : savedColors.fg;
+    var bg = isDefaultTermBg(savedColors.bg) ? (isLight ? 'rgba(255,255,255,0)' : 'rgba(10,10,26,0)') : savedColors.bg;
+    var cursor = isDefaultTermCursor(savedColors.cursor) ? defaults.cursor : savedColors.cursor;
+    if (isLight) {
+        return {
+            background: bg,
+            foreground: fg,
+            cursor: cursor,
+            cursorAccent: '#f8fafc',
+            selectionBackground: 'rgba(0,136,204,.25)',
+            black: '#0f172a',
+            red: '#d7265a',
+            green: '#008844',
+            yellow: '#996600',
+            blue: '#0066cc',
+            magenta: '#6320c0',
+            cyan: '#0088aa',
+            white: '#334155',
+            brightBlack: '#64748b',
+            brightRed: '#e11d48',
+            brightGreen: '#00aa55',
+            brightYellow: '#aa7700',
+            brightBlue: '#0088ff',
+            brightMagenta: '#7c3aed',
+            brightCyan: '#00aacc',
+            brightWhite: '#000000'
+        };
+    }
+    return {
+        background: bg,
+        foreground: fg,
+        cursor: cursor,
+        cursorAccent: '#0a0a1a',
+        selectionBackground: 'rgba(0,212,255,.25)',
+        black: '#1a1a2e',
+        red: '#ff006e',
+        green: '#00ff88',
+        yellow: '#ffbe0b',
+        blue: '#00d4ff',
+        magenta: '#7b2ff7',
+        cyan: '#00d4ff',
+        white: '#e8e8f0',
+        brightBlack: '#3a3a5e',
+        brightRed: '#ff4488',
+        brightGreen: '#33ffaa',
+        brightYellow: '#ffdd33',
+        brightBlue: '#33ddff',
+        brightMagenta: '#9955ff',
+        brightCyan: '#33ddff',
+        brightWhite: '#ffffff'
+    };
+}
+
+function refreshTerminalThemesForCurrentTheme() {
+    var colors = getSavedColors();
+    sessions.forEach(function (s) {
+        if (s && s.term) s.term.options.theme = buildTerminalTheme(colors);
+    });
+    var body = document.querySelector('.term-body');
+    if (body && isDefaultTermBg(colors.bg)) body.style.background = '';
+    var fgInput = document.getElementById('fgCustomColor');
+    var bgInput = document.getElementById('bgCustomColor');
+    var cursorInput = document.getElementById('cursorCustomColor');
+    var defaults = defaultSavedTermColors();
+    if (fgInput && isDefaultTermFg(colors.fg)) fgInput.value = defaults.fg;
+    if (bgInput && isDefaultTermBg(colors.bg)) bgInput.value = defaults.bg;
+    if (cursorInput && isDefaultTermCursor(colors.cursor)) cursorInput.value = defaults.cursor;
+    var panel = document.getElementById('colorPanel');
+    if (panel && panel.classList.contains('show')) renderSwatches();
+}
+
 function getCurrentFontSize() {
     var saved = parseInt(localStorage.getItem(FONT_KEY));
     return saved || (window.innerWidth <= 520 ? 13 : 15);
@@ -2045,9 +2212,9 @@ function updateFontSizeLabel() {
 }
 
 // ==================== Color Picker ====================
-var FG_COLORS = ['#e8e8f0','#ffffff','#00ff88','#00d4ff','#ffbe0b','#ff006e','#7b2ff7','#ff4488','#33ffaa','#33ddff','#ffdd33','#9955ff','#f97316','#a3e635','#e879f9','#94a3b8'];
-var BG_COLORS = ['#0a0a1a','#000000','#1a1a2e','#0d1117','#1e1e2e','#282a36','#002b36','#2e3440','#1a1b26','#161616','#0c0c1d','#121212','#0f172a','#18181b','#27272a','#1c1917'];
-var CURSOR_COLORS = ['#00d4ff','#ffffff','#00ff88','#ffbe0b','#ff006e','#7b2ff7','#ff4488','#f97316','#e879f9','#a3e635'];
+var FG_COLORS = ['#1a1a2e','#0f172a','#e8e8f0','#ffffff','#00ff88','#00d4ff','#ffbe0b','#ff006e','#7b2ff7','#ff4488','#33ffaa','#33ddff','#ffdd33','#9955ff','#f97316','#a3e635','#e879f9','#94a3b8'];
+var BG_COLORS = ['#e8eaf0','#f8fafc','#ffffff','#0a0a1a','#000000','#1a1a2e','#0d1117','#1e1e2e','#282a36','#002b36','#2e3440','#1a1b26','#161616','#0c0c1d','#121212','#0f172a','#18181b','#27272a','#1c1917'];
+var CURSOR_COLORS = ['#0088cc','#00d4ff','#ffffff','#00ff88','#ffbe0b','#ff006e','#7b2ff7','#ff4488','#f97316','#e879f9','#a3e635'];
 
 function toggleColorPicker() {
     var p = document.getElementById('colorPanel');
@@ -2081,8 +2248,18 @@ function renderSwatchGroup(containerId, palette, active, onClick) {
 }
 
 function getSavedColors() {
-    try { var c = JSON.parse(localStorage.getItem(COLOR_KEY)); if (c) return c; } catch (e) { }
-    return { fg: '#e8e8f0', bg: '#0a0a1a', cursor: '#00d4ff' };
+    var defaults = defaultSavedTermColors();
+    try {
+        var c = JSON.parse(localStorage.getItem(COLOR_KEY));
+        if (c) {
+            return {
+                fg: isDefaultTermFg(c.fg) ? defaults.fg : c.fg,
+                bg: isDefaultTermBg(c.bg) ? defaults.bg : c.bg,
+                cursor: isDefaultTermCursor(c.cursor) ? defaults.cursor : c.cursor
+            };
+        }
+    } catch (e) { }
+    return defaults;
 }
 
 function saveColors(fg, bg, cursor) {
@@ -2116,19 +2293,14 @@ function applyCursorColor(color) {
 
 function resetTermColors() {
     localStorage.removeItem(COLOR_KEY);
+    var defaults = defaultSavedTermColors();
     if (activeIdx >= 0 && sessions[activeIdx]) {
-        sessions[activeIdx].term.options.theme = {
-            background: 'rgba(10,10,26,0)', foreground: '#e8e8f0', cursor: '#00d4ff', cursorAccent: '#0a0a1a',
-            selectionBackground: 'rgba(0,212,255,.25)', black: '#1a1a2e', red: '#ff006e', green: '#00ff88',
-            yellow: '#ffbe0b', blue: '#00d4ff', magenta: '#7b2ff7', cyan: '#00d4ff', white: '#e8e8f0',
-            brightBlack: '#3a3a5e', brightRed: '#ff4488', brightGreen: '#33ffaa', brightYellow: '#ffdd33',
-            brightBlue: '#33ddff', brightMagenta: '#9955ff', brightCyan: '#33ddff', brightWhite: '#fff'
-        };
+        sessions[activeIdx].term.options.theme = buildTerminalTheme(defaults);
         document.querySelector('.term-body').style.background = '';
     }
-    document.getElementById('fgCustomColor').value = '#e8e8f0';
-    document.getElementById('bgCustomColor').value = '#0a0a1a';
-    document.getElementById('cursorCustomColor').value = '#00d4ff';
+    document.getElementById('fgCustomColor').value = defaults.fg;
+    document.getElementById('bgCustomColor').value = defaults.bg;
+    document.getElementById('cursorCustomColor').value = defaults.cursor;
     renderSwatches();
     showToast('已重置默认颜色', 'info');
 }
@@ -2160,6 +2332,7 @@ function applyTheme(theme) {
     }
     var icon = document.getElementById('themeIcon');
     if (icon) icon.innerHTML = themeIcons[theme] || themeIcons.auto;
+    refreshTerminalThemesForCurrentTheme();
 }
 
 function cycleTheme() {
