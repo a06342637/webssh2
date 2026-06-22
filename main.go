@@ -111,6 +111,7 @@ func main() {
 		api.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)
 		api.GET("/admin/version", controller.AdminVersion)
 		api.POST("/admin/update", controller.AdminUpdate)
+		api.GET("/admin/update/status", controller.AdminUpdateStatus)
 	}
 
 	server.GET("/term", func(c *gin.Context) {

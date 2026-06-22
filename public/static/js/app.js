@@ -477,6 +477,7 @@ var accountAutoSynced = false;
 var scriptSyncTimer = null;
 var managedAccounts = [];
 var editingManagedAccount = null;
+var versionUpdatePollTimer = null;
 
 function loadBM(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch (e) { return []; } }
 function getScriptUpdatedAt() { return parseInt(localStorage.getItem(SBK_UPDATED)) || 0; }
@@ -1018,7 +1019,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.5');
+    var current = clean(data.currentVersion || data.current, '0.5.6');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -1059,22 +1060,74 @@ function checkVersionUpdate() {
         });
 }
 
+function compactUpdateLog(logs) {
+    logs = String(logs || '').trim();
+    if (!logs) return '';
+    var lines = logs.split(/\r?\n/).filter(Boolean);
+    return lines.slice(-4).join(' / ').slice(-260);
+}
+
+function stopVersionUpdatePolling() {
+    if (versionUpdatePollTimer) {
+        clearInterval(versionUpdatePollTimer);
+        versionUpdatePollTimer = null;
+    }
+}
+
+function pollVersionUpdateStatus(updater) {
+    stopVersionUpdatePolling();
+    var startedAt = Date.now();
+    function tick() {
+        apiJSON('/api/admin/update/status?updater=' + encodeURIComponent(updater || ''))
+            .then(function (res) {
+                var data = res.data || {};
+                var logs = compactUpdateLog(data.logs);
+                if (data.success) {
+                    stopVersionUpdatePolling();
+                    setVersionStatus('更新完成，正在刷新页面...' + (logs ? ' · ' + logs : ''), 'ok');
+                    showToast('更新完成，正在刷新页面', 'success');
+                    setTimeout(function () { location.reload(); }, 5000);
+                    return;
+                }
+                if (data.failed) {
+                    stopVersionUpdatePolling();
+                    setVersionStatus('更新失败：' + (logs || data.error || '请查看 Docker 日志'), 'err');
+                    showToast('更新失败，已显示日志末尾', 'error');
+                    return;
+                }
+                setVersionStatus('更新进行中...' + (logs ? ' · ' + logs : ''), 'warn');
+            })
+            .catch(function (err) {
+                if (Date.now() - startedAt > 240000) {
+                    stopVersionUpdatePolling();
+                    setVersionStatus((err && err.msg) || '更新状态读取失败，请稍后手动刷新页面', 'warn');
+                    return;
+                }
+                setVersionStatus('更新中，服务可能正在重启，稍后自动刷新...', 'warn');
+            });
+    }
+    tick();
+    versionUpdatePollTimer = setInterval(tick, 5000);
+    setTimeout(function () { location.reload(); }, 300000);
+}
+
 function runVersionUpdate() {
     if (!requireAdminForUpdate()) return;
     var force = !!document.getElementById('forceUpdateVersion').checked;
-    var reloadDelay = 180000;
+    stopVersionUpdatePolling();
     setVersionStatus(force ? '正在启动强制更新任务，请稍候...' : '正在启动更新任务，请稍候...', 'warn');
     apiJSON('/api/admin/update', { method: 'POST', body: { force: force } })
         .then(function (res) {
-            setVersionStatus((res.msg || '更新任务已启动') + '。构建可能需要几分钟，页面会在约 3 分钟后自动刷新。', 'warn');
+            var updater = res.data && res.data.updater ? res.data.updater : '';
+            setVersionStatus((res.msg || '更新任务已启动') + '。正在跟踪构建日志...', 'warn');
             showToast(res.msg || '更新任务已启动', 'success');
-            setTimeout(function () { location.reload(); }, reloadDelay);
+            pollVersionUpdateStatus(updater);
         })
         .catch(function (err) {
             if (!err || !err.msg) {
-                setVersionStatus('更新请求已发出，Docker 可能正在重启或构建中。页面会在约 3 分钟后自动刷新。', 'warn');
+                setVersionStatus('更新请求已发出，Docker 可能正在重启或构建中。页面会稍后自动刷新。', 'warn');
                 showToast('Docker 可能正在重启或构建中，请稍后刷新', 'info');
-                setTimeout(function () { location.reload(); }, reloadDelay);
+                setTimeout(function () { location.reload(); }, 180000);
                 return;
             }
             var output = err.data && err.data.output ? ('：' + err.data.output.slice(-160)) : '';

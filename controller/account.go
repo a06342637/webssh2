@@ -994,6 +994,20 @@ func dockerOutput(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+func currentGitBranch(ctx context.Context, dir string) string {
+	branch, err := gitOutput(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
+	branch = strings.TrimSpace(branch)
+	if err == nil && branch != "" && branch != "HEAD" {
+		return branch
+	}
+	remoteHead, err := gitOutput(ctx, dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	remoteHead = strings.TrimSpace(remoteHead)
+	if err == nil && strings.HasPrefix(remoteHead, "origin/") {
+		return strings.TrimPrefix(remoteHead, "origin/")
+	}
+	return "main"
+}
+
 func currentDockerImage(ctx context.Context) (string, error) {
 	candidates := []string{}
 	if hostname := strings.TrimSpace(os.Getenv("HOSTNAME")); hostname != "" {
@@ -1021,20 +1035,35 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	if err != nil {
 		return nil, err
 	}
-	branch, err := gitOutput(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil || strings.TrimSpace(branch) == "" {
-		branch = "HEAD"
-	}
-	branch = strings.TrimSpace(branch)
+	branch := currentGitBranch(ctx, dir)
 	updaterName := fmt.Sprintf("webssh-updater-%d", time.Now().Unix())
 	composeCmd := "docker compose up -d --build"
 	if force {
 		composeCmd += " --force-recreate"
 	}
-	script := fmt.Sprintf("git fetch origin && git pull --ff-only origin %s && %s", shellQuote(branch), composeCmd)
+	script := strings.Join([]string{
+		"set -eu",
+		"log(){ printf '%s %s\\n' \"$(date '+%F %T')\" \"$*\"; }",
+		"cd " + shellQuote(hostDir),
+		"log 'WebSSH update started'",
+		"git config --global --add safe.directory " + shellQuote(hostDir) + " >/dev/null 2>&1 || true",
+		"log 'checking git repository'",
+		"git status --short || true",
+		"log 'fetch origin'",
+		"git fetch --prune origin",
+		"log 'pull origin/" + branch + "'",
+		"git pull --ff-only origin " + shellQuote(branch),
+		"log \"source is now $(git rev-parse --short HEAD)\"",
+		"log 'docker compose version'",
+		"docker compose version",
+		"log 'docker compose build/up'",
+		composeCmd,
+		"log 'WebSSH update finished'",
+	}, "\n")
 	out, err := dockerOutput(ctx,
-		"run", "-d", "--rm",
+		"run", "-d",
 		"--name", updaterName,
+		"--label", "webssh.updater=true",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-v", hostDir+":"+hostDir,
 		"-w", hostDir,
@@ -1052,6 +1081,62 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 		"container": out,
 		"sourceDir": dir,
 		"hostDir":   hostDir,
+		"branch":    branch,
+	}, nil
+}
+
+func latestUpdateHelper(ctx context.Context) string {
+	out, err := dockerOutput(ctx, "ps", "-a", "--filter", "label=webssh.updater=true", "--format", "{{.Names}}")
+	if err != nil {
+		return ""
+	}
+	names := strings.Fields(out)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func readUpdateStatus(ctx context.Context, name string) (gin.H, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = latestUpdateHelper(ctx)
+	}
+	if name == "" {
+		return nil, errors.New("暂无更新任务")
+	}
+	state, err := dockerOutput(ctx, "inspect", "-f", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.Error}}|{{.State.FinishedAt}}", name)
+	if err != nil {
+		return nil, fmt.Errorf("读取更新任务状态失败: %s", state)
+	}
+	parts := strings.SplitN(state, "|", 4)
+	status := ""
+	exitCode := ""
+	stateErr := ""
+	finishedAt := ""
+	if len(parts) > 0 {
+		status = parts[0]
+	}
+	if len(parts) > 1 {
+		exitCode = parts[1]
+	}
+	if len(parts) > 2 {
+		stateErr = parts[2]
+	}
+	if len(parts) > 3 {
+		finishedAt = parts[3]
+	}
+	logs, _ := dockerOutput(ctx, "logs", "--tail", "220", name)
+	return gin.H{
+		"updater":    name,
+		"status":     status,
+		"exitCode":   exitCode,
+		"error":      stateErr,
+		"finishedAt": finishedAt,
+		"logs":       logs,
+		"running":    status == "running" || status == "created",
+		"success":    status == "exited" && exitCode == "0",
+		"failed":     status == "exited" && exitCode != "0",
 	}, nil
 }
 
@@ -1172,4 +1257,18 @@ func AdminUpdate(c *gin.Context) {
 	updateData["version"] = info
 	updateData["sourceDir"] = dir
 	c.JSON(http.StatusOK, gin.H{"ok": true, "msg": "更新任务已启动，Docker 将自动重新构建并重启", "data": updateData})
+}
+
+func AdminUpdateStatus(c *gin.Context) {
+	if _, ok := requireAdmin(c); !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	status, err := readUpdateStatus(ctx, c.Query("updater"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "msg": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "data": status})
 }
