@@ -9,6 +9,13 @@ var sftpCurrentPath = '/';
 var serverInfoModalIdx = -1;
 var serverInfoTimer = null;
 var serverInfoSelectedIface = {};
+var TOPBAR_METRICS_KEY = 'webssh_topbar_metrics';
+var FIRST_SSH_SUCCESS_KEY = 'webssh_first_ssh_success_seen';
+var NET_UNIT_KEY = 'webssh_server_net_unit';
+var serverInfoNetUnit = (function () {
+    try { return localStorage.getItem(NET_UNIT_KEY) === 'bits' ? 'bits' : 'bytes'; } catch (e) { return 'bytes'; }
+})();
+var serverInfoGuideTimer = null;
 
 // ==================== Particles ====================
 (function () {
@@ -255,7 +262,7 @@ function renderTabs() {
     bar.innerHTML = sessions.map(function (s, i) {
         var cls = i === activeIdx ? 'ssh-tab active' : 'ssh-tab';
         return '<div class="' + cls + '" onclick="switchTab(' + i + ')">' +
-            '<span class="tab-ip" ondblclick="event.stopPropagation();copyIP(\'' + esc(s.hostname) + '\')" title="双击复制IP">' + esc(s.hostname) + '</span>' +
+            '<span class="tab-ip" onclick="event.stopPropagation();switchTab(' + i + ');copyIP(sessions[' + i + '].hostname)" title="点击复制 IP">' + esc(s.hostname) + '</span>' +
             '<button class="tab-info" onclick="event.stopPropagation();openServerInfoModal(' + i + ')" title="服务器详情">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="10" x2="12" y2="16"/><circle cx="12" cy="7" r="1"/></svg></button>' +
             '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
@@ -290,11 +297,38 @@ function keepActiveTabVisible() {
     });
 }
 
+function isTopbarMetricsEnabled() {
+    try { return localStorage.getItem(TOPBAR_METRICS_KEY) === 'true'; } catch (e) { return false; }
+}
+
+function setTopbarMetricsVisible(show) {
+    var el = document.getElementById('topbarMetrics');
+    if (!el) return;
+    el.classList.toggle('show', !!show);
+    if (!show) el.innerHTML = '';
+}
+
+function startTopbarMetricsPolling(session) {
+    if (!session || !isTopbarMetricsEnabled()) return;
+    if (session.sysInfoTimer) clearInterval(session.sysInfoTimer);
+    fetchSysInfoFor(session);
+    session.sysInfoTimer = setInterval(function () { fetchSysInfoFor(session); }, getSysInterval() * 1000);
+}
+
 function updateMetricsForActive() {
-    document.getElementById('topbarMetrics').innerHTML = '';
+    var el = document.getElementById('topbarMetrics');
+    if (!el) return;
+    el.innerHTML = '';
+    if (!isTopbarMetricsEnabled()) {
+        setTopbarMetricsVisible(false);
+        return;
+    }
     if (activeIdx >= 0 && sessions[activeIdx]) {
         var s = sessions[activeIdx];
         if (s._lastMetrics) renderMetrics(s._lastMetrics);
+        else setTopbarMetricsVisible(false);
+    } else {
+        setTopbarMetricsVisible(false);
     }
 }
 
@@ -314,12 +348,9 @@ function connectSession(session) {
             got = true;
             showToast(session.hostname + ' 连接成功', 'success');
             setupAutoCopy(session);
+            maybeShowFirstServerInfoGuide(session);
             session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
-            if (document.getElementById('enableSysInfo').checked) {
-                fetchSysInfoFor(session);
-                var intv = getSysInterval() * 1000;
-                session.sysInfoTimer = setInterval(function () { fetchSysInfoFor(session); }, intv);
-            }
+            startTopbarMetricsPolling(session);
         }
         session.term.write(e.data);
     };
@@ -362,6 +393,48 @@ function connectFromLogin() {
         setStatus('', '就绪');
         renderScriptBookmarks();
     }, 300);
+}
+
+function maybeShowFirstServerInfoGuide(session) {
+    try {
+        if (localStorage.getItem(FIRST_SSH_SUCCESS_KEY)) return;
+        localStorage.setItem(FIRST_SSH_SUCCESS_KEY, String(Date.now()));
+    } catch (e) {
+        return;
+    }
+    setTimeout(function () {
+        var btn = document.querySelector('.ssh-tab.active .tab-info');
+        if (!btn) {
+            showToast('连接成功：点击标签旁的 ⓘ 可查看服务器详情', 'info');
+            return;
+        }
+        if (serverInfoGuideTimer) {
+            clearTimeout(serverInfoGuideTimer);
+            serverInfoGuideTimer = null;
+        }
+        var old = document.querySelector('.server-info-guide');
+        if (old) old.remove();
+        btn.classList.add('guide-pulse');
+        var box = document.createElement('div');
+        box.className = 'server-info-guide';
+        box.innerHTML = '<b>服务器详情入口</b><span>点击这里可以查看 CPU、内存、磁盘和网络实时曲线。</span>';
+        document.body.appendChild(box);
+        function placeGuide() {
+            if (!document.body.contains(box) || !document.body.contains(btn)) return;
+            var r = btn.getBoundingClientRect();
+            var left = Math.min(window.innerWidth - box.offsetWidth - 12, Math.max(12, r.left + r.width / 2 - box.offsetWidth / 2));
+            var top = Math.min(window.innerHeight - box.offsetHeight - 12, r.bottom + 12);
+            box.style.left = left + 'px';
+            box.style.top = top + 'px';
+        }
+        requestAnimationFrame(placeGuide);
+        setTimeout(placeGuide, 80);
+        serverInfoGuideTimer = setTimeout(function () {
+            btn.classList.remove('guide-pulse');
+            if (box.parentNode) box.remove();
+            serverInfoGuideTimer = null;
+        }, 7200);
+    }, 520);
 }
 
 // ==================== Tab Actions ====================
@@ -432,7 +505,8 @@ function fetchSysInfoFor(session) {
         .then(function (d) {
             if (d.Msg === 'success' && d.Data) {
                 session._lastMetrics = d.Data;
-                if (sessions[activeIdx] === session) renderMetrics(d.Data);
+                recordNetworkSample(session, d.Data);
+                if (sessions[activeIdx] === session && isTopbarMetricsEnabled()) renderMetrics(d.Data);
                 if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) renderServerInfo(d.Data, session);
             } else if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
                 renderServerInfoError(d && d.Msg ? d.Msg : '读取服务器信息失败');
@@ -457,7 +531,13 @@ function fmtUptime(secs) {
 }
 
 function renderMetrics(d) {
+    if (!isTopbarMetricsEnabled()) {
+        setTopbarMetricsVisible(false);
+        return;
+    }
     var c = document.getElementById('topbarMetrics');
+    if (!c) return;
+    setTopbarMetricsVisible(true);
     var mp = pct(d.memUsed, d.memTotal), dp = pct(d.diskUsed, d.diskTotal), cv = parseFloat(d.cpuUsage) || 0;
     var pills = [
         { i: 'server', l: d.os || '?' },
@@ -479,6 +559,97 @@ function renderMetrics(d) {
 
 function fmtBps(v) {
     return fmtB(v) + '/s';
+}
+
+function fmtBitRate(v) {
+    var bits = (parseFloat(v) || 0) * 8;
+    if (!bits) return '0bps';
+    var u = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
+    var i = Math.min(u.length - 1, Math.floor(Math.log(bits) / Math.log(1000)));
+    var n = bits / Math.pow(1000, i);
+    var digits = i === 0 ? 0 : (n >= 100 ? 0 : (n >= 10 ? 1 : 2));
+    return n.toFixed(digits) + u[i];
+}
+
+function fmtNetRate(v) {
+    return serverInfoNetUnit === 'bits' ? fmtBitRate(v) : fmtBps(v);
+}
+
+function fmtNetRateAlt(v) {
+    return serverInfoNetUnit === 'bits' ? fmtBps(v) : fmtBitRate(v);
+}
+
+function changeServerNetUnit(unit) {
+    serverInfoNetUnit = unit === 'bits' ? 'bits' : 'bytes';
+    try { localStorage.setItem(NET_UNIT_KEY, serverInfoNetUnit); } catch (e) { }
+    var s = sessions[serverInfoModalIdx];
+    if (s && s._lastMetrics) renderServerInfo(s._lastMetrics, s);
+}
+
+function recordNetworkSample(session, d) {
+    if (!session || !d) return;
+    var now = Date.now();
+    var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
+    if (!session._netHistory) session._netHistory = {};
+    function push(name, rx, tx) {
+        name = name || '__main__';
+        if (!session._netHistory[name]) session._netHistory[name] = [];
+        session._netHistory[name].push({ t: now, rx: Math.max(0, parseFloat(rx) || 0), tx: Math.max(0, parseFloat(tx) || 0) });
+        if (session._netHistory[name].length > 80) session._netHistory[name].shift();
+    }
+    if (ifaces.length) {
+        ifaces.forEach(function (n) { push(n.name, n.rxRate, n.txRate); });
+    } else {
+        push(d.mainIface || '__main__', d.rxRate, d.txRate);
+    }
+}
+
+function getNetworkHistory(session, ifaceName) {
+    if (!session || !session._netHistory) return [];
+    return session._netHistory[ifaceName] || session._netHistory.__main__ || [];
+}
+
+function buildNetPath(items, key, max, width, height, pad) {
+    if (!items.length) return '';
+    var span = Math.max(1, items.length - 1);
+    return items.map(function (item, idx) {
+        var x = pad + (idx / span) * (width - pad * 2);
+        var y = height - pad - ((parseFloat(item[key]) || 0) / max) * (height - pad * 2);
+        return (idx ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+    }).join(' ');
+}
+
+function buildNetArea(path, items, width, height, pad) {
+    if (!path || !items.length) return '';
+    var firstX = pad;
+    var lastX = width - pad;
+    return path + ' L' + lastX + ' ' + (height - pad) + ' L' + firstX + ' ' + (height - pad) + ' Z';
+}
+
+function networkChartHtml(session, ifaceName) {
+    var history = getNetworkHistory(session, ifaceName).slice(-48);
+    var width = 640, height = 176, pad = 22;
+    var max = 1;
+    history.forEach(function (p) {
+        max = Math.max(max, parseFloat(p.rx) || 0, parseFloat(p.tx) || 0);
+    });
+    var rxPath = buildNetPath(history, 'rx', max, width, height, pad);
+    var txPath = buildNetPath(history, 'tx', max, width, height, pad);
+    var rxArea = buildNetArea(rxPath, history, width, height, pad);
+    var txArea = buildNetArea(txPath, history, width, height, pad);
+    var empty = history.length < 2 ? '<div class="server-net-empty">等待下一次刷新后生成实时曲线</div>' : '';
+    return '<div class="server-net-chart">' +
+        '<div class="server-net-chart-head"><div><b>实时网络曲线</b><span>当前单位：' + (serverInfoNetUnit === 'bits' ? 'Mbps' : 'MB/s') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
+        '<div class="server-net-canvas">' + empty +
+        '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
+        '<line x1="' + pad + '" y1="' + pad + '" x2="' + (width - pad) + '" y2="' + pad + '"/><line x1="' + pad + '" y1="' + (height / 2) + '" x2="' + (width - pad) + '" y2="' + (height / 2) + '"/><line x1="' + pad + '" y1="' + (height - pad) + '" x2="' + (width - pad) + '" y2="' + (height - pad) + '"/>' +
+        (rxArea ? '<path class="net-area rx" d="' + rxArea + '"/>' : '') +
+        (txArea ? '<path class="net-area tx" d="' + txArea + '"/>' : '') +
+        (rxPath ? '<path class="net-line rx" d="' + rxPath + '"/>' : '') +
+        (txPath ? '<path class="net-line tx" d="' + txPath + '"/>' : '') +
+        '</svg></div>' +
+        '<div class="server-net-axis"><span>0</span><span>峰值 ' + fmtNetRate(max) + '</span></div>' +
+        '</div>';
 }
 
 function fmtKb(kb) {
@@ -554,7 +725,7 @@ function restartServerInfoTimer() {
     if (serverInfoModalIdx < 0 || !sessions[serverInfoModalIdx]) return;
     serverInfoTimer = setInterval(function () {
         if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx]) fetchSysInfoFor(sessions[serverInfoModalIdx]);
-    }, getSysInterval() * 1000);
+    }, getServerInfoRefreshSeconds() * 1000);
 }
 
 function changeServerInfoIface(name) {
@@ -578,7 +749,14 @@ function renderServerInfo(d, session) {
     var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
     var selectedIface = getSelectedInterface(d);
     var ifaceName = selectedIface ? selectedIface.name : (d.mainIface || '-');
-    var ifaceOptions = ifaces.map(function (n) {
+    var displayIfaces = ifaces.slice().sort(function (a, b) {
+        if (a.name === ifaceName) return -1;
+        if (b.name === ifaceName) return 1;
+        if (a.name === 'lo') return 1;
+        if (b.name === 'lo') return -1;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    var ifaceOptions = displayIfaces.map(function (n) {
         return '<option value="' + esc(n.name) + '"' + (selectedIface && n.name === selectedIface.name ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
     }).join('');
     var procRows = (Array.isArray(d.processes) ? d.processes : []).slice(0, 12).map(function (p) {
@@ -588,13 +766,18 @@ function renderServerInfo(d, session) {
         return '<tr><td title="' + esc(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + '/' + esc(fmtB(fs.size)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="3">暂无文件系统数据</td></tr>';
     var cb = d.cpuBreakdown || {};
+    var rxRate = selectedIface ? selectedIface.rxRate : d.rxRate;
+    var txRate = selectedIface ? selectedIface.txRate : d.txRate;
+    var rxTotal = selectedIface ? selectedIface.rxTotal : d.rxTotal;
+    var txTotal = selectedIface ? selectedIface.txTotal : d.txTotal;
+    var netUnitToggle = '<div class="server-net-unit-toggle"><button type="button" class="' + (serverInfoNetUnit === 'bytes' ? 'active' : '') + '" onclick="changeServerNetUnit(\'bytes\')">MB/s</button><button type="button" class="' + (serverInfoNetUnit === 'bits' ? 'active' : '') + '" onclick="changeServerNetUnit(\'bits\')">Mbps</button></div>';
     body.innerHTML =
         '<div class="server-info-hero">' +
-        '<div><div class="server-info-kicker">当前连接</div><h3>' + esc(session.hostname) + '</h3><p>' + esc(d.hostname || '-') + ' · ' + esc(d.os || '-') + '</p></div>' +
-        '<div class="server-info-live"><span></span>每 ' + getSysInterval() + ' 秒刷新</div>' +
+        '<div><div class="server-info-kicker">当前连接</div><h3 class="server-info-host-copy" onclick="copyIP(sessions[serverInfoModalIdx].hostname)" title="点击复制 IP">' + esc(session.hostname) + '</h3><p>' + esc(d.hostname || '-') + ' · ' + esc(d.os || '-') + '</p></div>' +
+        '<div class="server-info-live"><span></span>每 ' + getServerInfoRefreshSeconds() + ' 秒刷新</div>' +
         '</div>' +
         '<div class="server-info-grid">' +
-        '<div class="server-info-card wide"><h4>事实信息</h4><div class="server-info-facts">' +
+        '<div class="server-info-card wide"><h4>基础信息</h4><div class="server-info-facts">' +
         '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div><div><span>内核版本</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
         '<div><span>主机名</span><b>' + esc(d.hostname || '-') + '</b></div><div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div>' +
         '<div><span>运行时间</span><b>' + esc(fmtUptimeLong(d.uptime)) + '</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
@@ -606,8 +789,8 @@ function renderServerInfo(d, session) {
         '<div class="server-info-mini">可用 ' + fmtB(d.memAvailable || d.memFree) + '</div></div>' +
         '<div class="server-info-card"><h4>磁盘</h4><div class="srv-big">' + diskPct + '%</div>' + meterHtml('根分区 ' + fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal), d.diskUsed, d.diskTotal, 'linear-gradient(90deg,#00ff88,#00d4ff)') + '<div class="server-info-mini">剩余 ' + fmtB(d.diskFree) + '</div></div>' +
         '<div class="server-info-card"><h4>连接</h4><div class="srv-big small">' + esc((parseInt(d.tcpCount) || 0) + (parseInt(d.udpCount) || 0)) + '</div><div class="server-net-pair compact"><div><span>TCP</span><b>' + esc(d.tcpCount || '0') + '</b></div><div><span>UDP</span><b>' + esc(d.udpCount || '0') + '</b></div></div></div>' +
-        '<div class="server-info-card wide"><div class="server-info-card-head"><h4>网络</h4><div class="server-iface-control">' + (ifaces.length > 1 ? '<select class="server-iface-select" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div></div>' +
-        '<div class="server-net-pair"><div><span>接收速度</span><b>↓ ' + fmtBps(selectedIface ? selectedIface.rxRate : d.rxRate) + '</b></div><div><span>发送速度</span><b>↑ ' + fmtBps(selectedIface ? selectedIface.txRate : d.txRate) + '</b></div><div><span>总接收</span><b>' + fmtB(selectedIface ? selectedIface.rxTotal : d.rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(selectedIface ? selectedIface.txTotal : d.txTotal) + '</b></div></div></div>' +
+        '<div class="server-info-card wide network-card"><div class="server-info-card-head network-head"><h4>网络</h4><div class="server-iface-control">' + netUnitToggle + (ifaces.length > 1 ? '<select class="server-iface-select" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div></div>' +
+        '<div class="server-net-pair"><div class="net-stat rx"><span>接收速度</span><b>↓ ' + fmtNetRate(rxRate) + '</b><small>' + fmtNetRateAlt(rxRate) + '</small></div><div class="net-stat tx"><span>发送速度</span><b>↑ ' + fmtNetRate(txRate) + '</b><small>' + fmtNetRateAlt(txRate) + '</small></div><div><span>总接收</span><b>' + fmtB(rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(txTotal) + '</b></div></div>' + networkChartHtml(session, ifaceName) + '</div>' +
         '<div class="server-info-card wide"><h4>进程</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div></div>' +
         '<div class="server-info-card wide"><h4>文件系统</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>挂载点</th><th>已用/大小</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div></div>' +
         '</div>';
@@ -1179,7 +1362,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.6');
+    var current = clean(data.currentVersion || data.current, '0.5.11');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -1842,6 +2025,10 @@ function getSysInterval() {
     return (v && v >= 5 && v <= 600) ? v : 60;
 }
 
+function getServerInfoRefreshSeconds() {
+    return Math.min(getSysInterval(), 5);
+}
+
 function changeSysInterval(delta) {
     _sysIntervalTemp = Math.max(5, Math.min(600, _sysIntervalTemp + delta));
     document.getElementById('sysIntervalLabel').textContent = _sysIntervalTemp + 's';
@@ -1878,15 +2065,46 @@ function saveSysInterval() {
     showToast('检测间隔已设为 ' + _sysIntervalTemp + ' 秒', 'success');
 }
 
+function saveTopbarMetricsPreference() {
+    var cb = document.getElementById('enableSysInfo');
+    var enabled = !!(cb && cb.checked);
+    try { localStorage.setItem(TOPBAR_METRICS_KEY, enabled ? 'true' : 'false'); } catch (e) { }
+    updateSysInfoHint();
+    if (!enabled) {
+        sessions.forEach(function (s) {
+            if (s.sysInfoTimer) {
+                clearInterval(s.sysInfoTimer);
+                s.sysInfoTimer = null;
+            }
+        });
+        setTopbarMetricsVisible(false);
+        return;
+    }
+    if (activeIdx >= 0 && sessions[activeIdx]) startTopbarMetricsPolling(sessions[activeIdx]);
+}
+
 function updateSysInfoHint() {
     var el = document.querySelector('label[for="enableSysInfo"] span:last-child');
     if (!el) return;
     var sec = getSysInterval();
-    if (sec >= 60 && sec % 60 === 0) {
-        el.textContent = '连接后检测系统信息（每' + (sec / 60) + '分钟检测一次）';
-    } else {
-        el.textContent = '连接后检测系统信息（每' + sec + '秒检测一次）';
+    var cb = document.getElementById('enableSysInfo');
+    if (!cb || !cb.checked) {
+        el.textContent = '显示顶部服务器状态（默认隐藏，不占用检测资源）';
+        return;
     }
+    if (sec >= 60 && sec % 60 === 0) {
+        el.textContent = '显示顶部服务器状态（每' + (sec / 60) + '分钟刷新一次）';
+    } else {
+        el.textContent = '显示顶部服务器状态（每' + sec + '秒刷新一次）';
+    }
+}
+
+function initTopbarMetricsPreference() {
+    var cb = document.getElementById('enableSysInfo');
+    if (!cb) return;
+    cb.checked = isTopbarMetricsEnabled();
+    setTopbarMetricsVisible(false);
+    updateSysInfoHint();
 }
 
 function initSysInterval() {
@@ -2066,6 +2284,17 @@ function resetAllSettings() {
     if (footer) footer.classList.remove('user-hidden');
     var toggleF = document.getElementById('toggleFooter');
     if (toggleF) toggleF.checked = true;
+    try { localStorage.removeItem(TOPBAR_METRICS_KEY); } catch (e) { }
+    var topbarToggle = document.getElementById('enableSysInfo');
+    if (topbarToggle) topbarToggle.checked = false;
+    updateSysInfoHint();
+    sessions.forEach(function (s) {
+        if (s.sysInfoTimer) {
+            clearInterval(s.sysInfoTimer);
+            s.sysInfoTimer = null;
+        }
+    });
+    setTopbarMetricsVisible(false);
     renderBgSwatches();
     showToast('已恢复默认', 'success');
 }
@@ -2251,6 +2480,7 @@ function initPreviewMode() {
 // ==================== Init ====================
 initTheme();
 initSettings();
+initTopbarMetricsPreference();
 initSysInterval();
 ensureScriptBookmarkClock();
 renderConnBookmarks();

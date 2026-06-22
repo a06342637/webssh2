@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=48">
+    <link rel="stylesheet" href="/static/css/style.css?v=49">
     <style>
     /* Splash screen – shown from first byte, hides FOUC */
     #splash{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0a0a1a;transition:opacity .55s ease,visibility .55s ease}
@@ -167,8 +167,8 @@
             <div class="set-group admin-update-group">
                 <div class="set-group-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>版本更新</div>
                 <div class="update-version-card" id="updateVersionInfo">
-                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.6</b></div>
-                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.6</b></div>
+                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.11</b></div>
+                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.11</b></div>
                     <div class="update-version-status" id="updateVersionStatus">只有管理员账号可以检测和更新版本。</div>
                 </div>
                 <label class="checkbox-field" for="forceUpdateVersion" style="padding:0">
@@ -267,9 +267,9 @@
                             </div>
                         </div>
                         <label class="checkbox-field" for="enableSysInfo">
-                            <input type="checkbox" id="enableSysInfo" checked>
+                            <input type="checkbox" id="enableSysInfo" onchange="saveTopbarMetricsPreference()">
                             <span class="checkbox-custom"></span>
-                            <span>连接后检测系统信息（每分钟检测一次）</span>
+                            <span>显示顶部服务器状态（默认隐藏，不占用检测资源）</span>
                         </label>
                         <label class="checkbox-field" for="enableProxy">
                             <input type="checkbox" id="enableProxy" onchange="toggleProxyPanel()">
@@ -666,6 +666,6 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=51"></script>
+    <script src="/static/js/app.js?v=52"></script>
 </body>
 </html>
