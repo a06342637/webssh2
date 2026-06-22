@@ -1077,6 +1077,7 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 		"git status --short || true",
 		"log 'fetch origin'",
 		"git fetch --prune origin \"$BRANCH\"",
+		"if [ -f .git/shallow ]; then log 'repository is shallow; deepening history for safer update'; git fetch --unshallow origin \"$BRANCH\" || git fetch --deepen=1000 origin \"$BRANCH\" || true; fi",
 		gitUpdateCmd,
 		"log \"source is now $(git rev-parse --short HEAD)\"",
 		"log 'docker compose version'",
@@ -1214,7 +1215,7 @@ func readVersionInfo() (gin.H, error) {
 	}
 	latestVersion := currentVersion
 	if latestCommit != "" && latestCommit != currentCommit {
-		if _, err := gitOutput(ctx, dir, "fetch", "--depth=1", "origin", "HEAD"); err == nil {
+		if _, err := gitOutput(ctx, dir, "fetch", "--no-tags", "origin", "HEAD"); err == nil {
 			latestVersion = gitRefAppVersion(ctx, dir, "FETCH_HEAD", currentVersion)
 		}
 	}
