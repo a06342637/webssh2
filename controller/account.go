@@ -1044,8 +1044,8 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	gitUpdateCmd := strings.Join([]string{
 		"log \"pull origin/$BRANCH (fast-forward only)\"",
 		"if ! git pull --ff-only origin \"$BRANCH\"; then",
-		"  log 'fast-forward update failed: local source has diverged. Enable force update to reset tracked source files to the remote version.'",
-		"  exit 20",
+		"  log 'fast-forward update failed: local source has diverged; reset tracked source files to remote version after backup'",
+		"  git reset --hard \"$REMOTE_REF\"",
 		"fi",
 	}, "\n")
 	if force {
@@ -1063,6 +1063,16 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 		"cd " + shellQuote(hostDir),
 		"log 'WebSSH update started'",
 		"git config --global --add safe.directory " + shellQuote(hostDir) + " >/dev/null 2>&1 || true",
+		"BACKUP_DIR=\"$PWD/.webssh-update-backups/$(date +%Y%m%d-%H%M%S)\"",
+		"mkdir -p \"$BACKUP_DIR\"",
+		"git status --short --branch > \"$BACKUP_DIR/git-status.txt\" || true",
+		"git log --oneline --decorate --all -n 80 > \"$BACKUP_DIR/git-log.txt\" || true",
+		"git diff > \"$BACKUP_DIR/git-diff.patch\" || true",
+		"git diff --cached > \"$BACKUP_DIR/git-staged-diff.patch\" || true",
+		"git rev-parse HEAD > \"$BACKUP_DIR/HEAD.txt\" || true",
+		"git bundle create \"$BACKUP_DIR/repo-before-update.bundle\" --all >/dev/null 2>&1 || true",
+		"if [ -f .env ]; then cp -a .env \"$BACKUP_DIR/.env.backup\"; fi",
+		"log \"backup saved to $BACKUP_DIR\"",
 		"log 'checking git repository'",
 		"git status --short || true",
 		"log 'fetch origin'",

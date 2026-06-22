@@ -1,0 +1,5 @@
+.git
+.env
+data
+.webssh-update-backups
+*.log
