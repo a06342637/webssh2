@@ -585,8 +585,13 @@ html[data-theme="light"] .server-net-canvas line{stroke:rgba(0,0,0,.08)}
 .net-area{opacity:.26}
 .net-area.rx{fill:var(--c1)}
 .net-area.tx{fill:var(--c2)}
-.net-label{font-size:9px;font-weight:500;font-family:'JetBrains Mono','Fira Code',monospace;letter-spacing:-.02em;paint-order:stroke;stroke:rgba(10,10,26,.72);stroke-width:2.4px;stroke-linejoin:round;pointer-events:none;opacity:.92}
-html[data-theme="light"] .net-label{stroke:rgba(255,255,255,.88)}
+.net-label-wrap{pointer-events:none}
+.net-label-bg{fill:rgba(7,12,30,.74);stroke-width:1px}
+.net-label-bg.rx{stroke:rgba(0,212,255,.26)}
+.net-label-bg.tx{stroke:rgba(123,47,247,.3)}
+html[data-theme="light"] .net-label-bg{fill:rgba(255,255,255,.86)}
+.net-label{font-size:9px;font-weight:400;font-family:'JetBrains Mono','Fira Code',monospace;letter-spacing:-.02em;paint-order:stroke;stroke:rgba(7,12,30,.42);stroke-width:1px;stroke-linejoin:round;pointer-events:none;opacity:.96}
+html[data-theme="light"] .net-label{stroke:rgba(255,255,255,.72)}
 .net-label.rx{fill:var(--c1)}
 .net-label.tx{fill:var(--c2)}
 .server-net-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:12px;z-index:1;pointer-events:none}

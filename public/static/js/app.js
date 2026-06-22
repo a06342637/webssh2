@@ -668,10 +668,19 @@ function buildNetLabels(items, key, max, width, height, pad, domainStart, domain
         var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
         if (x - lastX < minGap && idx !== items.length - 1) return '';
         lastX = x;
-        var y = netPointY(item, key, max, height, pad) + (cls === 'rx' ? 12 : -10);
+        var label = fmtNetRate(value);
+        var y = netPointY(item, key, max, height, pad) + (cls === 'rx' ? 13 : -11);
         y = Math.max(13, Math.min(height - pad - 8, y));
         var anchor = x < pad + 34 ? 'start' : (x > width - pad - 34 ? 'end' : 'middle');
-        return '<text class="net-label ' + cls + '" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" text-anchor="' + anchor + '">' + esc(fmtNetRate(value)) + '</text>';
+        var labelWidth = Math.max(24, label.length * 5.3 + 8);
+        var rectX = anchor === 'start' ? x - 3 : (anchor === 'end' ? x - labelWidth + 3 : x - labelWidth / 2);
+        var rectY = y - 10;
+        rectX = Math.max(2, Math.min(width - labelWidth - 2, rectX));
+        rectY = Math.max(2, Math.min(height - 14, rectY));
+        return '<g class="net-label-wrap ' + cls + '">' +
+            '<rect class="net-label-bg ' + cls + '" x="' + rectX.toFixed(1) + '" y="' + rectY.toFixed(1) + '" width="' + labelWidth.toFixed(1) + '" height="12" rx="4"/>' +
+            '<text class="net-label ' + cls + '" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" text-anchor="' + anchor + '">' + esc(label) + '</text>' +
+            '</g>';
     }).join('');
 }
 
@@ -1559,7 +1568,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.17');
+    var current = clean(data.currentVersion || data.current, '0.5.18');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -1793,7 +1802,7 @@ function loadSortedScriptBookmarks() {
 function scriptBookmarkItemHtml(b, i) {
     var name = b.name || '';
     var cmd = b.cmd || '';
-    return '<div class="bm-item" data-script-row="1" data-script-index="' + i + '" onclick="runScript(' + i + ')" title="' + esc(cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(name) + '</div><div class="bm-item-host">' + esc(cmd.substring(0, 35)) + '</div></div><div class="bm-item-actions"><span class="bm-item-run">▶</span><button class="bm-item-icon-btn bm-item-edit" title="编辑脚本" onclick="event.stopPropagation();openEditScriptModal(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button><button class="bm-item-del" title="删除脚本" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>';
+    return '<div class="bm-item" data-script-row="1" data-script-index="' + i + '" onclick="event.stopPropagation();runScript(' + i + ')" title="' + esc(cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(name) + '</div><div class="bm-item-host">' + esc(cmd.substring(0, 35)) + '</div></div><div class="bm-item-actions"><span class="bm-item-run">▶</span><button class="bm-item-icon-btn bm-item-edit" title="编辑脚本" onclick="event.stopPropagation();openEditScriptModal(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button><button class="bm-item-del" title="删除脚本" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>';
 }
 
 function makeScriptBookmarkNode(b, i) {
@@ -1806,7 +1815,7 @@ function refreshScriptBookmarkIndices() {
     var rows = document.querySelectorAll('#scriptBookmarkList .bm-item[data-script-row]:not(.removing)');
     rows.forEach(function (row, i) {
         row.dataset.scriptIndex = i;
-        row.setAttribute('onclick', 'runScript(' + i + ')');
+        row.setAttribute('onclick', 'event.stopPropagation();runScript(' + i + ')');
         var edit = row.querySelector('.bm-item-edit');
         var del = row.querySelector('.bm-item-del');
         if (edit) edit.setAttribute('onclick', 'event.stopPropagation();openEditScriptModal(' + i + ')');
@@ -1891,7 +1900,7 @@ function renderScriptBookmarks() {
     } else {
         html += '<div class="bm-item" onclick="event.stopPropagation();showPresets=false;renderScriptBookmarks()" style="border-color:rgba(0,212,255,.15)"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回</div></div></div>';
         html += PRESET_SCRIPTS.map(function (p) {
-            return '<div class="bm-item" onclick="runPresetScript(\'' + p.cmd.replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')" title="' + esc(p.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span></div>';
+            return '<div class="bm-item" onclick="event.stopPropagation();runPresetScript(\'' + p.cmd.replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')" title="' + esc(p.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span></div>';
         }).join('');
         l.innerHTML = html;
         return;
