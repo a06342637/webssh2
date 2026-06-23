@@ -13,7 +13,7 @@ var serverInfoDetailType = null;
 var TOPBAR_METRICS_KEY = 'webssh_topbar_metrics';
 var FIRST_SSH_SUCCESS_KEY = 'webssh_first_ssh_success_seen';
 var NET_UNIT_KEY = 'webssh_server_net_unit';
-var SERVER_INFO_REFRESH_MS = 500;
+var SERVER_INFO_REFRESH_MS = 1000;
 var SERVER_INFO_CHART_MINUTES = 3;
 var SERVER_INFO_DETAIL_CHART_MINUTES = 10;
 var serverInfoNetUnit = (function () {
@@ -796,7 +796,7 @@ function buildNetArea(path, items, width, height, pad, domainStart, domainEnd) {
 
 function buildNetLabels(items, key, max, width, height, pad, domainStart, domainEnd, cls) {
     if (!items.length) return '';
-    var labelLimit = Math.max(7, Math.floor((width - pad * 2) / 70));
+    var labelLimit = Math.max(3, Math.floor((width - pad * 2) / 160));
     var step = Math.max(1, Math.ceil(items.length / labelLimit));
     var seen = {};
     var picked = [];
@@ -807,17 +807,9 @@ function buildNetLabels(items, key, max, width, height, pad, domainStart, domain
     }
     for (var i = 0; i < items.length; i += step) pick(i);
     pick(items.length - 1);
-    if (step > 1) {
-        for (var j = 1; j < items.length - 1; j++) {
-            var prev = parseFloat(items[j - 1][key]) || 0;
-            var cur = parseFloat(items[j][key]) || 0;
-            var next = parseFloat(items[j + 1][key]) || 0;
-            if ((cur >= prev && cur > next) || (cur > prev && cur >= next) || (cur <= prev && cur < next) || (cur < prev && cur <= next)) pick(j);
-        }
-    }
     picked.sort(function (a, b) { return a - b; });
     var lastX = -Infinity;
-    var minGap = items.length <= labelLimit ? 0 : 55;
+    var minGap = items.length <= labelLimit ? 84 : 120;
     return picked.map(function (idx) {
         var item = items[idx];
         var value = parseFloat(item[key]) || 0;
@@ -1722,7 +1714,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.21');
+    var current = clean(data.currentVersion || data.current, '0.5.22');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;

@@ -595,7 +595,7 @@ html[data-theme="light"] .server-net-canvas line{stroke:rgba(0,0,0,.08)}
 .net-label-bg.rx{stroke:rgba(0,212,255,.26)}
 .net-label-bg.tx{stroke:rgba(123,47,247,.3)}
 html[data-theme="light"] .net-label-bg{fill:rgba(255,255,255,.86)}
-.net-label{font-size:11.7px;font-weight:800;font-family:SimHei,'Microsoft YaHei','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;letter-spacing:-.01em;paint-order:stroke;stroke:rgba(7,12,30,.58);stroke-width:1.1px;stroke-linejoin:round;pointer-events:none;opacity:1;fill:#fff}
+.net-label{font-size:11.7px;font-weight:800;font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;letter-spacing:-.01em;paint-order:stroke;stroke:rgba(7,12,30,.58);stroke-width:1.1px;stroke-linejoin:round;pointer-events:none;opacity:1;fill:#fff}
 html[data-theme="light"] .net-label{fill:#111827;stroke:rgba(255,255,255,.86)}
 .server-net-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:12px;z-index:1;pointer-events:none}
 .server-net-axis{position:relative;height:22px;margin-top:8px;color:var(--t3);font-size:10px;font-family:'JetBrains Mono','Fira Code',monospace}
@@ -726,10 +726,10 @@ html[data-theme="light"] .server-detail-kv div{background:rgba(255,255,255,.56);
     .btn-connect{padding:9px 14px;font-size:13px}
 }
 
-:root,html[data-theme="dark"]{--server-panel-text:#fff;--server-panel-muted:rgba(255,255,255,.88);--server-panel-soft:rgba(255,255,255,.76);--server-value-cpu:#38bdf8;--server-value-mem:#22d3ee;--server-value-disk:#34d399;--server-value-conn:#a78bfa;--server-value-warn:#fbbf24;--server-value-pink:#f472b6}
-html[data-theme="light"]{--server-panel-text:#111827;--server-panel-muted:rgba(17,24,39,.88);--server-panel-soft:rgba(17,24,39,.72);--server-value-cpu:#0369a1;--server-value-mem:#0891b2;--server-value-disk:#047857;--server-value-conn:#6d28d9;--server-value-warn:#b45309;--server-value-pink:#be185d}
-@media(prefers-color-scheme:light){html:not([data-theme]){--server-panel-text:#111827;--server-panel-muted:rgba(17,24,39,.88);--server-panel-soft:rgba(17,24,39,.72);--server-value-cpu:#0369a1;--server-value-mem:#0891b2;--server-value-disk:#047857;--server-value-conn:#6d28d9;--server-value-warn:#b45309;--server-value-pink:#be185d}}
-.server-info-card-modal,.server-detail-pop-card{font-family:SimHei,'Microsoft YaHei','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;color:var(--server-panel-text)}
+:root,html[data-theme="dark"]{--server-panel-text:#fff;--server-panel-muted:#fff;--server-panel-soft:#fff}
+html[data-theme="light"]{--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827}
+@media(prefers-color-scheme:light){html:not([data-theme]){--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827}}
+.server-info-card-modal,.server-detail-pop-card{font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;color:var(--server-panel-text)}
 .server-info-hd{align-items:flex-start;min-height:64px}
 .server-info-title-wrap{flex:1;gap:6px;overflow:hidden}
 .server-info-title-wrap span{line-height:1.25}
@@ -741,20 +741,14 @@ html[data-theme="light"]{--server-panel-text:#111827;--server-panel-muted:rgba(1
 .server-info-hero p,.server-info-facts span,.server-net-pair span,.server-summary-grid span,.server-summary-grid small,.server-info-mini,.server-detail-kv span,.server-detail-kv small,.server-net-chart-head span,.server-net-legend span,.server-net-axis,.server-net-peak em,.server-net-pair small{font-family:inherit;color:var(--server-panel-soft)}
 .server-info-facts b,.server-detail-kv b,.server-table td,.server-info-loading,.server-info-error span{font-family:inherit;color:var(--server-panel-text)}
 .server-table{font-family:inherit}
-.server-table th{font-family:inherit;color:var(--c1)}
+.server-table th{font-family:inherit;color:var(--server-panel-text)}
 .server-table tr:hover td{color:var(--server-panel-text)}
 .server-summary-card .server-summary-grid,.server-summary-grid.detail-summary{grid-template-columns:1fr}
 .server-summary-grid div{display:grid;grid-template-columns:minmax(58px,.4fr) minmax(0,1fr);grid-template-areas:"label value" "detail detail";align-items:center;column-gap:10px;row-gap:3px}
 .server-summary-grid span{grid-area:label;margin:0;font-size:11px}
 .server-summary-grid b{grid-area:value;justify-self:start;white-space:normal;overflow:visible;text-overflow:clip;font-family:inherit;font-size:17px;line-height:1.2}
 .server-summary-grid small{grid-area:detail;margin-top:2px;white-space:normal;overflow:visible;text-overflow:clip;font-size:11px;line-height:1.35}
-.server-summary-grid div:nth-child(1) b{color:var(--server-value-cpu)}
-.server-summary-grid div:nth-child(2) b{color:var(--server-value-mem)}
-.server-summary-grid div:nth-child(3) b{color:var(--server-value-disk)}
-.server-summary-grid div:nth-child(4) b{color:var(--server-value-conn)}
-.server-summary-grid div:nth-child(5) b{color:var(--server-value-pink)}
-.server-summary-grid div:nth-child(6) b{color:var(--server-value-warn)}
-.server-net-pair .net-stat.rx b,.server-detail-kv div:nth-child(2) b,.net-label.rx{color:var(--c1);fill:var(--c1)}
-.server-net-pair .net-stat.tx b,.server-detail-kv div:nth-child(3) b,.net-label.tx{color:var(--c2);fill:var(--c2)}
-.server-net-pair div:nth-child(3) b,.server-detail-kv div:nth-child(4) b{color:var(--server-value-cpu)}
-.server-net-pair div:nth-child(4) b,.server-detail-kv div:nth-child(5) b{color:var(--server-value-conn)}
+.server-summary-grid div:nth-child(n) b,.server-net-pair div:nth-child(n) b,.server-detail-kv div:nth-child(n) b{color:var(--server-panel-text)}
+.net-label,.net-label.rx,.net-label.tx{fill:var(--server-panel-text);font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif}
+.server-net-peak.rx,.server-net-peak.tx,.server-info-kicker,.server-card-open,.server-iface-select,.server-iface-chip,.server-net-unit-toggle button,.server-net-unit-toggle button.active{color:var(--server-panel-text)}
+.server-info-host-copy:hover,.server-net-unit-toggle button:hover,.server-info-guide b{color:var(--server-panel-text)}
