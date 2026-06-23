@@ -782,6 +782,7 @@ function getResourceHistory(session) {
 function resourceSparklineHtml(session, key, fixedMax, cls) {
     var history = getResourceHistory(session).slice(-180);
     if (!history.length) return '<div class="server-summary-sparkline empty"></div>';
+    if (history.length === 1) history = [history[0], history[0]];
     var width = 160, height = 42, pad = 4;
     var max = parseFloat(fixedMax) || 0;
     if (!max) {
@@ -798,11 +799,44 @@ function resourceSparklineHtml(session, key, fixedMax, cls) {
     var firstX = pad;
     var lastX = pad + (history.length > 1 ? width - pad * 2 : 0);
     var area = path + ' L' + lastX.toFixed(1) + ' ' + (height - pad) + ' L' + firstX.toFixed(1) + ' ' + (height - pad) + ' Z';
+    var hover = buildResourceHoverOverlay(history, key, max, width, height, pad);
     return '<div class="server-summary-sparkline ' + esc(cls || key) + '">' +
         '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
         '<path class="summary-spark-area" d="' + area + '"/>' +
         '<path class="summary-spark-line" d="' + path + '"/>' +
+        hover +
         '</svg></div>';
+}
+
+function formatResourceSparkValue(key, value) {
+    value = Math.max(0, parseFloat(value) || 0);
+    if (key === 'conn') return Math.round(value) + '';
+    return value.toFixed(value >= 10 ? 0 : 1) + '%';
+}
+
+function buildResourceHoverOverlay(history, key, max, width, height, pad) {
+    if (!history.length) return '';
+    var labelMap = { cpu: 'CPU', mem: '内存', disk: '磁盘', conn: '连接' };
+    var span = Math.max(1, history.length - 1);
+    return history.map(function (p, idx) {
+        var value = Math.max(0, parseFloat(p[key]) || 0);
+        var x = pad + (idx / span) * (width - pad * 2);
+        var prevX = idx > 0 ? pad + ((idx - 1) / span) * (width - pad * 2) : pad;
+        var nextX = idx < history.length - 1 ? pad + ((idx + 1) / span) * (width - pad * 2) : width - pad;
+        var hitX = idx === 0 ? pad : (prevX + x) / 2;
+        var hitW = idx === history.length - 1 ? (width - pad - hitX) : ((x + nextX) / 2 - hitX);
+        var tipW = 74, tipH = 27;
+        var tipX = Math.max(3, Math.min(width - tipW - 3, x + 6));
+        var tipY = 3;
+        return '<g class="chart-hover summary-hover">' +
+            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="0" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + height + '"/>' +
+            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>' +
+            '<g class="chart-hover-tip" transform="translate(' + tipX.toFixed(1) + ' ' + tipY + ')">' +
+            '<rect width="' + tipW + '" height="' + tipH + '" rx="5"/>' +
+            '<text x="6" y="11">' + esc(formatBeijingMinute(p.t || Date.now())) + '</text>' +
+            '<text x="6" y="22">' + esc(labelMap[key] || key) + ' ' + esc(formatResourceSparkValue(key, value)) + '</text>' +
+            '</g></g>';
+    }).join('');
 }
 
 function getNetworkHistory(session, ifaceName) {
@@ -922,6 +956,31 @@ function networkTimeAxisHtml(domain) {
     }).join('');
 }
 
+function buildNetHoverOverlay(items, max, width, height, pad, domainStart, domainEnd) {
+    if (!items.length) return '';
+    var span = Math.max(1, items.length - 1);
+    return items.map(function (item, idx) {
+        var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
+        var prevX = idx > 0 ? netPointX(items[idx - 1], idx - 1, items, width, pad, domainStart, domainEnd) : pad;
+        var nextX = idx < items.length - 1 ? netPointX(items[idx + 1], idx + 1, items, width, pad, domainStart, domainEnd) : width - pad;
+        var hitX = idx === 0 ? pad : (prevX + x) / 2;
+        var hitW = idx === items.length - 1 ? (width - pad - hitX) : ((x + nextX) / 2 - hitX);
+        if (span === 1 && items.length === 1) hitW = width - pad * 2;
+        var tipW = 126, tipH = 50;
+        var tipX = Math.max(4, Math.min(width - tipW - 4, x + 10));
+        var tipY = pad + 6;
+        return '<g class="chart-hover net-hover">' +
+            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="' + pad + '" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + (height - pad * 2) + '"/>' +
+            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>' +
+            '<g class="chart-hover-tip" transform="translate(' + tipX.toFixed(1) + ' ' + tipY + ')">' +
+            '<rect width="' + tipW + '" height="' + tipH + '" rx="6"/>' +
+            '<text x="7" y="13">' + esc(formatBeijingMinute(item.t || Date.now())) + '</text>' +
+            '<text x="7" y="29">接收 ' + esc(fmtNetRate(item.rx)) + '</text>' +
+            '<text x="7" y="43">发送 ' + esc(fmtNetRate(item.tx)) + '</text>' +
+            '</g></g>';
+    }).join('');
+}
+
 function networkChartHtml(session, ifaceName, minutes) {
     var history = getNetworkHistory(session, ifaceName).slice(-1800);
     var domain = networkDomain(history, minutes || SERVER_INFO_CHART_MINUTES);
@@ -942,6 +1001,7 @@ function networkChartHtml(session, ifaceName, minutes) {
     var txArea = buildNetArea(txPath, history, width, height, pad, domain.start, domain.end);
     var rxLabels = buildNetLabels(history, 'rx', max, width, height, pad, domain.start, domain.end, 'rx');
     var txLabels = buildNetLabels(history, 'tx', max, width, height, pad, domain.start, domain.end, 'tx');
+    var hoverOverlay = buildNetHoverOverlay(history, max, width, height, pad, domain.start, domain.end);
     var empty = history.length < 2 ? '<div class="server-net-empty">等待下一次刷新后生成实时曲线</div>' : '';
     var grid = '';
     for (var gi = 0; gi <= 4; gi++) {
@@ -964,6 +1024,7 @@ function networkChartHtml(session, ifaceName, minutes) {
         (txPath ? '<path class="net-line tx" d="' + txPath + '"/>' : '') +
         rxLabels +
         txLabels +
+        hoverOverlay +
         '</svg></div>' +
         '<div class="server-net-axis">' + networkTimeAxisHtml(domain) + '</div>' +
         '</div>';
@@ -1760,7 +1821,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.23');
+    var current = clean(data.currentVersion || data.current, '0.5.24');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
