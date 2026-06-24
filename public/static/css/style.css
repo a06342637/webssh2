@@ -736,9 +736,9 @@ html[data-theme="light"] .server-detail-kv div{background:rgba(255,255,255,.56);
     .btn-connect{padding:9px 14px;font-size:13px}
 }
 
-:root,html[data-theme="dark"]{--server-panel-text:#fff;--server-panel-muted:#fff;--server-panel-soft:#fff}
-html[data-theme="light"]{--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827}
-@media(prefers-color-scheme:light){html:not([data-theme]){--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827}}
+:root,html[data-theme="dark"]{--server-panel-text:#fff;--server-panel-muted:#fff;--server-panel-soft:#fff;--server-panel-bg:#000;--server-panel-card:#000;--server-panel-card-soft:#050505;--server-panel-border:rgba(255,255,255,.14);--server-panel-grid:rgba(255,255,255,.13);--server-panel-grid-soft:rgba(255,255,255,.07)}
+html[data-theme="light"]{--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827;--server-panel-bg:#fff;--server-panel-card:#fff;--server-panel-card-soft:#fff;--server-panel-border:rgba(17,24,39,.14);--server-panel-grid:rgba(17,24,39,.13);--server-panel-grid-soft:rgba(17,24,39,.07)}
+@media(prefers-color-scheme:light){html:not([data-theme]){--server-panel-text:#111827;--server-panel-muted:#111827;--server-panel-soft:#111827;--server-panel-bg:#fff;--server-panel-card:#fff;--server-panel-card-soft:#fff;--server-panel-border:rgba(17,24,39,.14);--server-panel-grid:rgba(17,24,39,.13);--server-panel-grid-soft:rgba(17,24,39,.07)}}
 .server-info-card-modal,.server-detail-pop-card{font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;color:var(--server-panel-text)}
 .server-info-hd{align-items:flex-start;min-height:64px}
 .server-info-title-wrap{flex:1;gap:6px;overflow:hidden}
@@ -786,6 +786,42 @@ html[data-theme="light"] .chart-hover-tip rect{fill:rgba(255,255,255,.94);stroke
 html[data-theme="light"] .net-label-bg{fill:rgba(255,255,255,.92);stroke:rgba(17,24,39,.28)}
 .server-net-peak.rx,.server-net-peak.tx,.server-info-kicker,.server-card-open,.server-iface-select,.server-iface-chip,.server-net-unit-toggle button,.server-net-unit-toggle button.active{color:var(--server-panel-text)}
 .server-info-host-copy:hover,.server-net-unit-toggle button:hover,.server-info-guide b{color:var(--server-panel-text)}
+.server-info-card-modal,.server-detail-pop-card{background:var(--server-panel-bg);border-color:var(--server-panel-border);box-shadow:none}
+.server-info-card-modal::before{display:none}
+.server-info-body,.server-detail-pop-body{background:var(--server-panel-bg)}
+.server-info-hero,.server-info-card,.server-info-card.network-card,.server-net-chart,.server-net-canvas,.server-summary-grid div,.server-info-facts div,.server-net-pair div,.server-detail-kv div{background:var(--server-panel-card);border-color:var(--server-panel-border);box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.server-info-hero::after,.server-net-pair .net-stat::after{display:none}
+.server-info-card:hover{border-color:var(--server-panel-border);box-shadow:none}
+.server-info-card h4::before{background:var(--server-panel-text);box-shadow:none}
+.server-net-chart{padding:12px}
+.server-net-canvas{background:var(--server-panel-card-soft);border-color:var(--server-panel-border)}
+.server-net-canvas line{stroke:var(--server-panel-grid-soft)}
+.server-net-canvas .net-grid-h{stroke:var(--server-panel-grid)}
+.server-net-canvas .net-grid-v{stroke:var(--server-panel-grid-soft)}
+.net-line{stroke:var(--server-panel-text);filter:none;stroke-width:2.6;vector-effect:non-scaling-stroke}
+.net-line.rx{stroke:var(--server-panel-text);color:var(--server-panel-text);opacity:.95}
+.net-line.tx{stroke:var(--server-panel-text);color:var(--server-panel-text);opacity:.72;stroke-dasharray:8 6}
+.net-area{display:none}
+.server-net-legend span::before,.server-net-peak::before{background:var(--server-panel-text);color:var(--server-panel-text);box-shadow:none}
+.server-net-legend .tx::before,.server-net-peak.tx::before{background:transparent;border:1px dashed var(--server-panel-text)}
+.server-net-peaks{margin-bottom:10px}
+.server-net-peak,.server-net-unit-toggle,.server-iface-select,.server-iface-chip{background:var(--server-panel-card);border-color:var(--server-panel-border);box-shadow:none}
+.server-net-unit-toggle button.active{background:var(--server-panel-text);color:var(--server-panel-bg);box-shadow:none}
+.net-label-bg{fill:var(--server-panel-card);stroke:var(--server-panel-border)}
+.net-label,.net-label.rx,.net-label.tx,.net-axis-label{fill:var(--server-panel-text);stroke:var(--server-panel-bg);stroke-width:1px}
+.chart-hover-tip rect{fill:var(--server-panel-card);stroke:var(--server-panel-border)}
+.summary-spark-line{stroke:var(--server-panel-text)}
+.summary-spark-area{fill:var(--server-panel-text);opacity:.08}
+.server-summary-sparkline{background:var(--server-panel-card-soft);border-color:var(--server-panel-border)}
+html[data-theme="light"] .server-info-card-modal,html[data-theme="light"] .server-detail-pop-card{background:var(--server-panel-bg);border-color:var(--server-panel-border);box-shadow:none}
+html[data-theme="light"] .server-info-body,html[data-theme="light"] .server-detail-pop-body{background:var(--server-panel-bg)}
+html[data-theme="light"] .server-info-hero,html[data-theme="light"] .server-info-card,html[data-theme="light"] .server-info-card.network-card,html[data-theme="light"] .server-net-chart,html[data-theme="light"] .server-net-canvas,html[data-theme="light"] .server-summary-grid div,html[data-theme="light"] .server-info-facts div,html[data-theme="light"] .server-net-pair div,html[data-theme="light"] .server-detail-kv div{background:var(--server-panel-card);border-color:var(--server-panel-border);box-shadow:none}
+html[data-theme="light"] .server-net-canvas line{stroke:var(--server-panel-grid-soft)}
+html[data-theme="light"] .server-net-canvas .net-grid-h{stroke:var(--server-panel-grid)}
+html[data-theme="light"] .server-net-unit-toggle button.active{background:var(--server-panel-text);color:var(--server-panel-bg);box-shadow:none}
+.server-net-legend .rx::before,.server-net-peak.rx::before{background:var(--server-panel-text);color:var(--server-panel-text);box-shadow:none}
+.server-net-legend .tx::before,.server-net-peak.tx::before{background:transparent;border:1px dashed var(--server-panel-text);color:var(--server-panel-text);box-shadow:none}
+.net-label-bg.rx,.net-label-bg.tx{fill:var(--server-panel-card);stroke:var(--server-panel-border)}
 @media(max-width:860px){
     .server-info-card-modal{width:94vw;max-width:94vw}
     .server-info-grid{grid-template-columns:1fr;gap:10px}
