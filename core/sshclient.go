@@ -25,10 +25,60 @@ func DecodedMsgToSSHClient(sshInfo string) (SSHClient, error) {
 	if err != nil {
 		return client, err
 	}
-	if strings.Contains(client.Hostname, ":") && string(client.Hostname[0]) != "[" {
-		client.Hostname = "[" + client.Hostname + "]"
-	}
+	normalizeSSHClientAddress(&client)
 	return client, nil
+}
+
+func normalizePort(port int, fallback int) int {
+	if port < 1 || port > 65535 {
+		return fallback
+	}
+	return port
+}
+
+func normalizeHostPort(host string, port int, fallbackPort int) (string, int) {
+	host = strings.TrimSpace(host)
+	port = normalizePort(port, fallbackPort)
+	if host == "" {
+		return host, port
+	}
+
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		if parsedPort, parseErr := strconv.Atoi(p); parseErr == nil {
+			port = normalizePort(parsedPort, port)
+		}
+		return strings.TrimSpace(h), port
+	}
+
+	if strings.HasPrefix(host, "[") {
+		if end := strings.LastIndex(host, "]"); end > 0 {
+			innerHost := strings.TrimSpace(host[1:end])
+			if rest := strings.TrimSpace(host[end+1:]); strings.HasPrefix(rest, ":") {
+				if parsedPort, err := strconv.Atoi(strings.TrimPrefix(rest, ":")); err == nil {
+					port = normalizePort(parsedPort, port)
+				}
+			}
+			return innerHost, port
+		}
+	}
+
+	if strings.Count(host, ":") == 1 {
+		if idx := strings.LastIndex(host, ":"); idx > 0 && idx < len(host)-1 {
+			portPart := host[idx+1:]
+			if parsedPort, err := strconv.Atoi(portPart); err == nil {
+				return strings.TrimSpace(host[:idx]), normalizePort(parsedPort, port)
+			}
+		}
+	}
+
+	return host, port
+}
+
+func normalizeSSHClientAddress(client *SSHClient) {
+	client.Hostname, client.Port = normalizeHostPort(client.Hostname, client.Port, 22)
+	if client.ProxyHost != "" {
+		client.ProxyHost, client.ProxyPort = normalizeHostPort(client.ProxyHost, client.ProxyPort, 1080)
+	}
 }
 
 func (sclient *SSHClient) GenerateClient() error {
@@ -41,6 +91,7 @@ func (sclient *SSHClient) GenerateClient() error {
 		err          error
 	)
 	auth = make([]ssh.AuthMethod, 0)
+	normalizeSSHClientAddress(sclient)
 
 	if sclient.LoginType == 0 {
 		auth = append(auth, ssh.Password(sclient.Password))
@@ -84,13 +135,13 @@ func (sclient *SSHClient) GenerateClient() error {
 	if sclient.Port == 0 {
 		sclient.Port = 22
 	}
-	addr = fmt.Sprintf("%s:%d", sclient.Hostname, sclient.Port)
+	addr = net.JoinHostPort(sclient.Hostname, strconv.Itoa(sclient.Port))
 
 	if sclient.ProxyHost != "" {
 		if sclient.ProxyPort == 0 {
 			sclient.ProxyPort = 1080
 		}
-		proxyAddr := fmt.Sprintf("%s:%d", sclient.ProxyHost, sclient.ProxyPort)
+		proxyAddr := net.JoinHostPort(sclient.ProxyHost, strconv.Itoa(sclient.ProxyPort))
 		var proxyAuth *proxy.Auth
 		if sclient.ProxyUser != "" {
 			proxyAuth = &proxy.Auth{User: sclient.ProxyUser, Password: sclient.ProxyPass}

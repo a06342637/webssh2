@@ -45,6 +45,7 @@ var serverInfoGuideTimer = null;
 
 // ==================== Utility ====================
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function fmtB(b) { b = parseInt(b) || 0; if (!b) return '0B'; var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(b) / Math.log(1024)); return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + u[i]; }
 function pct(u, t) { return Math.round((parseInt(u) || 0) / (parseInt(t) || 1) * 100); }
 function pillCls(v) { return v >= 90 ? 'danger' : v >= 70 ? 'warn' : ''; }
@@ -187,12 +188,44 @@ function getProxyInfo() {
     };
 }
 
+function normalizePortValue(port, fallback) {
+    var p = parseInt(port, 10);
+    if (!p || p < 1 || p > 65535) return fallback || 22;
+    return p;
+}
+
+function parseHostPortInput(host, port) {
+    var out = { host: String(host || '').trim(), port: normalizePortValue(port, 22) };
+    if (!out.host) return out;
+    var bracket = out.host.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    if (bracket) {
+        out.host = bracket[1];
+        if (bracket[2]) out.port = normalizePortValue(bracket[2], out.port);
+        return out;
+    }
+    var idx = out.host.lastIndexOf(':');
+    if (idx > 0 && out.host.indexOf(':') === idx) {
+        var maybePort = out.host.slice(idx + 1);
+        if (/^\d+$/.test(maybePort)) {
+            out.port = normalizePortValue(maybePort, out.port);
+            out.host = out.host.slice(0, idx);
+        }
+    }
+    return out;
+}
+
+function safeDecodeURIComponent(value) {
+    value = String(value || '');
+    try { return decodeURIComponent(value); } catch (e) { return value; }
+}
+
 // ==================== Build SSH Info ====================
 function buildSSHInfoFromForm() {
     var at = document.querySelector('.auth-tab.active').dataset.tab;
+    var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value);
     var info = {
-        hostname: document.getElementById('hostname').value.trim(),
-        port: parseInt(document.getElementById('port').value) || 22,
+        hostname: hp.host,
+        port: hp.port,
         username: document.getElementById('username').value.trim() || 'root',
         logintype: at === 'key' ? 1 : 0
     };
@@ -204,7 +237,8 @@ function buildSSHInfoFromForm() {
 }
 
 function buildSSHInfoDirect(host, port, user, pass) {
-    var info = { hostname: host, port: parseInt(port) || 22, username: user || 'root', logintype: 0, password: pass || '' };
+    var hp = parseHostPortInput(host, port);
+    var info = { hostname: hp.host, port: hp.port, username: user || 'root', logintype: 0, password: pass || '' };
     var proxy = getProxyInfo();
     if (proxy.proxyHost) { info.proxyHost = proxy.proxyHost; info.proxyPort = proxy.proxyPort; info.proxyUser = proxy.proxyUser; info.proxyPass = proxy.proxyPass; }
     return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
@@ -532,9 +566,12 @@ function connectFromLogin() {
 
     var sshInfo = buildSSHInfoFromForm();
     var authType = document.querySelector('.auth-tab.active').dataset.tab;
-    var h = document.getElementById('hostname').value.trim();
-    var p = parseInt(document.getElementById('port').value) || 22;
+    var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value);
+    var h = hp.host;
+    var p = hp.port;
     var u = document.getElementById('username').value.trim() || 'root';
+    document.getElementById('hostname').value = h;
+    document.getElementById('port').value = p;
 
     var session = createSession(h, p, u, sshInfo, { authType: authType });
     showView('terminalView');
@@ -637,13 +674,16 @@ function showAddTab() { document.getElementById('addTabModal').classList.add('sh
 function hideAddTab() { document.getElementById('addTabModal').classList.remove('show'); }
 
 function addNewTab() {
-    var h = document.getElementById('newTabHost').value.trim();
-    var p = document.getElementById('newTabPort').value || '22';
+    var hp = parseHostPortInput(document.getElementById('newTabHost').value, document.getElementById('newTabPort').value);
+    var h = hp.host;
+    var p = hp.port;
     var u = document.getElementById('newTabUser').value.trim() || 'root';
     var pw = document.getElementById('newTabPass').value;
     if (!h) { showToast('请输入主机地址', 'error'); return; }
+    document.getElementById('newTabHost').value = h;
+    document.getElementById('newTabPort').value = p;
     var sshInfo = buildSSHInfoDirect(h, p, u, pw);
-    var session = createSession(h, parseInt(p), u, sshInfo, { authType: 'password' });
+    var session = createSession(h, p, u, sshInfo, { authType: 'password' });
     switchTab(sessions.length - 1);
     hideAddTab();
     setTimeout(function () {
@@ -714,7 +754,7 @@ function renderMetrics(d) {
     var sv = { server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>', cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>', activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>', memory: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/></svg>', hdd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>', zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>', down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>', up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>', clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>' };
     c.innerHTML = pills.map(function (p) {
         var cls = p.c ? ' ' + p.c : '';
-        return '<div class="metric-pill' + cls + '">' + (sv[p.i] || '') + p.l + (p.v ? ' <span class="metric-value">' + p.v + '</span>' : '') + '</div>';
+        return '<div class="metric-pill' + cls + '">' + (sv[p.i] || '') + esc(p.l) + (p.v ? ' <span class="metric-value">' + esc(p.v) + '</span>' : '') + '</div>';
     }).join('');
 }
 
@@ -1910,7 +1950,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.25');
+    var current = clean(data.currentVersion || data.current, '0.5.26');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -2358,11 +2398,11 @@ function sftpLoad(path) {
             document.getElementById('sftpBody').innerHTML = list.map(function (f) {
                 var isDir = f.IsDir;
                 var fp = (path === '/' ? '/' : path + '/') + f.Name;
-                var fpSafe = fp.replace(/'/g, "\\'");
+                var fpArg = escAttr(JSON.stringify(fp));
                 var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
-                var click = isDir ? 'onclick="sftpLoad(\'' + fpSafe + '\')"' : 'onclick="sftpDownload(\'' + fpSafe + '\')"';
-                var dl = isDir ? '' : '<button class="sftp-dl" onclick="event.stopPropagation();sftpDownload(\'' + fpSafe + '\')" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
-                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span><span class="sftp-meta">' + f.Size + '</span>' + dl + '</div>';
+                var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : 'onclick="sftpDownload(' + fpArg + ')"';
+                var dl = isDir ? '' : '<button class="sftp-dl" onclick="event.stopPropagation();sftpDownload(' + fpArg + ')" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span><span class="sftp-meta">' + esc(f.Size) + '</span>' + dl + '</div>';
             }).join('');
         })
         .catch(function () { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>'; });
@@ -3143,8 +3183,7 @@ function initSettings() {
 // ==================== URL Auto-Login ====================
 function isPrivateKey(s) {
     if (!s) return false;
-    var decoded = s;
-    try { decoded = decodeURIComponent(s); } catch (e) {}
+    var decoded = safeDecodeURIComponent(s);
     // Private keys start with -----BEGIN or are very long (>200 chars)
     return decoded.indexOf('-----BEGIN') === 0 || decoded.indexOf('-----BEGIN') !== -1 || decoded.length > 200;
 }
@@ -3167,39 +3206,34 @@ function parseUrlLogin() {
     // ip/port/user/privatekey          (4 parts, key detected)
 
     if (parts.length === 2) {
-        // ip:port/password OR ip/password
-        var hp = parts[0].split(':');
-        host = hp[0];
-        port = hp[1] ? parseInt(hp[1]) : 22;
-        pass = decodeURIComponent(parts[1]);
+        // ip:port/password OR ip/password OR [ipv6]:port/password OR ipv6/password
+        var hp2 = parseHostPortInput(safeDecodeURIComponent(parts[0]), 22);
+        host = hp2.host;
+        port = hp2.port;
+        pass = safeDecodeURIComponent(parts[1]);
         user = 'root';
     } else if (parts.length === 3) {
-        var hp = parts[0].split(':');
-        if (hp.length === 2) {
-            // ip:port/user/password
-            host = hp[0];
-            port = parseInt(hp[1]);
-            user = decodeURIComponent(parts[1]);
-            pass = decodeURIComponent(parts[2]);
-        } else if (/^\d+$/.test(parts[1])) {
+        var hp3 = parseHostPortInput(safeDecodeURIComponent(parts[0]), 22);
+        if (/^\d+$/.test(parts[1])) {
             // ip/port/password
-            host = parts[0];
-            port = parseInt(parts[1]);
-            pass = decodeURIComponent(parts[2]);
+            host = hp3.host;
+            port = normalizePortValue(parts[1], hp3.port);
+            pass = safeDecodeURIComponent(parts[2]);
             user = 'root';
         } else {
-            // ip/user/password
-            host = parts[0];
-            port = 22;
-            user = decodeURIComponent(parts[1]);
-            pass = decodeURIComponent(parts[2]);
+            // ip:port/user/password OR ip/user/password OR ipv6/user/password
+            host = hp3.host;
+            port = hp3.port;
+            user = safeDecodeURIComponent(parts[1]);
+            pass = safeDecodeURIComponent(parts[2]);
         }
     } else if (parts.length === 4) {
         // ip/port/user/password  OR  ip/port/user/privatekey
-        host = parts[0];
-        port = parseInt(parts[1]);
-        user = decodeURIComponent(parts[2]);
-        pass = decodeURIComponent(parts[3]);
+        var hp4 = parseHostPortInput(safeDecodeURIComponent(parts[0]), 22);
+        host = hp4.host;
+        port = /^\d+$/.test(parts[1]) ? normalizePortValue(parts[1], hp4.port) : hp4.port;
+        user = safeDecodeURIComponent(parts[2]);
+        pass = safeDecodeURIComponent(parts[3]);
     } else {
         return null;
     }

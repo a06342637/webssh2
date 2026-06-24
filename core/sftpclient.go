@@ -15,6 +15,7 @@ func (sclient *SSHClient) CreateSftp() error {
 	}
 	client, err := sftp.NewClient(sclient.Client)
 	if err != nil {
+		sclient.Close()
 		return err
 	}
 	sclient.Sftp = client

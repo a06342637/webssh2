@@ -3,7 +3,9 @@ package controller
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	pathpkg "path"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,7 +70,12 @@ type fileSplice []File
 
 func (f fileSplice) Len() int           { return len(f) }
 func (f fileSplice) Swap(i, j int)      { f[i], f[j] = f[j], f[i] }
-func (f fileSplice) Less(i, j int) bool { return f[i].IsDir }
+func (f fileSplice) Less(i, j int) bool {
+	if f[i].IsDir != f[j].IsDir {
+		return f[i].IsDir
+	}
+	return strings.ToLower(f[i].Name) < strings.ToLower(f[j].Name)
+}
 
 func UploadFile(c *gin.Context) *ResponseBody {
 	var (
@@ -129,11 +136,13 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 	if sshClient, err = core.DecodedMsgToSSHClient(sshInfo); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
+		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
 	if err := sshClient.CreateSftp(); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
 		return &responseBody
 	}
 	defer sshClient.Close()
@@ -143,11 +152,16 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 	if sftpFile, err := sshClient.Download(path); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
 	} else {
 		defer sftpFile.Close()
-		c.Writer.WriteHeader(http.StatusOK)
-		fileMeta := strings.Split(path, "/")
-		c.Header("Content-Disposition", "attachment; filename="+fileMeta[len(fileMeta)-1])
+		filename := pathpkg.Base(path)
+		if filename == "." || filename == "/" || filename == "" {
+			filename = "download"
+		}
+		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+		c.Header("Content-Type", "application/octet-stream")
+		c.Status(http.StatusOK)
 		_, _ = io.Copy(c.Writer, sftpFile)
 	}
 	return &responseBody
