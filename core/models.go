@@ -6,19 +6,24 @@ import (
 	"golang.org/x/crypto/ssh"
 	"io"
 	"log"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
-var WcList []*WriteCounter
+var (
+	WcMu   sync.Mutex
+	WcList []*WriteCounter
+)
 
 type WriteCounter struct {
-	Total int
+	Total int64
 	Id    string
 }
 
 func (wc *WriteCounter) Write(p []byte) (int, error) {
 	n := len(p)
-	wc.Total += n
+	atomic.AddInt64(&wc.Total, int64(n))
 	return n, nil
 }
 

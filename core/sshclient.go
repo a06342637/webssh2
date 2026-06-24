@@ -126,7 +126,13 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 		return nil
 	}
 	sclient.Session = sshSession
-	sclient.StdinPipe, _ = sshSession.StdinPipe()
+	stdinPipe, err := sshSession.StdinPipe()
+	if err != nil {
+		log.Println(err)
+		sshSession.Close()
+		return nil
+	}
+	sclient.StdinPipe = stdinPipe
 	wsOutput := new(wsOutput)
 	sshSession.Stdout = wsOutput
 	sshSession.Stderr = wsOutput
@@ -137,9 +143,13 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := sshSession.RequestPty("xterm", rows, cols, modes); err != nil {
+		log.Println(err)
+		sshSession.Close()
 		return nil
 	}
 	if err := sshSession.Shell(); err != nil {
+		log.Println(err)
+		sshSession.Close()
 		return nil
 	}
 	return sclient
@@ -157,10 +167,17 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 			if string(p) == "ping" {
 				continue
 			}
-			if strings.Contains(string(p), "resize") {
-				resizeSlice := strings.Split(string(p), ":")
+			msg := string(p)
+			if strings.HasPrefix(msg, "resize:") {
+				resizeSlice := strings.Split(msg, ":")
+				if len(resizeSlice) != 3 {
+					continue
+				}
 				rows, _ := strconv.Atoi(resizeSlice[1])
 				cols, _ := strconv.Atoi(resizeSlice[2])
+				if rows <= 0 || cols <= 0 {
+					continue
+				}
 				err := sclient.Session.WindowChange(rows, cols)
 				if err != nil {
 					log.Println(err)

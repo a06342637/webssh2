@@ -53,7 +53,13 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		return &responseBody
 	}
 
-	sshClient.InitTerminal(wsConn, row, col)
+	if sshClient.InitTerminal(wsConn, row, col) == nil {
+		wsConn.WriteMessage(1, []byte("\033[31mTerminal initialization failed\033[0m"))
+		wsConn.Close()
+		sshClient.Close()
+		responseBody.Msg = "terminal initialization failed"
+		return &responseBody
+	}
 	sshClient.Connect(wsConn, timeout, closeTip)
 	return &responseBody
 }

@@ -363,6 +363,7 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 .ssh-tab{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:var(--rx);background:var(--inp);border:1px solid transparent;cursor:pointer;transition:all var(--tr);white-space:nowrap;flex-shrink:0;font-size:14px;color:var(--t2);font-family:'JetBrains Mono',monospace}
 .ssh-tab:hover{background:rgba(255,255,255,.08)}
 .ssh-tab.active{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.25);color:var(--c1)}
+.ssh-tab .tab-main{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto}
 .ssh-tab .tab-ip{cursor:pointer;transition:color var(--tr),background var(--tr),box-shadow var(--tr);font-weight:700;text-decoration:none;border-radius:999px;padding:2px 4px;margin-left:-4px}
 .ssh-tab .tab-ip:hover{color:var(--c1);background:rgba(0,212,255,.08);box-shadow:0 0 12px rgba(0,212,255,.12)}
 .ssh-tab .tab-close{width:14px;height:14px;border:none;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:all var(--tr);padding:0;font-size:0}
@@ -597,6 +598,8 @@ html[data-theme="light"] .server-net-canvas line{stroke:rgba(0,0,0,.08)}
 html[data-theme="light"] .net-label-bg{fill:rgba(255,255,255,.86)}
 .net-label{font-size:11.7px;font-weight:800;font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;letter-spacing:-.01em;paint-order:stroke;stroke:rgba(7,12,30,.58);stroke-width:1.1px;stroke-linejoin:round;pointer-events:none;opacity:1;fill:#fff}
 html[data-theme="light"] .net-label{fill:#111827;stroke:rgba(255,255,255,.86)}
+.net-axis-label{fill:var(--server-panel-soft);font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif;font-size:10.5px;font-weight:800;paint-order:stroke;stroke:rgba(7,12,30,.62);stroke-width:1px;stroke-linejoin:round;pointer-events:none}
+html[data-theme="light"] .net-axis-label{stroke:rgba(255,255,255,.9)}
 .server-net-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--t3);font-size:12px;z-index:1;pointer-events:none}
 .server-net-axis{position:relative;height:22px;margin-top:8px;color:var(--t3);font-size:10px;font-family:'JetBrains Mono','Fira Code',monospace}
 .server-net-axis .time-tick{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap}
@@ -667,9 +670,11 @@ html[data-theme="light"] .server-detail-kv div{background:rgba(255,255,255,.56);
     .topbar-sep{display:none}
     .tab-bar{order:2;width:100%;min-width:0;max-width:none;flex:1 0 100%;flex-direction:column;align-items:stretch;gap:4px;max-height:118px;overflow-y:auto;overflow-x:hidden;padding-bottom:0}
     .tab-bar::-webkit-scrollbar{width:4px;height:0}
-    .ssh-tab{width:100%;font-size:11px;padding:6px 8px;justify-content:space-between}
+    .ssh-tab{width:100%;font-size:11px;padding:6px 8px;justify-content:flex-start}
+    .ssh-tab .tab-main{gap:7px;min-width:0;flex:1 1 auto}
     .ssh-tab .tab-ip{min-width:0;overflow:hidden;text-overflow:ellipsis}
     .ssh-tab .tab-info{width:20px;height:20px}
+    .ssh-tab .tab-close{margin-left:auto}
     .tab-add-btn{width:100%;height:26px}
     .tab-add-btn svg{width:9px!important;height:9px!important}
     .term-dots{gap:3px}
@@ -759,9 +764,9 @@ html[data-theme="light"] .server-summary-sparkline{border-color:rgba(0,0,0,.08);
 .server-summary-sparkline svg{display:block;width:100%;height:100%}
 .summary-spark-line{fill:none;stroke:var(--server-panel-text);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .summary-spark-area{fill:var(--server-panel-text);opacity:.12}
-.chart-hover-hit{fill:transparent;pointer-events:all;cursor:crosshair}
+.chart-hover-hit{fill:transparent;pointer-events:all;cursor:crosshair;touch-action:none}
 .chart-hover-line,.chart-hover-tip{display:none;pointer-events:none}
-.chart-hover:hover .chart-hover-line,.chart-hover:hover .chart-hover-tip{display:block}
+.chart-hover:hover .chart-hover-line,.chart-hover:hover .chart-hover-tip,.chart-hover.active .chart-hover-line,.chart-hover.active .chart-hover-tip{display:block}
 .chart-hover-line{stroke:var(--server-panel-text);stroke-width:1.2;stroke-dasharray:4 4;opacity:.86;vector-effect:non-scaling-stroke}
 .chart-hover-tip rect{fill:rgba(8,12,28,.94);stroke:rgba(255,255,255,.22);stroke-width:1}
 html[data-theme="light"] .chart-hover-tip rect{fill:rgba(255,255,255,.94);stroke:rgba(17,24,39,.18)}
@@ -773,3 +778,16 @@ html[data-theme="light"] .chart-hover-tip rect{fill:rgba(255,255,255,.94);stroke
 .net-label,.net-label.rx,.net-label.tx{fill:var(--server-panel-text);font-family:'Microsoft YaHei','微软雅黑','PingFang SC','Hiragino Sans GB','Noto Sans SC',Arial,sans-serif}
 .server-net-peak.rx,.server-net-peak.tx,.server-info-kicker,.server-card-open,.server-iface-select,.server-iface-chip,.server-net-unit-toggle button,.server-net-unit-toggle button.active{color:var(--server-panel-text)}
 .server-info-host-copy:hover,.server-net-unit-toggle button:hover,.server-info-guide b{color:var(--server-panel-text)}
+@media(max-width:860px){
+    .server-info-card-modal{width:94vw;max-width:94vw}
+    .server-info-grid{grid-template-columns:1fr;gap:10px}
+    .server-info-card,.server-info-card:first-child,.server-info-card.wide,.server-info-card.network-card,.server-priority-card,.server-facts-card,.server-summary-card{grid-column:span 1}
+    .server-info-facts,.server-net-pair,.server-net-pair.compact,.server-summary-grid,.server-summary-card .server-summary-grid,.server-summary-grid.detail-summary{grid-template-columns:1fr}
+    .server-info-card-head{align-items:flex-start;flex-direction:column}
+    .server-iface-control{width:100%;justify-content:flex-start}
+    .server-iface-select{max-width:100%;width:100%}
+}
+@media(max-width:520px){
+    .server-summary-grid div{grid-template-columns:minmax(70px,.36fr) minmax(0,1fr)}
+    .server-summary-sparkline{height:34px}
+}

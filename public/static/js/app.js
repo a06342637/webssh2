@@ -55,7 +55,7 @@ function showToast(msg, type) {
     var icons = { success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>', error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>', info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' };
     var d = document.createElement('div');
     d.className = 'toast ' + type;
-    d.innerHTML = (icons[type] || icons.info) + '<span>' + msg + '</span>';
+    d.innerHTML = (icons[type] || icons.info) + '<span>' + esc(msg) + '</span>';
     c.appendChild(d);
     setTimeout(function () { d.classList.add('removing'); setTimeout(function () { d.remove(); }, 300); }, 3000);
 }
@@ -307,9 +307,9 @@ function renderTabs() {
     bar.innerHTML = sessions.map(function (s, i) {
         var cls = i === activeIdx ? 'ssh-tab active' : 'ssh-tab';
         return '<div class="' + cls + '" onclick="switchTab(' + i + ',true)">' +
-            '<span class="tab-ip" ondblclick="event.stopPropagation();copyIP(sessions[' + i + '].hostname)" title="单击切换标签，双击复制 IP">' + esc(s.hostname) + '</span>' +
+            '<span class="tab-main"><span class="tab-ip" ondblclick="event.stopPropagation();copyIP(sessions[' + i + '].hostname)" title="单击切换标签，双击复制 IP">' + esc(s.hostname) + '</span>' +
             '<button class="tab-info" onclick="event.stopPropagation();openServerInfoModal(' + i + ')" title="服务器详情">' +
-            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="10" x2="12" y2="16"/><circle cx="12" cy="7" r="1"/></svg></button>' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="10" x2="12" y2="16"/><circle cx="12" cy="7" r="1"/></svg></button></span>' +
             '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
     }).join('') + addBtn;
@@ -655,7 +655,8 @@ function addNewTab() {
 // ==================== System Info ====================
 function fetchSysInfoFor(session) {
     if (!session.sshInfo) return;
-    return fetch('/sysinfo?sshInfo=' + encodeURIComponent(session.sshInfo))
+    if (session._sysInfoFetchPromise) return session._sysInfoFetchPromise;
+    session._sysInfoFetchPromise = fetch('/sysinfo?sshInfo=' + encodeURIComponent(session.sshInfo))
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg === 'success' && d.Data) {
@@ -673,7 +674,11 @@ function fetchSysInfoFor(session) {
             if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
                 renderServerInfoError('网络请求失败，请稍后重试');
             }
+        })
+        .finally(function () {
+            session._sysInfoFetchPromise = null;
         });
+    return session._sysInfoFetchPromise;
 }
 
 function fmtUptime(secs) {
@@ -823,8 +828,9 @@ function buildResourceHoverOverlay(history, key, max, width, height, pad) {
         var x = pad + (idx / span) * (width - pad * 2);
         var prevX = idx > 0 ? pad + ((idx - 1) / span) * (width - pad * 2) : pad;
         var nextX = idx < history.length - 1 ? pad + ((idx + 1) / span) * (width - pad * 2) : width - pad;
-        var hitX = idx === 0 ? pad : (prevX + x) / 2;
-        var hitW = idx === history.length - 1 ? (width - pad - hitX) : ((x + nextX) / 2 - hitX);
+        var hitX = idx === 0 ? 0 : (prevX + x) / 2;
+        var hitEnd = idx === history.length - 1 ? width : (x + nextX) / 2;
+        var hitW = hitEnd - hitX;
         var tipW = 74, tipH = 27;
         var tipX = Math.max(3, Math.min(width - tipW - 3, x + 6));
         var tipY = 3;
@@ -844,14 +850,27 @@ function getNetworkHistory(session, ifaceName) {
     return session._netHistory[ifaceName] || session._netHistory.__main__ || [];
 }
 
+function chartPadding(pad) {
+    if (typeof pad === 'number') return { top: pad, right: pad, bottom: pad, left: pad };
+    pad = pad || {};
+    return {
+        top: parseFloat(pad.top) || 0,
+        right: parseFloat(pad.right) || 0,
+        bottom: parseFloat(pad.bottom) || 0,
+        left: parseFloat(pad.left) || 0
+    };
+}
+
 function netPointX(item, idx, items, width, pad, domainStart, domainEnd) {
+    var p = chartPadding(pad);
+    var plotW = Math.max(1, width - p.left - p.right);
     if (domainEnd > domainStart && item && item.t) {
         var ratio = (item.t - domainStart) / (domainEnd - domainStart);
         ratio = Math.max(0, Math.min(1, ratio));
-        return pad + ratio * (width - pad * 2);
+        return p.left + ratio * plotW;
     }
     var span = Math.max(1, items.length - 1);
-    return pad + (idx / span) * (width - pad * 2);
+    return p.left + (idx / span) * plotW;
 }
 
 function buildNetPath(items, key, max, width, height, pad, domainStart, domainEnd) {
@@ -864,19 +883,24 @@ function buildNetPath(items, key, max, width, height, pad, domainStart, domainEn
 }
 
 function netPointY(item, key, max, height, pad) {
-    return height - pad - ((parseFloat(item[key]) || 0) / max) * (height - pad * 2);
+    var p = chartPadding(pad);
+    var plotH = Math.max(1, height - p.top - p.bottom);
+    return height - p.bottom - ((parseFloat(item[key]) || 0) / max) * plotH;
 }
 
 function buildNetArea(path, items, width, height, pad, domainStart, domainEnd) {
     if (!path || !items.length) return '';
+    var p = chartPadding(pad);
     var firstX = netPointX(items[0], 0, items, width, pad, domainStart, domainEnd);
     var lastX = netPointX(items[items.length - 1], items.length - 1, items, width, pad, domainStart, domainEnd);
-    return path + ' L' + lastX + ' ' + (height - pad) + ' L' + firstX + ' ' + (height - pad) + ' Z';
+    return path + ' L' + lastX + ' ' + (height - p.bottom) + ' L' + firstX + ' ' + (height - p.bottom) + ' Z';
 }
 
 function buildNetLabels(items, key, max, width, height, pad, domainStart, domainEnd, cls) {
     if (!items.length) return '';
-    var labelLimit = Math.max(3, Math.floor((width - pad * 2) / 160));
+    var p = chartPadding(pad);
+    var plotW = Math.max(1, width - p.left - p.right);
+    var labelLimit = Math.max(3, Math.floor(plotW / 150));
     var step = Math.max(1, Math.ceil(items.length / labelLimit));
     var seen = {};
     var picked = [];
@@ -885,7 +909,17 @@ function buildNetLabels(items, key, max, width, height, pad, domainStart, domain
         seen[idx] = true;
         picked.push(idx);
     }
+    var peakIdx = 0;
+    var peakValue = -1;
+    items.forEach(function (item, idx) {
+        var value = parseFloat(item[key]) || 0;
+        if (value > peakValue) {
+            peakValue = value;
+            peakIdx = idx;
+        }
+    });
     for (var i = 0; i < items.length; i += step) pick(i);
+    pick(peakIdx);
     pick(items.length - 1);
     picked.sort(function (a, b) { return a - b; });
     var lastX = -Infinity;
@@ -894,16 +928,16 @@ function buildNetLabels(items, key, max, width, height, pad, domainStart, domain
         var item = items[idx];
         var value = parseFloat(item[key]) || 0;
         var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
-        if (x - lastX < minGap && idx !== items.length - 1) return '';
+        if (x - lastX < minGap && idx !== items.length - 1 && idx !== peakIdx) return '';
         lastX = x;
         var label = fmtNetRate(value);
         var y = netPointY(item, key, max, height, pad) + (cls === 'rx' ? 17 : -14);
-        y = Math.max(17, Math.min(height - pad - 10, y));
-        var anchor = x < pad + 44 ? 'start' : (x > width - pad - 44 ? 'end' : 'middle');
+        y = Math.max(p.top + 14, Math.min(height - p.bottom - 10, y));
+        var anchor = x < p.left + 44 ? 'start' : (x > width - p.right - 44 ? 'end' : 'middle');
         var labelWidth = Math.max(32, label.length * 7 + 12);
         var rectX = anchor === 'start' ? x - 4 : (anchor === 'end' ? x - labelWidth + 4 : x - labelWidth / 2);
         var rectY = y - 12;
-        rectX = Math.max(2, Math.min(width - labelWidth - 2, rectX));
+        rectX = Math.max(p.left + 2, Math.min(width - labelWidth - 2, rectX));
         rectY = Math.max(2, Math.min(height - 18, rectY));
         return '<g class="net-label-wrap ' + cls + '">' +
             '<rect class="net-label-bg ' + cls + '" x="' + rectX.toFixed(1) + '" y="' + rectY.toFixed(1) + '" width="' + labelWidth.toFixed(1) + '" height="16" rx="5"/>' +
@@ -937,7 +971,10 @@ function networkSpanText(ms) {
     return Math.max(1, Math.ceil(ms / 1000)) + ' 秒';
 }
 
-function networkTimeAxisHtml(domain) {
+function networkTimeAxisHtml(domain, pad, width) {
+    var p = chartPadding(pad || 0);
+    var plotLeftPct = width ? (p.left / width) * 100 : 0;
+    var plotWidthPct = width ? ((width - p.left - p.right) / width) * 100 : 100;
     var ticks = [domain.start];
     var firstMinute = Math.ceil(domain.start / 60000) * 60000;
     for (var t = firstMinute; t < domain.end; t += 60000) ticks.push(t);
@@ -949,7 +986,7 @@ function networkTimeAxisHtml(domain) {
         ticks = compact;
     }
     return ticks.map(function (t, i) {
-        var left = domain.end > domain.start ? ((t - domain.start) / (domain.end - domain.start)) * 100 : 0;
+        var left = domain.end > domain.start ? plotLeftPct + ((t - domain.start) / (domain.end - domain.start)) * plotWidthPct : plotLeftPct;
         left = Math.max(0, Math.min(100, left));
         var cls = 'time-tick' + (left <= 1 ? ' left-edge' : '') + (left >= 99 ? ' right-edge' : '');
         return '<span class="' + cls + '" style="left:' + left.toFixed(2) + '%">' + formatBeijingMinute(t) + '</span>';
@@ -958,20 +995,22 @@ function networkTimeAxisHtml(domain) {
 
 function buildNetHoverOverlay(items, max, width, height, pad, domainStart, domainEnd) {
     if (!items.length) return '';
+    var p = chartPadding(pad);
     var span = Math.max(1, items.length - 1);
     return items.map(function (item, idx) {
         var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
-        var prevX = idx > 0 ? netPointX(items[idx - 1], idx - 1, items, width, pad, domainStart, domainEnd) : pad;
-        var nextX = idx < items.length - 1 ? netPointX(items[idx + 1], idx + 1, items, width, pad, domainStart, domainEnd) : width - pad;
-        var hitX = idx === 0 ? pad : (prevX + x) / 2;
-        var hitW = idx === items.length - 1 ? (width - pad - hitX) : ((x + nextX) / 2 - hitX);
-        if (span === 1 && items.length === 1) hitW = width - pad * 2;
+        var prevX = idx > 0 ? netPointX(items[idx - 1], idx - 1, items, width, pad, domainStart, domainEnd) : p.left;
+        var nextX = idx < items.length - 1 ? netPointX(items[idx + 1], idx + 1, items, width, pad, domainStart, domainEnd) : width - p.right;
+        var hitX = idx === 0 ? 0 : (prevX + x) / 2;
+        var hitEnd = idx === items.length - 1 ? width : (x + nextX) / 2;
+        var hitW = hitEnd - hitX;
+        if (span === 1 && items.length === 1) hitW = width;
         var tipW = 126, tipH = 50;
         var tipX = Math.max(4, Math.min(width - tipW - 4, x + 10));
-        var tipY = pad + 6;
+        var tipY = p.top + 6;
         return '<g class="chart-hover net-hover">' +
-            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="' + pad + '" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + (height - pad * 2) + '"/>' +
-            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>' +
+            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="0" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + height + '"/>' +
+            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + p.top + '" x2="' + x.toFixed(1) + '" y2="' + (height - p.bottom) + '"/>' +
             '<g class="chart-hover-tip" transform="translate(' + tipX.toFixed(1) + ' ' + tipY + ')">' +
             '<rect width="' + tipW + '" height="' + tipH + '" rx="6"/>' +
             '<text x="7" y="13">' + esc(formatBeijingMinute(item.t || Date.now())) + '</text>' +
@@ -981,11 +1020,22 @@ function buildNetHoverOverlay(items, max, width, height, pad, domainStart, domai
     }).join('');
 }
 
+function buildNetYAxis(max, width, height, pad) {
+    var p = chartPadding(pad);
+    var labels = '';
+    for (var i = 0; i <= 4; i++) {
+        var y = p.top + i * ((height - p.top - p.bottom) / 4);
+        var value = max * (1 - i / 4);
+        labels += '<text class="net-axis-label" x="' + (p.left - 9).toFixed(1) + '" y="' + (y + 4).toFixed(1) + '" text-anchor="end">' + esc(fmtNetRate(value)) + '</text>';
+    }
+    return labels;
+}
+
 function networkChartHtml(session, ifaceName, minutes) {
     var history = getNetworkHistory(session, ifaceName).slice(-1800);
     var domain = networkDomain(history, minutes || SERVER_INFO_CHART_MINUTES);
     history = history.filter(function (p) { return !p.t || (p.t >= domain.start && p.t <= domain.end); });
-    var width = 720, height = 210, pad = 22;
+    var width = 760, height = 210, pad = { top: 22, right: 22, bottom: 24, left: 72 };
     var max = 1;
     var rxPeak = 0, txPeak = 0;
     history.forEach(function (p) {
@@ -1004,13 +1054,14 @@ function networkChartHtml(session, ifaceName, minutes) {
     var hoverOverlay = buildNetHoverOverlay(history, max, width, height, pad, domain.start, domain.end);
     var empty = history.length < 2 ? '<div class="server-net-empty">等待下一次刷新后生成实时曲线</div>' : '';
     var grid = '';
+    var chartPad = chartPadding(pad);
     for (var gi = 0; gi <= 4; gi++) {
-        var y = pad + gi * ((height - pad * 2) / 4);
-        grid += '<line class="net-grid-h" x1="' + pad + '" y1="' + y.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + y.toFixed(1) + '"/>';
+        var y = chartPad.top + gi * ((height - chartPad.top - chartPad.bottom) / 4);
+        grid += '<line class="net-grid-h" x1="' + chartPad.left + '" y1="' + y.toFixed(1) + '" x2="' + (width - chartPad.right) + '" y2="' + y.toFixed(1) + '"/>';
     }
     for (var gx = 0; gx <= 6; gx++) {
-        var x = pad + gx * ((width - pad * 2) / 6);
-        grid += '<line class="net-grid-v" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>';
+        var x = chartPad.left + gx * ((width - chartPad.left - chartPad.right) / 6);
+        grid += '<line class="net-grid-v" x1="' + x.toFixed(1) + '" y1="' + chartPad.top + '" x2="' + x.toFixed(1) + '" y2="' + (height - chartPad.bottom) + '"/>';
     }
     return '<div class="server-net-chart">' +
         '<div class="server-net-chart-head"><div><b>实时网络曲线</b><span>最近 ' + networkSpanText(domain.span) + ' · 北京时间 · 当前单位：' + (serverInfoNetUnit === 'bits' ? 'bits/s' : 'B/s') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
@@ -1018,6 +1069,7 @@ function networkChartHtml(session, ifaceName, minutes) {
         '<div class="server-net-canvas">' + empty +
         '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
         grid +
+        buildNetYAxis(max, width, height, pad) +
         (rxArea ? '<path class="net-area rx" d="' + rxArea + '"/>' : '') +
         (txArea ? '<path class="net-area tx" d="' + txArea + '"/>' : '') +
         (rxPath ? '<path class="net-line rx" d="' + rxPath + '"/>' : '') +
@@ -1026,9 +1078,46 @@ function networkChartHtml(session, ifaceName, minutes) {
         txLabels +
         hoverOverlay +
         '</svg></div>' +
-        '<div class="server-net-axis">' + networkTimeAxisHtml(domain) + '</div>' +
+        '<div class="server-net-axis">' + networkTimeAxisHtml(domain, pad, width) + '</div>' +
         '</div>';
 }
+
+function closestChartElement(target, selector) {
+    return target && target.closest ? target.closest(selector) : null;
+}
+
+function clearChartHoverActive(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('.chart-hover.active').forEach(function (el) {
+        el.classList.remove('active');
+    });
+}
+
+function activateChartHover(target) {
+    var hover = closestChartElement(target, '.chart-hover');
+    if (!hover) return;
+    var svg = closestChartElement(hover, 'svg');
+    if (!svg) return;
+    clearChartHoverActive(svg);
+    hover.classList.add('active');
+}
+
+document.addEventListener('pointermove', function (e) {
+    var hit = closestChartElement(e.target, '.chart-hover-hit');
+    if (hit) activateChartHover(hit);
+}, { passive: true });
+
+document.addEventListener('pointerdown', function (e) {
+    var hit = closestChartElement(e.target, '.chart-hover-hit');
+    if (hit) activateChartHover(hit);
+}, { passive: true });
+
+document.addEventListener('pointerout', function (e) {
+    var svg = closestChartElement(e.target, 'svg');
+    if (!svg || !svg.querySelector('.chart-hover')) return;
+    if (e.relatedTarget && svg.contains(e.relatedTarget)) return;
+    clearChartHoverActive(svg);
+}, { passive: true });
 
 function fmtKb(kb) {
     return fmtB((parseFloat(kb) || 0) * 1024);
@@ -1821,7 +1910,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.24');
+    var current = clean(data.currentVersion || data.current, '0.5.25');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;

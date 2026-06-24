@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"webssh/core"
 
@@ -161,32 +162,54 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	defer wsConn.Close()
 	id := c.Query("id")
-	var ready, find bool
+	if strings.TrimSpace(id) == "" {
+		responseBody.Msg = "missing upload id"
+		return &responseBody
+	}
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+	waitTimer := time.NewTimer(30 * time.Second)
+	defer waitTimer.Stop()
+	var ready bool
 	for {
-		if !ready && core.WcList == nil {
-			continue
-		}
+		var total int64
+		var found bool
+		core.WcMu.Lock()
 		for _, v := range core.WcList {
-			if v.Id == id {
-				wsConn.WriteMessage(1, []byte(strconv.Itoa(v.Total)))
-				find = true
-				if !ready {
-					ready = true
-				}
+			if v != nil && v.Id == id {
+				total = atomic.LoadInt64(&v.Total)
+				found = true
 				break
 			}
 		}
-		if ready && !find {
-			wsConn.Close()
-			break
+		core.WcMu.Unlock()
+		if found {
+			ready = true
+			if err := wsConn.WriteMessage(1, []byte(strconv.FormatInt(total, 10))); err != nil {
+				responseBody.Msg = err.Error()
+				return &responseBody
+			}
+			if !waitTimer.Stop() {
+				select {
+				case <-waitTimer.C:
+				default:
+				}
+			}
+			waitTimer.Reset(30 * time.Second)
+		} else if ready {
+			return &responseBody
 		}
-		if ready {
-			time.Sleep(300 * time.Millisecond)
-			find = false
+		select {
+		case <-ticker.C:
+		case <-waitTimer.C:
+			if !ready {
+				responseBody.Msg = "upload progress timeout"
+			}
+			return &responseBody
 		}
 	}
-	return &responseBody
 }
 
 func FileList(c *gin.Context) *ResponseBody {
