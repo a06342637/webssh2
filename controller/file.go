@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	pathpkg "path"
 	"sort"
 	"strconv"
@@ -165,6 +166,114 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		_, _ = io.Copy(c.Writer, sftpFile)
 	}
 	return &responseBody
+}
+
+func RemoteDownloadFile(c *gin.Context) *ResponseBody {
+	var (
+		sshClient core.SSHClient
+		err       error
+	)
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	sshInfo := c.PostForm("sshInfo")
+	rawURL := strings.TrimSpace(c.PostForm("url"))
+	dir := strings.TrimSpace(c.DefaultPostForm("path", ""))
+	filename := sanitizeRemoteFilename(c.PostForm("filename"))
+	if rawURL == "" {
+		responseBody.Msg = "missing remote url"
+		return &responseBody
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		responseBody.Msg = "only http/https url is supported"
+		return &responseBody
+	}
+	if sshClient, err = core.DecodedMsgToSSHClient(sshInfo); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+	if dir == "" {
+		dir = detectHomeDir(sshClient.Sftp, sshClient.Username)
+	}
+	if err := sshClient.Mkdirs(dir); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	httpClient := http.Client{Timeout: 30 * time.Minute}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	req.Header.Set("User-Agent", "webssh-remote-download/1.0")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody.Msg = fmt.Sprintf("remote server returned %s", resp.Status)
+		return &responseBody
+	}
+	if filename == "" {
+		filename = filenameFromDisposition(resp.Header.Get("Content-Disposition"))
+	}
+	if filename == "" {
+		urlFilename, _ := url.PathUnescape(pathpkg.Base(parsedURL.EscapedPath()))
+		filename = sanitizeRemoteFilename(urlFilename)
+	}
+	if filename == "" || filename == "." || filename == "/" {
+		filename = fmt.Sprintf("download-%d", time.Now().Unix())
+	}
+	dstPath := pathpkg.Join(dir, filename)
+	dstFile, err := sshClient.Sftp.Create(dstPath)
+	if err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer dstFile.Close()
+	if _, err = io.Copy(dstFile, resp.Body); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	responseBody.Data = gin.H{"path": dstPath, "filename": filename}
+	return &responseBody
+}
+
+func filenameFromDisposition(value string) string {
+	if value == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	if filename := sanitizeRemoteFilename(params["filename*"]); filename != "" {
+		return filename
+	}
+	return sanitizeRemoteFilename(params["filename"])
+}
+
+func sanitizeRemoteFilename(filename string) string {
+	filename = strings.TrimSpace(filename)
+	filename = strings.ReplaceAll(filename, "\\", "/")
+	filename = pathpkg.Base(filename)
+	if filename == "." || filename == "/" {
+		return ""
+	}
+	return strings.Trim(filename, "\x00\r\n\t ")
 }
 
 func UploadProgressWs(c *gin.Context) *ResponseBody {

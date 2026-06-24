@@ -8,7 +8,7 @@
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=69">
+    <link rel="stylesheet" href="/static/css/style.css?v=70">
     <style>
     /* Splash screen – shown from first byte, hides FOUC */
     #splash{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg,#0a0a1a);transition:opacity .55s ease,visibility .55s ease}
@@ -186,8 +186,8 @@
             <div class="set-group admin-update-group">
                 <div class="set-group-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>版本更新</div>
                 <div class="update-version-card" id="updateVersionInfo">
-                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.28</b></div>
-                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.28</b></div>
+                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.29</b></div>
+                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.29</b></div>
                     <div class="update-version-status" id="updateVersionStatus">只有管理员账号可以检测和更新版本。</div>
                 </div>
                 <label class="checkbox-field" for="forceUpdateVersion" style="padding:0">
@@ -469,12 +469,66 @@
                         <button class="tb-btn sm" onclick="sftpUp()" title="上级"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M18 15l-6-6-6 6"/></svg></button>
                     </div>
                     <div class="sftp-actions">
+                        <button class="tb-btn sm" onclick="showSftpRemoteModal()" title="远程下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M16 16l-4 4-4-4M12 20V10"/><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/></svg></button>
                         <label class="tb-btn sm upload-label" title="上传文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg><input type="file" id="sftpUploadInput" onchange="sftpUpload()" hidden multiple></label>
                         <button class="tb-btn sm" onclick="toggleSftp()" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                     </div>
                 </div>
                 <div class="sftp-body" id="sftpBody">
                     <div class="sftp-loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay sftp-remote-overlay" id="sftpRemoteModal">
+        <div class="glass-card modal-card sftp-remote-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M16 16l-4 4-4-4M12 20V10"/><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/></svg>远程下载到服务器</span>
+                <button class="settings-close" type="button" onclick="hideSftpRemoteModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body sftp-remote-body">
+                <div class="input-field">
+                    <label>下载链接</label>
+                    <input type="url" id="sftpRemoteUrl" class="script-input" placeholder="https://example.com/file.zip">
+                </div>
+                <div class="input-field">
+                    <label>文件名（不填自动获取）</label>
+                    <input type="text" id="sftpRemoteName" class="script-input" placeholder="留空就从链接或响应头自动识别">
+                </div>
+                <div class="input-field">
+                    <label>保存路径</label>
+                    <div class="sftp-remote-path-row">
+                        <input type="text" id="sftpRemotePath" class="script-input" placeholder="/">
+                        <button class="tb-btn sm" type="button" onclick="showSftpDirPicker()" title="选择目录"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></button>
+                    </div>
+                    <small class="auth-hint">默认使用当前 SFTP 目录，也可以手动修改。</small>
+                </div>
+                <div class="sftp-remote-status" id="sftpRemoteStatus"></div>
+                <div class="input-row sftp-remote-actions">
+                    <button class="drawer-add" id="sftpRemoteSubmit" type="button" onclick="submitSftpRemoteDownload()">开始下载</button>
+                    <button class="drawer-add" type="button" onclick="hideSftpRemoteModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay sftp-dir-overlay" id="sftpDirModal">
+        <div class="glass-card modal-card sftp-dir-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>选择保存目录</span>
+                <button class="settings-close" type="button" onclick="hideSftpDirPicker()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body sftp-dir-body">
+                <div class="sftp-dir-path-row">
+                    <input type="text" id="sftpDirPath" class="script-input" placeholder="/">
+                    <button class="tb-btn sm" type="button" onclick="sftpDirGo()" title="前往"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+                    <button class="tb-btn sm" type="button" onclick="sftpDirUp()" title="上级"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M18 15l-6-6-6 6"/></svg></button>
+                </div>
+                <div class="sftp-dir-list" id="sftpDirList"></div>
+                <div class="input-row sftp-remote-actions">
+                    <button class="drawer-add" type="button" onclick="confirmSftpDirPicker()">确认此目录</button>
+                    <button class="drawer-add" type="button" onclick="hideSftpDirPicker()">取消</button>
                 </div>
             </div>
         </div>
@@ -726,6 +780,6 @@
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=69"></script>
+    <script src="/static/js/app.js?v=70"></script>
 </body>
 </html>

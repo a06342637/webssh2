@@ -238,6 +238,26 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .sftp-dl{width:20px;height:20px;border:none;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:3px;transition:all var(--tr);opacity:0;flex-shrink:0}
 .sftp-row:hover .sftp-dl{opacity:1}
 .sftp-dl:hover{color:var(--c1);background:rgba(0,212,255,.1)}
+.sftp-remote-card{width:min(520px,94vw)}
+.sftp-dir-card{width:min(560px,94vw)}
+.sftp-remote-body,.sftp-dir-body{gap:12px}
+.sftp-remote-path-row,.sftp-dir-path-row{display:flex;align-items:center;gap:6px}
+.sftp-remote-path-row .script-input,.sftp-dir-path-row .script-input{flex:1;min-width:0}
+.sftp-remote-status{min-height:18px;color:var(--t3);font-size:11px;line-height:1.45;word-break:break-word}
+.sftp-remote-status.success{color:var(--ok)}
+.sftp-remote-status.error{color:var(--err)}
+.sftp-remote-status.info{color:var(--c1)}
+.sftp-remote-actions{gap:8px}
+.sftp-remote-actions .drawer-add{flex:1;margin:0}
+.sftp-remote-actions .drawer-add:disabled{opacity:.55;cursor:not-allowed}
+.sftp-dir-list{min-height:220px;max-height:46vh;overflow:auto;border:1px solid var(--brd);border-radius:var(--rs);padding:5px;background:var(--inp)}
+.sftp-dir-list::-webkit-scrollbar{width:5px}
+.sftp-dir-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:999px}
+.sftp-dir-row{width:100%;display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid transparent;border-radius:var(--rx);background:transparent;color:var(--t1);font-size:12px;text-align:left;cursor:pointer;transition:all var(--tr)}
+.sftp-dir-row:hover{background:rgba(0,212,255,.08);border-color:rgba(0,212,255,.16);color:var(--c1)}
+.sftp-dir-row svg{color:var(--c1);flex-shrink:0}
+.sftp-dir-row span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sftp-dir-row.up{color:var(--t2);font-weight:700}
 
 /* ==================== TOAST ==================== */
 .toast-container{position:fixed;top:86px;right:18px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
@@ -637,11 +657,12 @@ html[data-theme="light"] .server-detail-kv div{background:rgba(255,255,255,.56);
 @media(max-width:1024px){
     .server-info-card-modal{width:min(620px,76vw);max-width:76vw}
     .server-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .sftp-panel.open{width:min(430px,58vw)}
 }
 @media(max-width:860px){
     .conn-drawer.open{width:220px}
     .script-drawer.open,.script-drawer .drawer-body{width:300px}
-    .sftp-panel.open{width:280px}
+    .sftp-panel.open{width:min(420px,78vw)}
     .server-info-card-modal{width:86vw;max-width:86vw;height:calc(100dvh - 52px);max-height:none}
     .server-info-body{max-height:none}
     .server-info-card,.server-info-card:first-child{grid-column:span 6}
@@ -694,7 +715,14 @@ html[data-theme="light"] .server-detail-kv div{background:rgba(255,255,255,.56);
     .color-panel{width:200px;right:-10px}
     .settings-panel{width:85vw}
     .script-drawer.open,.script-drawer .drawer-body{width:86vw}
-    .sftp-panel.open{width:85vw}
+    .sftp-panel.open{width:100vw}
+    .sftp-header{align-items:stretch;flex-direction:column}
+    .sftp-path-bar,.sftp-actions{width:100%}
+    .sftp-actions{justify-content:flex-end}
+    .sftp-remote-card,.sftp-dir-card{width:96vw;max-width:96vw}
+    .sftp-remote-path-row,.sftp-dir-path-row{gap:5px}
+    .sftp-remote-actions{flex-direction:column}
+    .sftp-dir-list{max-height:44vh}
     .script-toolbar,.auth-sync-actions{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
     .script-tool-btn{font-size:10px;padding:7px 3px}
     .script-account-btn{max-width:96px;padding:5px 7px}

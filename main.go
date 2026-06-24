@@ -138,6 +138,9 @@ func main() {
 		file.POST("/upload", func(c *gin.Context) {
 			c.JSON(200, controller.UploadFile(c))
 		})
+		file.POST("/remote", func(c *gin.Context) {
+			c.JSON(200, controller.RemoteDownloadFile(c))
+		})
 		file.GET("/progress", func(c *gin.Context) {
 			controller.UploadProgressWs(c)
 		})
