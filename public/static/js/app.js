@@ -14,7 +14,8 @@ var serverInfoDetailType = null;
 var TOPBAR_METRICS_KEY = 'webssh_topbar_metrics';
 var FIRST_SSH_SUCCESS_KEY = 'webssh_first_ssh_success_seen';
 var NET_UNIT_KEY = 'webssh_server_net_unit';
-var SERVER_INFO_REFRESH_MS = 1000;
+var SERVER_INFO_NET_REFRESH_MS = 1000;
+var SERVER_INFO_REFRESH_MS = 5000;
 var SERVER_INFO_CHART_MINUTES = 3;
 var SERVER_INFO_DETAIL_CHART_MINUTES = 10;
 var serverInfoNetUnit = (function () {
@@ -701,6 +702,11 @@ function fetchSysInfoFor(session) {
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg === 'success' && d.Data) {
+                if (session._lastMetrics && session._lastMetrics.updatedAt && session._serverInfoNetWanted) {
+                    ['mainIface', 'rxTotal', 'txTotal', 'rxRate', 'txRate', 'interfaces', 'updatedAt'].forEach(function (key) {
+                        if (session._lastMetrics[key] !== undefined) d.Data[key] = session._lastMetrics[key];
+                    });
+                }
                 session._lastMetrics = d.Data;
                 recordNetworkSample(session, d.Data);
                 recordResourceSample(session, d.Data);
@@ -720,6 +726,63 @@ function fetchSysInfoFor(session) {
             session._sysInfoFetchPromise = null;
         });
     return session._sysInfoFetchPromise;
+}
+
+function mergeNetworkMetrics(session, data) {
+    if (!session || !data) return null;
+    if (!session._lastMetrics) return null;
+    var base = session._lastMetrics;
+    ['mainIface', 'rxTotal', 'txTotal', 'rxRate', 'txRate', 'interfaces', 'updatedAt'].forEach(function (key) {
+        if (data[key] !== undefined) base[key] = data[key];
+    });
+    session._lastMetrics = base;
+    return base;
+}
+
+function startServerInfoNetStream(session) {
+    if (!session || !session.sshInfo || session._serverInfoNetWanted) return;
+    session._serverInfoNetWanted = true;
+
+    function connect() {
+        if (!session._serverInfoNetWanted) return;
+        if (session._serverInfoNetWs && session._serverInfoNetWs.readyState <= 1) return;
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var ws = new WebSocket(proto + '//' + location.host + '/sysinfo/net?sshInfo=' + encodeURIComponent(session.sshInfo));
+        session._serverInfoNetWs = ws;
+        ws.onmessage = function (evt) {
+            var msg;
+            try { msg = JSON.parse(evt.data); } catch (e) { return; }
+            if (!msg || msg.Msg !== 'success' || !msg.Data) return;
+            var merged = mergeNetworkMetrics(session, msg.Data);
+            recordNetworkSample(session, msg.Data);
+            if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session && merged) {
+                renderServerInfo(merged, session);
+            }
+        };
+        ws.onclose = function () {
+            if (session._serverInfoNetWs === ws) session._serverInfoNetWs = null;
+            if (session._serverInfoNetWanted) {
+                clearTimeout(session._serverInfoNetReconnectTimer);
+                session._serverInfoNetReconnectTimer = setTimeout(connect, 1500);
+            }
+        };
+        ws.onerror = function () {
+            try { ws.close(); } catch (e) { }
+        };
+    }
+
+    connect();
+}
+
+function stopServerInfoNetStream(session) {
+    if (!session) return;
+    session._serverInfoNetWanted = false;
+    clearTimeout(session._serverInfoNetReconnectTimer);
+    session._serverInfoNetReconnectTimer = null;
+    if (session._serverInfoNetWs) {
+        try { session._serverInfoNetWs.close(); } catch (e) { }
+        session._serverInfoNetWs = null;
+    }
 }
 
 function fmtUptime(secs) {
@@ -1264,6 +1327,9 @@ function getSelectedInterface(d) {
 
 function openServerInfoModal(idx) {
     if (idx < 0 || idx >= sessions.length) return;
+    if (serverInfoModalIdx >= 0 && serverInfoModalIdx !== idx && sessions[serverInfoModalIdx]) {
+        stopServerInfoNetStream(sessions[serverInfoModalIdx]);
+    }
     serverInfoModalIdx = idx;
     var s = sessions[idx];
     var modal = document.getElementById('serverInfoModal');
@@ -1284,10 +1350,13 @@ function openServerInfoModal(idx) {
     if (s._lastMetrics) renderServerInfo(s._lastMetrics, s);
     else document.getElementById('serverInfoBody').innerHTML = '<div class="server-info-loading"><span></span>正在读取服务器信息...</div>';
     modal.classList.add('show');
+    startServerInfoNetStream(s);
     restartServerInfoTimer();
 }
 
 function hideServerInfoModal() {
+    var s = sessions[serverInfoModalIdx];
+    if (s) stopServerInfoNetStream(s);
     serverInfoModalIdx = -1;
     stopServerInfoTimer();
     hideServerInfoDetailModal();
@@ -2063,7 +2132,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.33');
+    var current = clean(data.currentVersion || data.current, '0.5.34');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -3117,7 +3186,7 @@ function getSysInterval() {
 }
 
 function getServerInfoRefreshSeconds() {
-    return SERVER_INFO_REFRESH_MS / 1000;
+    return SERVER_INFO_NET_REFRESH_MS / 1000;
 }
 
 function changeSysInterval(delta) {

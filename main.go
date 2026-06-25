@@ -127,6 +127,9 @@ func main() {
 	server.GET("/sysinfo", func(c *gin.Context) {
 		c.JSON(200, controller.SysInfo(c))
 	})
+	server.GET("/sysinfo/net", func(c *gin.Context) {
+		controller.SysInfoNetWs(c)
+	})
 	file := server.Group("/file")
 	{
 		file.GET("/list", func(c *gin.Context) {

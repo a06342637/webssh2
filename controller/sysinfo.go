@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -8,6 +10,7 @@ import (
 	"webssh/core"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 func SysInfo(c *gin.Context) *ResponseBody {
@@ -85,6 +88,140 @@ func SysInfo(c *gin.Context) *ResponseBody {
 	}
 
 	responseBody.Data = parseSysInfo(string(out))
+	return &responseBody
+}
+
+type netSnapshot struct {
+	at        time.Time
+	mainIface string
+	order     []string
+	counters  map[string][2]float64
+}
+
+func SysInfoNetWs(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+
+	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer wsConn.Close()
+
+	sshInfo := c.DefaultQuery("sshInfo", "")
+	if sshInfo == "" {
+		_, initMsg, err := wsConn.ReadMessage()
+		if err != nil {
+			responseBody.Msg = err.Error()
+			return &responseBody
+		}
+		sshInfo = string(initMsg)
+	}
+
+	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	if err != nil {
+		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.GenerateClient(); err != nil {
+		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+
+	session, err := sshClient.Client.NewSession()
+	if err != nil {
+		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := wsConn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	cmd := `while :; do echo "===NET_MAIN==="; ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || echo ""; echo "===NET==="; cat /proc/net/dev 2>/dev/null | awk 'NR>2 {gsub(/:$/,"",$1); print $1" "$2" "$10}'; sleep 1; done`
+
+	if err := session.Start(cmd); err != nil {
+		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	var prev *netSnapshot
+	var snap *netSnapshot
+	mode := ""
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+
+	flush := func() bool {
+		if snap == nil || len(snap.counters) == 0 {
+			return true
+		}
+		data := buildNetSnapshotData(prev, snap)
+		prevCopy := *snap
+		prev = &prevCopy
+		snap = nil
+		body := &ResponseBody{Msg: "success", Data: data}
+		return writeSysInfoNetMessage(wsConn, body) == nil
+	}
+
+	for scanner.Scan() {
+		select {
+		case <-done:
+			return &responseBody
+		default:
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "===NET_MAIN===" {
+			if !flush() {
+				return &responseBody
+			}
+			snap = &netSnapshot{at: time.Now(), counters: map[string][2]float64{}}
+			mode = "main"
+			continue
+		}
+		if line == "===NET===" {
+			if snap == nil {
+				snap = &netSnapshot{at: time.Now(), counters: map[string][2]float64{}}
+			}
+			mode = "net"
+			continue
+		}
+		if snap == nil {
+			continue
+		}
+		if mode == "main" {
+			snap.mainIface = line
+			continue
+		}
+		if mode == "net" {
+			addNetSnapshotLine(snap, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		responseBody.Msg = err.Error()
+	}
 	return &responseBody
 }
 
@@ -222,6 +359,108 @@ func parseSysInfo(raw string) map[string]interface{} {
 	info["filesystems"] = parseFileSystems(multiSections["filesystems"])
 	info["processes"] = parseProcesses(multiSections["processes"])
 	return info
+}
+
+func writeSysInfoNetMessage(ws *websocket.Conn, body *ResponseBody) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	return ws.WriteMessage(websocket.TextMessage, data)
+}
+
+func addNetSnapshotLine(snap *netSnapshot, line string) {
+	parts := strings.Fields(line)
+	if len(parts) < 3 {
+		return
+	}
+	rx, _ := strconv.ParseFloat(parts[1], 64)
+	tx, _ := strconv.ParseFloat(parts[2], 64)
+	if _, ok := snap.counters[parts[0]]; !ok {
+		snap.order = append(snap.order, parts[0])
+	}
+	snap.counters[parts[0]] = [2]float64{rx, tx}
+}
+
+func buildNetSnapshotData(prev, curr *netSnapshot) map[string]interface{} {
+	mainIface := strings.TrimSpace(curr.mainIface)
+	if mainIface == "" {
+		for _, name := range curr.order {
+			if name != "lo" {
+				mainIface = name
+				break
+			}
+		}
+		if mainIface == "" && len(curr.order) > 0 {
+			mainIface = curr.order[0]
+		}
+	}
+
+	seconds := 1.0
+	if prev != nil {
+		if elapsed := curr.at.Sub(prev.at).Seconds(); elapsed > 0.05 {
+			seconds = elapsed
+		}
+	}
+
+	ifaces := make([]map[string]string, 0, len(curr.order))
+	for _, name := range curr.order {
+		now := curr.counters[name]
+		rxRate := 0.0
+		txRate := 0.0
+		if prev != nil {
+			if before, ok := prev.counters[name]; ok {
+				rxRate = (now[0] - before[0]) / seconds
+				txRate = (now[1] - before[1]) / seconds
+			}
+		}
+		if rxRate < 0 {
+			rxRate = 0
+		}
+		if txRate < 0 {
+			txRate = 0
+		}
+		ifaces = append(ifaces, map[string]string{
+			"name":    name,
+			"rxTotal": fmt.Sprintf("%.0f", now[0]),
+			"txTotal": fmt.Sprintf("%.0f", now[1]),
+			"rxRate":  fmt.Sprintf("%.0f", rxRate),
+			"txRate":  fmt.Sprintf("%.0f", txRate),
+			"main":    fmt.Sprintf("%t", name == mainIface),
+		})
+	}
+
+	data := map[string]interface{}{
+		"mainIface":  mainIface,
+		"interfaces": ifaces,
+		"updatedAt":  time.Now().Format(time.RFC3339),
+	}
+	if counters, ok := curr.counters[mainIface]; ok {
+		data["rxTotal"] = fmt.Sprintf("%.0f", counters[0])
+		data["txTotal"] = fmt.Sprintf("%.0f", counters[1])
+	}
+	for _, item := range ifaces {
+		if item["name"] == mainIface {
+			data["rxRate"] = item["rxRate"]
+			data["txRate"] = item["txRate"]
+			data["rxTotal"] = item["rxTotal"]
+			data["txTotal"] = item["txTotal"]
+			break
+		}
+	}
+	if _, ok := data["rxRate"]; !ok {
+		data["rxRate"] = "0"
+	}
+	if _, ok := data["txRate"]; !ok {
+		data["txRate"] = "0"
+	}
+	if _, ok := data["rxTotal"]; !ok {
+		data["rxTotal"] = "0"
+	}
+	if _, ok := data["txTotal"]; !ok {
+		data["txTotal"] = "0"
+	}
+	return data
 }
 
 func markerKey(line string) string {
