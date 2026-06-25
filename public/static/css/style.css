@@ -970,6 +970,22 @@ html[data-theme="dark"] .login-card::after{content:'';position:absolute;inset:0;
 html[data-theme="dark"] .settings-panel .checkbox-custom,html[data-theme="dark"] .set-group .checkbox-custom{border-color:rgba(255,255,255,.46);background:#0b0b0b;box-shadow:0 0 0 1px rgba(255,255,255,.08) inset}
 html[data-theme="dark"] .settings-panel .checkbox-field input:checked+.checkbox-custom,html[data-theme="dark"] .set-group .checkbox-field input:checked+.checkbox-custom{border-color:#00d4ff;background:rgba(0,212,255,.18);box-shadow:0 0 0 1px rgba(0,212,255,.36) inset,0 0 10px rgba(0,212,255,.18)}
 html[data-theme="dark"] .settings-panel .checkbox-custom::after,html[data-theme="dark"] .set-group .checkbox-custom::after{border-color:#fff}
+html[data-theme="dark"]{--brd:rgba(255,255,255,.18);--inp:#030303;--terminal-surface-soft:#060606;--server-panel-border:rgba(255,255,255,.2);--server-panel-grid:rgba(255,255,255,.18);--server-panel-grid-soft:rgba(255,255,255,.1)}
+html[data-theme="dark"] .settings-panel,html[data-theme="dark"] .drawer-body,html[data-theme="dark"] .sftp-panel,html[data-theme="dark"] .cmd-bar{border-color:rgba(255,255,255,.2)!important;box-shadow:0 0 0 1px rgba(255,255,255,.04) inset!important}
+html[data-theme="dark"] .drawer-hd,html[data-theme="dark"] .sftp-header,html[data-theme="dark"] .script-toolbar,html[data-theme="dark"] .script-form{border-color:rgba(255,255,255,.16)!important}
+html[data-theme="dark"] .set-group,html[data-theme="dark"] .update-version-card,html[data-theme="dark"] .server-info-quick-grid button{border-color:rgba(255,255,255,.24)!important;background:#020202!important}
+html[data-theme="dark"] .set-group:hover,html[data-theme="dark"] .server-info-quick-grid button:hover,html[data-theme="dark"] .server-info-quick-grid button:focus-visible{border-color:rgba(0,212,255,.48)!important;box-shadow:0 0 0 1px rgba(0,212,255,.18) inset!important}
+html[data-theme="dark"] .bm-item,html[data-theme="dark"] .conn-security-note,html[data-theme="dark"] .drawer-add,html[data-theme="dark"] .script-tool-btn,html[data-theme="dark"] .script-account-btn{border-color:rgba(255,255,255,.16)!important;background:#020202!important}
+html[data-theme="dark"] .bm-item:hover,html[data-theme="dark"] .drawer-add:hover,html[data-theme="dark"] .script-tool-btn:hover{border-color:rgba(0,212,255,.42)!important;background:#041012!important}
+html[data-theme="dark"] .sftp-row{border-color:rgba(255,255,255,.12);background:#000}
+html[data-theme="dark"] .sftp-row:hover{border-color:rgba(0,212,255,.4);background:#041012}
+html[data-theme="dark"] .sftp-path-input,html[data-theme="dark"] .script-input,html[data-theme="dark"] .script-textarea,html[data-theme="dark"] .cmd-input,html[data-theme="dark"] .cmd-send{border-color:rgba(255,255,255,.18)!important;background:#020202!important;box-shadow:none!important}
+html[data-theme="dark"] .cmd-bar{border-top-color:rgba(255,255,255,.22)!important;padding-top:7px;padding-bottom:7px}
+html[data-theme="dark"] .cmd-input:focus,html[data-theme="dark"] .sftp-path-input:focus,html[data-theme="dark"] .script-input:focus,html[data-theme="dark"] .script-textarea:focus{border-color:rgba(0,212,255,.52)!important;box-shadow:0 0 0 2px rgba(0,212,255,.12)!important}
+html[data-theme="dark"] .edge-btn,html[data-theme="dark"] .tb-btn,html[data-theme="dark"] .tab-add-btn{border-color:rgba(255,255,255,.2)!important;background:#050505!important;box-shadow:0 0 0 1px rgba(0,212,255,.05) inset!important}
+html[data-theme="dark"] .term-edge-btns .edge-btn{border-color:rgba(0,212,255,.22)!important}
+html[data-theme="dark"] .term-body{border:1px solid rgba(255,255,255,.12)}
+html[data-theme="dark"] .single-detail-chart{margin-top:10px}
 
 .server-net-canvas .chart-hover-line,.server-summary-sparkline .chart-hover-line{stroke:var(--net-hover-line,#fff)!important;stroke-width:1.8;stroke-dasharray:5 5;opacity:1;vector-effect:non-scaling-stroke}
 html[data-theme="dark"] .server-net-canvas .chart-hover-line,html[data-theme="dark"] .server-summary-sparkline .chart-hover-line{stroke:#fff!important}
@@ -983,6 +999,17 @@ html[data-theme="dark"] .server-net-canvas .chart-hover-line,html[data-theme="da
     html:not([data-theme]) .settings-panel .checkbox-custom,html:not([data-theme]) .set-group .checkbox-custom{border-color:rgba(255,255,255,.46);background:#0b0b0b;box-shadow:0 0 0 1px rgba(255,255,255,.08) inset}
     html:not([data-theme]) .settings-panel .checkbox-field input:checked+.checkbox-custom,html:not([data-theme]) .set-group .checkbox-field input:checked+.checkbox-custom{border-color:#00d4ff;background:rgba(0,212,255,.18);box-shadow:0 0 0 1px rgba(0,212,255,.36) inset,0 0 10px rgba(0,212,255,.18)}
     html:not([data-theme]) .settings-panel .checkbox-custom::after,html:not([data-theme]) .set-group .checkbox-custom::after{border-color:#fff}
+    html:not([data-theme]){--brd:rgba(255,255,255,.18);--inp:#030303;--terminal-surface-soft:#060606;--server-panel-border:rgba(255,255,255,.2);--server-panel-grid:rgba(255,255,255,.18);--server-panel-grid-soft:rgba(255,255,255,.1)}
+    html:not([data-theme]) .settings-panel,html:not([data-theme]) .drawer-body,html:not([data-theme]) .sftp-panel,html:not([data-theme]) .cmd-bar{border-color:rgba(255,255,255,.2)!important;box-shadow:0 0 0 1px rgba(255,255,255,.04) inset!important}
+    html:not([data-theme]) .drawer-hd,html:not([data-theme]) .sftp-header,html:not([data-theme]) .script-toolbar,html:not([data-theme]) .script-form{border-color:rgba(255,255,255,.16)!important}
+    html:not([data-theme]) .set-group,html:not([data-theme]) .update-version-card,html:not([data-theme]) .server-info-quick-grid button{border-color:rgba(255,255,255,.24)!important;background:#020202!important}
+    html:not([data-theme]) .bm-item,html:not([data-theme]) .conn-security-note,html:not([data-theme]) .drawer-add,html:not([data-theme]) .script-tool-btn,html:not([data-theme]) .script-account-btn{border-color:rgba(255,255,255,.16)!important;background:#020202!important}
+    html:not([data-theme]) .sftp-row{border-color:rgba(255,255,255,.12);background:#000}
+    html:not([data-theme]) .sftp-path-input,html:not([data-theme]) .script-input,html:not([data-theme]) .script-textarea,html:not([data-theme]) .cmd-input,html:not([data-theme]) .cmd-send{border-color:rgba(255,255,255,.18)!important;background:#020202!important;box-shadow:none!important}
+    html:not([data-theme]) .cmd-bar{border-top-color:rgba(255,255,255,.22)!important;padding-top:7px;padding-bottom:7px}
+    html:not([data-theme]) .edge-btn,html:not([data-theme]) .tb-btn,html:not([data-theme]) .tab-add-btn{border-color:rgba(255,255,255,.2)!important;background:#050505!important;box-shadow:0 0 0 1px rgba(0,212,255,.05) inset!important}
+    html:not([data-theme]) .term-edge-btns .edge-btn{border-color:rgba(0,212,255,.22)!important}
+    html:not([data-theme]) .term-body{border:1px solid rgba(255,255,255,.12)}
 }
 @media(max-width:860px){
     .server-info-quicklook{flex-direction:column}

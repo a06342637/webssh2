@@ -1373,7 +1373,7 @@ function renderServerInfoDetail(type, d, session) {
     var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).map(function (fs) {
         return '<tr><td title="' + esc(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + ' / ' + esc(fmtB(fs.size)) + '</td><td>' + esc(fmtB(fs.avail)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="4">暂无文件系统数据</td></tr>';
-    var titles = { network: '网络详情', processes: '进程详情', filesystems: '文件系统详情', facts: '基础信息', summary: '资源概览' };
+    var titles = { network: '网络详情', processes: '进程详情', filesystems: '文件系统详情', facts: '基础信息', summary: '资源概览', cpu: 'CPU 详情', memory: '内存详情', disk: '硬盘详情', os: '操作系统详情' };
     title.textContent = titles[type] || '服务器详情';
     if (type === 'network') {
         body.innerHTML = '<div class="server-detail-section">' +
@@ -1383,6 +1383,34 @@ function renderServerInfoDetail(type, d, session) {
         body.innerHTML = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>完整命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div>';
     } else if (type === 'filesystems') {
         body.innerHTML = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>可用</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div>';
+    } else if (type === 'cpu') {
+        body.innerHTML = '<div class="server-detail-section">' +
+            '<div class="server-detail-kv"><div><span>CPU 型号</span><b>' + esc(d.cpuModel || '-') + '</b></div><div><span>CPU 核心</span><b>' + esc(d.cpuCores || '-') + '</b></div>' +
+            '<div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div><div><span>当前使用率</span><b>' + cpu.toFixed(1) + '%</b></div>' +
+            '<div><span>用户态</span><b>' + esc(cb.user || '0') + '%</b></div><div><span>系统态</span><b>' + esc(cb.system || '0') + '%</b></div>' +
+            '<div><span>IO 等待</span><b>' + esc(cb.iowait || '0') + '%</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>CPU 曲线</span><b>' + cpu.toFixed(1) + '%</b><small>用户 ' + esc(cb.user || '0') + '% · 系统 ' + esc(cb.system || '0') + '% · IO ' + esc(cb.iowait || '0') + '%</small>' + resourceSparklineHtml(session, 'cpu', 100, 'cpu') + '</div></div>' +
+            '</div>';
+    } else if (type === 'memory') {
+        body.innerHTML = '<div class="server-detail-section">' +
+            '<div class="server-detail-kv"><div><span>内存总量</span><b>' + fmtB(d.memTotal) + '</b></div><div><span>已用内存</span><b>' + fmtB(d.memUsed) + '</b></div>' +
+            '<div><span>可用内存</span><b>' + fmtB(d.memAvailable || d.memFree) + '</b></div><div><span>使用率</span><b>' + memPct + '%</b></div>' +
+            '<div><span>Swap 总量</span><b>' + fmtB(d.swapTotal) + '</b></div><div><span>Swap 已用</span><b>' + fmtB(d.swapUsed) + '</b></div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>内存曲线</span><b>' + memPct + '%</b><small>' + fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal) + '，可用 ' + fmtB(d.memAvailable || d.memFree) + '</small>' + resourceSparklineHtml(session, 'mem', 100, 'mem') + '</div></div>' +
+            '</div>';
+    } else if (type === 'disk') {
+        body.innerHTML = '<div class="server-detail-section">' +
+            '<div class="server-detail-kv"><div><span>硬盘总量</span><b>' + fmtB(d.diskTotal) + '</b></div><div><span>已用空间</span><b>' + fmtB(d.diskUsed) + '</b></div>' +
+            '<div><span>剩余空间</span><b>' + fmtB(d.diskFree) + '</b></div><div><span>使用率</span><b>' + diskPct + '%</b></div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>硬盘曲线</span><b>' + diskPct + '%</b><small>' + fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal) + '，剩余 ' + fmtB(d.diskFree) + '</small>' + resourceSparklineHtml(session, 'disk', 100, 'disk') + '</div></div>' +
+            '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>可用</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div>' +
+            '</div>';
+    } else if (type === 'os') {
+        body.innerHTML = '<div class="server-info-facts detail-facts">' +
+            '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div><div><span>内核版本</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
+            '<div><span>主机名</span><b>' + esc(d.hostname || '-') + '</b></div><div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div>' +
+            '<div><span>运行时间</span><b>' + esc(fmtUptimeLong(d.uptime)) + '</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
+            '</div>';
     } else if (type === 'facts') {
         body.innerHTML = '<div class="server-info-facts detail-facts">' +
             '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div><div><span>内核版本</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
@@ -1442,10 +1470,10 @@ function renderServerInfo(d, session) {
     body.innerHTML =
         '<div class="server-info-quicklook">' +
         '<div class="server-info-quick-grid">' +
-        '<button type="button" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><span>CPU</span><b title="' + escAttr(cpuQuick) + '">' + esc(cpuQuick) + '</b><small>' + esc(d.cpuCores || '?') + ' 核 · ' + esc(d.arch || '-') + '</small></button>' +
-        '<button type="button" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><span>内存</span><b>' + fmtB(d.memTotal) + '</b><small>已用 ' + fmtB(d.memUsed) + '</small></button>' +
-        '<button type="button" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><span>硬盘</span><b>' + fmtB(d.diskTotal) + '</b><small>剩余 ' + fmtB(d.diskFree) + '</small></button>' +
-        '<button type="button" onclick="openServerInfoDetailModal(\'facts\')" title="点击放大查看基础信息"><span>操作系统</span><b title="' + escAttr(d.os || '-') + '">' + esc(d.os || '-') + '</b><small>' + esc(d.kernelVersion || '-') + '</small></button>' +
+        '<button type="button" onclick="openServerInfoDetailModal(\'cpu\')" title="点击放大查看 CPU 详情"><span>CPU</span><b title="' + escAttr(cpuQuick) + '">' + esc(cpuQuick) + '</b><small>' + esc(d.cpuCores || '?') + ' 核 · ' + esc(d.arch || '-') + '</small></button>' +
+        '<button type="button" onclick="openServerInfoDetailModal(\'memory\')" title="点击放大查看内存详情"><span>内存</span><b>' + fmtB(d.memTotal) + '</b><small>已用 ' + fmtB(d.memUsed) + '</small></button>' +
+        '<button type="button" onclick="openServerInfoDetailModal(\'disk\')" title="点击放大查看硬盘详情"><span>硬盘</span><b>' + fmtB(d.diskTotal) + '</b><small>剩余 ' + fmtB(d.diskFree) + '</small></button>' +
+        '<button type="button" onclick="openServerInfoDetailModal(\'os\')" title="点击放大查看操作系统详情"><span>操作系统</span><b title="' + escAttr(d.os || '-') + '">' + esc(d.os || '-') + '</b><small>' + esc(d.kernelVersion || '-') + '</small></button>' +
         '</div>' +
         '<div class="server-info-live"><span></span>每 ' + getServerInfoRefreshSeconds() + ' 秒刷新</div>' +
         '</div>' +
@@ -2035,7 +2063,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.32');
+    var current = clean(data.currentVersion || data.current, '0.5.33');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
