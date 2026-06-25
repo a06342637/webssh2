@@ -895,9 +895,21 @@ function resourcePointX(idx, history, width, pad) {
     return width - pad - Math.min(1, offsetFromLatest / maxSpan) * plotW;
 }
 
+function resourceWavePath(points) {
+    if (!points.length) return '';
+    var ordered = points.slice().reverse();
+    var d = 'M' + ordered[0].x.toFixed(1) + ' ' + ordered[0].y.toFixed(1);
+    for (var i = 1; i < ordered.length; i++) {
+        var prev = ordered[i - 1], cur = ordered[i];
+        var midX = (prev.x + cur.x) / 2;
+        d += ' C' + midX.toFixed(1) + ' ' + prev.y.toFixed(1) + ' ' + midX.toFixed(1) + ' ' + cur.y.toFixed(1) + ' ' + cur.x.toFixed(1) + ' ' + cur.y.toFixed(1);
+    }
+    return d;
+}
+
 function resourceSparklineHtml(session, key, fixedMax, cls) {
     var history = getResourceHistory(session).slice(-180);
-    if (!history.length) return '<div class="server-summary-sparkline empty"></div>';
+    if (!history.length) return '<div class="server-summary-sparkline empty"><span>-</span></div>';
     if (history.length === 1) history = [history[0], history[0]];
     var width = 160, height = 42, pad = 4;
     var max = parseFloat(fixedMax) || 0;
@@ -911,19 +923,28 @@ function resourceSparklineHtml(session, key, fixedMax, cls) {
         var y = height - pad - Math.min(1, value / max) * (height - pad * 2);
         return { x: x, y: y };
     });
-    var path = points.slice().reverse().map(function (p, idx) {
-        return (idx ? 'L' : 'M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1);
-    }).join(' ');
-    var oldestX = points[0].x;
-    var latestX = points[points.length - 1].x;
-    var area = path + ' L' + oldestX.toFixed(1) + ' ' + (height - pad) + ' L' + latestX.toFixed(1) + ' ' + (height - pad) + ' Z';
+    var path = resourceWavePath(points);
+    var first = points[points.length - 1];
+    var last = points[0];
+    var area = path + ' L' + last.x.toFixed(1) + ' ' + (height - pad) + ' L' + first.x.toFixed(1) + ' ' + (height - pad) + ' Z';
     var hover = buildResourceHoverOverlay(history, key, max, width, height, pad);
     return '<div class="server-summary-sparkline ' + esc(cls || key) + '">' +
         '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
+        '<line class="summary-spark-base" x1="' + pad + '" y1="' + (height - pad) + '" x2="' + (width - pad) + '" y2="' + (height - pad) + '"/>' +
         '<path class="summary-spark-area" d="' + area + '"/>' +
         '<path class="summary-spark-line" d="' + path + '"/>' +
         hover +
         '</svg></div>';
+}
+
+function resourceOverviewHtml(session, items, cls) {
+    return '<div class="server-resource-overview ' + esc(cls || '') + '">' + items.map(function (item) {
+        return '<div class="resource-overview-tile ' + esc(item.cls || item.key || '') + '">' +
+            '<div class="resource-overview-main"><span>' + esc(item.label) + '</span><b>' + esc(item.value) + '</b></div>' +
+            (item.detail ? '<small>' + esc(item.detail) + '</small>' : '') +
+            resourceSparklineHtml(session, item.key, item.max, item.cls) +
+            '</div>';
+    }).join('') + '</div>';
 }
 
 function formatResourceSparkValue(key, value) {
@@ -1527,14 +1548,15 @@ function renderServerInfoDetail(type, d, session) {
             '<div><span>主机名</span><b>' + esc(d.hostname || '-') + '</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
             '</div>';
     } else {
-        body.innerHTML = '<div class="server-summary-grid detail-summary">' +
-            '<div><span>CPU</span><b>' + cpuRemainPct + '</b><small>剩余 · 已用 ' + cpu.toFixed(1) + '%</small>' + resourceSparklineHtml(session, 'cpu', 100, 'cpu') + '</div>' +
-            '<div><span>内存</span><b>' + memRemainPct + '</b><small>剩余 ' + fmtB(memAvail) + ' / ' + fmtB(d.memTotal) + '</small>' + resourceSparklineHtml(session, 'mem', 100, 'mem') + '</div>' +
-            '<div><span>Swap</span><b>' + percentOf(d.swapUsed, d.swapTotal) + '%</b><small>' + fmtB(d.swapUsed) + ' / ' + fmtB(d.swapTotal) + '</small></div>' +
-            '<div><span>磁盘</span><b>' + diskRemainPct + '</b><small>剩余 ' + fmtB(d.diskFree) + ' / ' + fmtB(d.diskTotal) + '</small>' + resourceSparklineHtml(session, 'disk', 100, 'disk') + '</div>' +
-            '<div><span>连接</span><b>' + esc(connTotal) + '</b><small>TCP ' + esc(d.tcpCount || '0') + ' · UDP ' + esc(d.udpCount || '0') + '</small>' + resourceSparklineHtml(session, 'conn', 0, 'conn') + '</div>' +
-            '<div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b><small>运行 ' + esc(fmtUptimeLong(d.uptime)) + '</small></div>' +
-            '</div>';
+        var detailItems = [
+            { label: 'CPU', value: cpu.toFixed(1) + '%', detail: '剩余 ' + cpuRemainPct + ' · ' + (d.cpuCores || '?') + ' 核', key: 'cpu', max: 100, cls: 'cpu' },
+            { label: '内存', value: memPct + '%', detail: fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal), key: 'mem', max: 100, cls: 'mem' },
+            { label: '磁盘', value: diskPct + '%', detail: fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal), key: 'disk', max: 100, cls: 'disk' },
+            { label: '连接', value: String(connTotal), detail: 'TCP ' + (d.tcpCount || '0') + ' · UDP ' + (d.udpCount || '0'), key: 'conn', max: 0, cls: 'conn' },
+            { label: 'Swap', value: percentOf(d.swapUsed, d.swapTotal) + '%', detail: fmtB(d.swapUsed) + ' / ' + fmtB(d.swapTotal), key: 'mem', max: 100, cls: 'swap' },
+            { label: '负载', value: d.load || '0 0 0', detail: '运行 ' + fmtUptimeLong(d.uptime), key: 'cpu', max: 100, cls: 'load' }
+        ];
+        body.innerHTML = '<div class="server-detail-section resource-detail-section">' + resourceOverviewHtml(session, detailItems, 'detail-resource-overview') + '</div>';
     }
 }
 
@@ -1578,6 +1600,12 @@ function renderServerInfo(d, session) {
     var diskRemainPct = fmtRemainPct(diskPct);
     var memAvail = d.memAvailable || d.memFree;
     var netUnitToggle = '<div class="server-net-unit-toggle"><button type="button" class="' + (serverInfoNetUnit === 'bytes' ? 'active' : '') + '" onclick="event.stopPropagation();changeServerNetUnit(\'bytes\')">MB/s</button><button type="button" class="' + (serverInfoNetUnit === 'bits' ? 'active' : '') + '" onclick="event.stopPropagation();changeServerNetUnit(\'bits\')">Mbps</button></div>';
+    var summaryItems = [
+        { label: 'CPU', value: cpu.toFixed(1) + '%', key: 'cpu', max: 100, cls: 'cpu' },
+        { label: '内存', value: memPct + '%', key: 'mem', max: 100, cls: 'mem' },
+        { label: '磁盘', value: diskPct + '%', key: 'disk', max: 100, cls: 'disk' },
+        { label: '连接', value: String(connTotal), key: 'conn', max: 0, cls: 'conn' }
+    ];
     body.innerHTML =
         '<div class="server-info-grid">' +
         '<div class="server-info-card wide server-facts-card server-expandable" onclick="openServerInfoDetailModal(\'facts\')" title="点击放大查看基础信息"><div class="server-card-open">放大</div><h4>基础信息</h4><div class="server-info-facts server-info-facts-main">' +
@@ -1590,12 +1618,7 @@ function renderServerInfo(d, session) {
         '<div><span>内核</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
         '<div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
         '</div></div>' +
-        '<div class="server-info-card wide server-summary-card server-expandable" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><div class="server-card-open">放大</div><h4>资源概览</h4><div class="server-summary-grid">' +
-        '<div><span>CPU</span><b>' + cpuRemainPct + '</b>' + resourceSparklineHtml(session, 'cpu', 100, 'cpu') + '</div>' +
-        '<div><span>内存</span><b>' + memRemainPct + '</b>' + resourceSparklineHtml(session, 'mem', 100, 'mem') + '</div>' +
-        '<div><span>磁盘</span><b>' + diskRemainPct + '</b>' + resourceSparklineHtml(session, 'disk', 100, 'disk') + '</div>' +
-        '<div><span>连接</span><b>' + esc(connTotal) + '</b>' + resourceSparklineHtml(session, 'conn', 0, 'conn') + '</div>' +
-        '</div></div>' +
+        '<div class="server-info-card wide server-summary-card server-expandable" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><div class="server-card-open">放大</div><h4>资源概览</h4>' + resourceOverviewHtml(session, summaryItems, 'compact-resource-overview') + '</div>' +
         '<div class="server-info-card wide network-card server-expandable" onclick="openServerInfoDetailModal(\'network\')" title="点击放大查看网络"><div class="server-card-open">放大</div><div class="server-info-card-head network-head"><h4>网络</h4><div class="server-iface-control">' + netUnitToggle + (ifaces.length > 1 ? '<select class="server-iface-select" onclick="event.stopPropagation()" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div></div>' +
         '<div class="server-net-pair"><div class="net-stat rx"><span>接收速度</span><b>↓ ' + fmtNetRate(rxRate) + '</b><small>' + fmtNetRateAlt(rxRate) + '</small></div><div class="net-stat tx"><span>发送速度</span><b>↑ ' + fmtNetRate(txRate) + '</b><small>' + fmtNetRateAlt(txRate) + '</small></div><div><span>总接收</span><b>' + fmtB(rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(txTotal) + '</b></div></div>' + networkChartHtml(session, ifaceName, SERVER_INFO_CHART_MINUTES) + '</div>' +
         '<div class="server-info-card wide server-priority-card server-expandable" onclick="openServerInfoDetailModal(\'processes\')" title="点击放大查看进程"><div class="server-card-open">放大</div><h4>进程</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div></div>' +
@@ -2170,7 +2193,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.37');
+    var current = clean(data.currentVersion || data.current, '0.5.38');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
