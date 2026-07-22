@@ -527,14 +527,24 @@ func currentAccount(c *gin.Context) (string, bool) {
 	accountStore.mu.Lock()
 	defer accountStore.mu.Unlock()
 	sess, ok := accountStore.db.Sessions[token]
-	if !ok || sess.ExpiresAt <= now {
+	if !ok {
+		// An arbitrary/forged cookie must not rewrite the whole account database.
+		return "", false
+	}
+	if sess.ExpiresAt <= now {
+		before := accountStore.snapshotLocked()
 		delete(accountStore.db.Sessions, token)
-		_ = accountStore.saveLocked()
+		if err := accountStore.saveLocked(); err != nil {
+			accountStore.restoreLocked(before)
+		}
 		return "", false
 	}
 	if _, ok := accountStore.db.Users[sess.Username]; !ok {
+		before := accountStore.snapshotLocked()
 		delete(accountStore.db.Sessions, token)
-		_ = accountStore.saveLocked()
+		if err := accountStore.saveLocked(); err != nil {
+			accountStore.restoreLocked(before)
+		}
 		return "", false
 	}
 	return sess.Username, true
@@ -795,13 +805,15 @@ func AuthLogout(c *gin.Context) {
 	if accountStore != nil {
 		if token, err := c.Cookie(sessionCookieName); err == nil && token != "" {
 			accountStore.mu.Lock()
-			before := accountStore.snapshotLocked()
-			delete(accountStore.db.Sessions, token)
-			if err := accountStore.saveLocked(); err != nil {
-				accountStore.restoreLocked(before)
-				accountStore.mu.Unlock()
-				c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "退出登录状态保存失败，请重试"})
-				return
+			if _, exists := accountStore.db.Sessions[token]; exists {
+				before := accountStore.snapshotLocked()
+				delete(accountStore.db.Sessions, token)
+				if err := accountStore.saveLocked(); err != nil {
+					accountStore.restoreLocked(before)
+					accountStore.mu.Unlock()
+					c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "退出登录状态保存失败，请重试"})
+					return
+				}
 			}
 			accountStore.mu.Unlock()
 		}

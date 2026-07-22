@@ -363,7 +363,7 @@ AUTH_INFO="admin:请替换为强密码"
 ## 从源码运行
 
 ```bash
-# Go 1.22+
+# Go 1.25.12+
 go mod download
 go run .
 

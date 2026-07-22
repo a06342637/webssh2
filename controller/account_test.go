@@ -561,3 +561,88 @@ func TestDummyPasswordHashIsValid(t *testing.T) {
 		t.Fatalf("dummy password hash is invalid: %v", err)
 	}
 }
+
+func TestUnknownSessionCookieDoesNotRewriteAccountDatabase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := accountStore
+	path := filepath.Join(t.TempDir(), "webssh-db.json")
+	const sentinel = "database-must-not-be-rewritten"
+	if err := os.WriteFile(path, []byte(sentinel), 0600); err != nil {
+		t.Fatal(err)
+	}
+	accountStore = &AccountStore{
+		path: path,
+		db: accountDB{
+			Users: map[string]StoredUser{
+				"admin": {Username: "admin", PasswordHash: "unused", IsAdmin: true},
+			},
+			Sessions: map[string]StoredSession{},
+			Scripts:  map[string]StoredScripts{},
+		},
+	}
+	t.Cleanup(func() { accountStore = original })
+
+	contextRecorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(contextRecorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "forged-session-token"})
+	if username, ok := currentAccount(context); ok || username != "" {
+		t.Fatalf("forged session unexpectedly authenticated as %q", username)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("forged session rewrote account database: %q", data)
+	}
+
+	logoutRecorder := httptest.NewRecorder()
+	logoutContext, _ := gin.CreateTestContext(logoutRecorder)
+	logoutContext.Request = httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutContext.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "another-forged-token"})
+	AuthLogout(logoutContext)
+	if logoutRecorder.Code != http.StatusOK {
+		t.Fatalf("logout with an unknown token returned %d: %s", logoutRecorder.Code, logoutRecorder.Body.String())
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("logout with unknown token rewrote account database: %q", data)
+	}
+}
+
+func TestExpiredSessionCleanupRollsBackWhenSaveFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := accountStore
+	const token = "expired-session"
+	accountStore = &AccountStore{
+		path: filepath.Join(t.TempDir(), "missing", "webssh-db.json"),
+		db: accountDB{
+			Users: map[string]StoredUser{
+				"admin": {Username: "admin", PasswordHash: "unused", IsAdmin: true},
+			},
+			Sessions: map[string]StoredSession{
+				token: {Username: "admin", ExpiresAt: time.Now().Add(-time.Hour).Unix()},
+			},
+			Scripts: map[string]StoredScripts{},
+		},
+	}
+	t.Cleanup(func() { accountStore = original })
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	if _, ok := currentAccount(context); ok {
+		t.Fatal("expired session unexpectedly authenticated")
+	}
+	accountStore.mu.Lock()
+	_, restored := accountStore.db.Sessions[token]
+	accountStore.mu.Unlock()
+	if !restored {
+		t.Fatal("expired session cleanup was not rolled back after persistence failure")
+	}
+}

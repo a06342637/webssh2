@@ -86,6 +86,16 @@ func Bytefmt(bytes uint64) string {
 	return result + unit
 }
 
+func formatRemoteFileSize(size int64, isDir bool) string {
+	if size < 0 {
+		size = 0
+	}
+	if isDir {
+		return strconv.FormatInt(size, 10)
+	}
+	return Bytefmt(uint64(size))
+}
+
 type fileSplice []File
 
 func (f fileSplice) Len() int      { return len(f) }
@@ -129,7 +139,7 @@ func UploadFile(c *gin.Context) *ResponseBody {
 		path = detectHomeDir(sshClient.Sftp, sshClient.Username)
 	}
 	pathArr := []string{strings.TrimRight(path, "/")}
-	if dir := c.DefaultPostForm("dir", ""); "" != dir {
+	if dir := c.DefaultPostForm("dir", ""); dir != "" {
 		pathArr = append(pathArr, dir)
 		if err := sshClient.Mkdirs(strings.Join(pathArr, "/")); err != nil {
 			responseBody.Msg = err.Error()
@@ -469,11 +479,7 @@ func FileList(c *gin.Context) *ResponseBody {
 		fileSize string
 	)
 	for _, mFile := range files {
-		if mFile.IsDir() {
-			fileSize = strconv.FormatInt(mFile.Size(), 10)
-		} else {
-			fileSize = Bytefmt(uint64(mFile.Size()))
-		}
+		fileSize = formatRemoteFileSize(mFile.Size(), mFile.IsDir())
 		file := File{Name: mFile.Name(), IsDir: mFile.IsDir(), Size: fileSize, ModifyTime: mFile.ModTime().Format("2006-01-02 15:04:05")}
 		fileList = append(fileList, file)
 	}

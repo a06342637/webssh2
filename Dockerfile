@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25.12-alpine AS builder
 
 WORKDIR /build
 
@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o webssh .
 
-FROM alpine:3.20
+FROM alpine:3.23
 
 WORKDIR /app
 
@@ -20,6 +20,6 @@ RUN apk add --no-cache ca-certificates tzdata git iproute2 docker-cli docker-cli
 
 COPY --from=builder /build/webssh /app/webssh
 
-EXPOSE 8888
+EXPOSE 8008
 
 ENTRYPOINT ["/app/webssh"]
