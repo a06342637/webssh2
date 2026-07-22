@@ -19,7 +19,7 @@ var SERVER_INFO_REFRESH_MS = 5000;
 var SERVER_INFO_CHART_MINUTES = 3;
 var SERVER_INFO_DETAIL_CHART_MINUTES = 10;
 var serverInfoNetUnit = (function () {
-    try { return localStorage.getItem(NET_UNIT_KEY) === 'bits' ? 'bits' : 'bytes'; } catch (e) { return 'bytes'; }
+    try { return safeStorageGet(NET_UNIT_KEY) === 'bits' ? 'bits' : 'bytes'; } catch (e) { return 'bytes'; }
 })();
 var serverInfoGuideTimer = null;
 
@@ -46,6 +46,35 @@ var serverInfoGuideTimer = null;
 })();
 
 // ==================== Utility ====================
+var storageErrorShown = false;
+function safeStorageGet(key, fallback) {
+    try {
+        var value = localStorage.getItem(key);
+        return value === null || value === undefined ? fallback : value;
+    } catch (e) {
+        return fallback;
+    }
+}
+function safeStorageSet(key, value) {
+    try {
+        localStorage.setItem(key, value);
+        return true;
+    } catch (e) {
+        if (!storageErrorShown) {
+            storageErrorShown = true;
+            setTimeout(function () { showToast('浏览器存储空间不可用，部分设置无法保存', 'error'); }, 0);
+        }
+        return false;
+    }
+}
+function safeStorageRemove(key) {
+    try {
+        localStorage.removeItem(key);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function fmtB(b) { b = parseInt(b) || 0; if (!b) return '0B'; var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(b) / Math.log(1024)); return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + u[i]; }
@@ -117,6 +146,8 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
         if (sshAuthRetryModal && sshAuthRetryModal.classList.contains('show')) { hideSSHAuthRetryModal(true); return; }
+        var scriptManagerModal = document.getElementById('scriptManagerModal');
+        if (scriptManagerModal && scriptManagerModal.classList.contains('show')) { hideScriptManager(); return; }
         var authModal = document.getElementById('authModal');
         if (authModal && authModal.classList.contains('show')) { hideAuthModal(); return; }
         var editScriptModal = document.getElementById('editScriptModal');
@@ -157,16 +188,16 @@ function saveProxyConfig() {
             user: document.getElementById('proxyUser').value,
             pass: document.getElementById('proxyPass').value
         };
-        localStorage.setItem(PROXY_KEY, JSON.stringify(cfg));
+        safeStorageSet(PROXY_KEY, JSON.stringify(cfg));
         showToast('代理配置已保存', 'success');
     } else {
-        localStorage.removeItem(PROXY_KEY);
+        safeStorageRemove(PROXY_KEY);
     }
 }
 
 function loadProxyConfig() {
     try {
-        var cfg = JSON.parse(localStorage.getItem(PROXY_KEY));
+        var cfg = JSON.parse(safeStorageGet(PROXY_KEY));
         if (cfg) {
             document.getElementById('proxyHost').value = cfg.host || '';
             document.getElementById('proxyPort').value = cfg.port || '1080';
@@ -287,7 +318,15 @@ function isSSHPreConnectFailure(msg) {
     var t = stripAnsiText(msg).toLowerCase();
     if (!t) return false;
     return t.indexOf('ssh info parse error') >= 0 ||
+        t.indexOf('failed to parse private key') >= 0 ||
+        t.indexOf('failed to ssh handshake') >= 0 ||
         t.indexOf('ssh: handshake failed') >= 0 ||
+        t.indexOf('failed to connect via proxy') >= 0 ||
+        t.indexOf('failed to create socks5 proxy') >= 0 ||
+        t.indexOf('socks5 proxy does not support') >= 0 ||
+        t.indexOf('host key verification failed') >= 0 ||
+        t.indexOf('invalid webssh_host_key_policy') >= 0 ||
+        t.indexOf('terminal initialization failed') >= 0 ||
         t.indexOf('connection refused') >= 0 ||
         t.indexOf('i/o timeout') >= 0 ||
         t.indexOf('no route to host') >= 0 ||
@@ -310,7 +349,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
     var t = new Terminal({
         cursorBlink: true, cursorStyle: 'bar',
         fontSize: savedFont,
-        fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace",
+        fontFamily: "'WebSSH JetBrains Mono','JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace",
         theme: termTheme,
         allowTransparency: true, scrollback: 10000
     });
@@ -396,7 +435,7 @@ function keepActiveTabVisible() {
 }
 
 function isTopbarMetricsEnabled() {
-    try { return localStorage.getItem(TOPBAR_METRICS_KEY) === 'true'; } catch (e) { return false; }
+    try { return safeStorageGet(TOPBAR_METRICS_KEY) === 'true'; } catch (e) { return false; }
 }
 
 function setTopbarMetricsVisible(show) {
@@ -610,8 +649,8 @@ function connectFromLogin() {
 
 function maybeShowFirstServerInfoGuide(session) {
     try {
-        if (localStorage.getItem(FIRST_SSH_SUCCESS_KEY)) return;
-        localStorage.setItem(FIRST_SSH_SUCCESS_KEY, String(Date.now()));
+        if (safeStorageGet(FIRST_SSH_SUCCESS_KEY)) return;
+        safeStorageSet(FIRST_SSH_SUCCESS_KEY, String(Date.now()));
     } catch (e) {
         return;
     }
@@ -718,7 +757,7 @@ function addNewTab() {
 function fetchSysInfoFor(session) {
     if (!session.sshInfo) return;
     if (session._sysInfoFetchPromise) return session._sysInfoFetchPromise;
-    session._sysInfoFetchPromise = fetch('/sysinfo?sshInfo=' + encodeURIComponent(session.sshInfo))
+    session._sysInfoFetchPromise = fetch('/sysinfo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: session.sshInfo }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg === 'success' && d.Data) {
@@ -767,8 +806,9 @@ function startServerInfoNetStream(session) {
         if (!session._serverInfoNetWanted) return;
         if (session._serverInfoNetWs && session._serverInfoNetWs.readyState <= 1) return;
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var ws = new WebSocket(proto + '//' + location.host + '/sysinfo/net?sshInfo=' + encodeURIComponent(session.sshInfo));
+        var ws = new WebSocket(proto + '//' + location.host + '/sysinfo/net');
         session._serverInfoNetWs = ws;
+        ws.onopen = function () { ws.send(session.sshInfo); };
         ws.onmessage = function (evt) {
             var msg;
             try { msg = JSON.parse(evt.data); } catch (e) { return; }
@@ -866,7 +906,7 @@ function fmtNetRateAlt(v) {
 
 function changeServerNetUnit(unit) {
     serverInfoNetUnit = unit === 'bits' ? 'bits' : 'bytes';
-    try { localStorage.setItem(NET_UNIT_KEY, serverInfoNetUnit); } catch (e) { }
+    try { safeStorageSet(NET_UNIT_KEY, serverInfoNetUnit); } catch (e) { }
     var s = sessions[serverInfoModalIdx];
     if (s && s._lastMetrics) renderServerInfo(s._lastMetrics, s);
 }
@@ -1167,33 +1207,6 @@ function networkTimeAxisHtml(domain, pad, width) {
         left = Math.max(0, Math.min(100, left));
         var cls = 'time-tick' + (left <= 1 ? ' left-edge' : '') + (left >= 99 ? ' right-edge' : '');
         return '<span class="' + cls + '" style="left:' + left.toFixed(2) + '%">' + formatBeijingMinute(t) + '</span>';
-    }).join('');
-}
-
-function buildNetHoverOverlay(items, max, width, height, pad, domainStart, domainEnd) {
-    if (!items.length) return '';
-    var p = chartPadding(pad);
-    var span = Math.max(1, items.length - 1);
-    return items.map(function (item, idx) {
-        var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
-        var prevX = idx > 0 ? netPointX(items[idx - 1], idx - 1, items, width, pad, domainStart, domainEnd) : p.left;
-        var nextX = idx < items.length - 1 ? netPointX(items[idx + 1], idx + 1, items, width, pad, domainStart, domainEnd) : width - p.right;
-        var hitX = idx === 0 ? 0 : (prevX + x) / 2;
-        var hitEnd = idx === items.length - 1 ? width : (x + nextX) / 2;
-        var hitW = hitEnd - hitX;
-        if (span === 1 && items.length === 1) hitW = width;
-        var tipW = 138, tipH = 50;
-        var tipX = Math.max(4, Math.min(width - tipW - 4, x + 10));
-        var tipY = p.top + 6;
-        return '<g class="chart-hover net-hover">' +
-            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="0" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + height + '"/>' +
-            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + p.top + '" x2="' + x.toFixed(1) + '" y2="' + (height - p.bottom) + '"/>' +
-            '<g class="chart-hover-tip" transform="translate(' + tipX.toFixed(1) + ' ' + tipY + ')">' +
-            '<rect width="' + tipW + '" height="' + tipH + '" rx="6"/>' +
-            '<text x="7" y="13">' + esc(formatBeijingMinute(item.t || Date.now())) + '</text>' +
-            '<text x="7" y="29">接收 ' + esc(fmtNetRate(item.rx)) + '</text>' +
-            '<text x="7" y="43">发送 ' + esc(fmtNetRate(item.tx)) + '</text>' +
-            '</g></g>';
     }).join('');
 }
 
@@ -1515,10 +1528,10 @@ function renderServerInfoDetail(type, d, session) {
     var memAvail = d.memAvailable || d.memFree;
     var cb = d.cpuBreakdown || {};
     var procRows = (Array.isArray(d.processes) ? d.processes : []).map(function (p) {
-        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + esc(p.cmd || p.name) + '">' + esc(p.cmd || p.name || '-') + '</td></tr>';
+        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + escAttr(p.cmd || p.name) + '">' + esc(p.cmd || p.name || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="5">暂无进程数据</td></tr>';
     var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).map(function (fs) {
-        return '<tr><td title="' + esc(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + ' / ' + esc(fmtB(fs.size)) + '</td><td>' + esc(fmtB(fs.avail)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
+        return '<tr><td title="' + escAttr(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + ' / ' + esc(fmtB(fs.size)) + '</td><td>' + esc(fmtB(fs.avail)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="4">暂无文件系统数据</td></tr>';
     var titles = { network: '网络详情', processes: '进程详情', filesystems: '文件系统详情', facts: '基础信息', summary: '资源概览', cpu: 'CPU 详情', memory: '内存详情', disk: '硬盘详情', os: '操作系统详情' };
     title.textContent = titles[type] || '服务器详情';
@@ -1600,13 +1613,13 @@ function renderServerInfo(d, session) {
         return String(a.name || '').localeCompare(String(b.name || ''));
     });
     var ifaceOptions = displayIfaces.map(function (n) {
-        return '<option value="' + esc(n.name) + '"' + (selectedIface && n.name === selectedIface.name ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
+        return '<option value="' + escAttr(n.name) + '"' + (selectedIface && n.name === selectedIface.name ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
     }).join('');
     var procRows = (Array.isArray(d.processes) ? d.processes : []).slice(0, 12).map(function (p) {
-        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + esc(p.cmd || p.name) + '">' + esc(p.name || p.cmd || '-') + '</td></tr>';
+        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + escAttr(p.cmd || p.name) + '">' + esc(p.name || p.cmd || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="5">暂无进程数据</td></tr>';
     var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).slice(0, 12).map(function (fs) {
-        return '<tr><td title="' + esc(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + '/' + esc(fmtB(fs.size)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
+        return '<tr><td title="' + escAttr(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + '/' + esc(fmtB(fs.size)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
     }).join('') || '<tr><td colspan="3">暂无文件系统数据</td></tr>';
     var cb = d.cpuBreakdown || {};
     var rxRate = selectedIface ? selectedIface.rxRate : d.rxRate;
@@ -1664,40 +1677,101 @@ function toggleSftp() {
 // ==================== Connection Bookmarks ====================
 var CBK = 'webssh_conn_bm';
 var SBK = 'webssh_script_bm';
+var SCAT = 'webssh_script_categories';
 var SBK_UPDATED = 'webssh_script_bm_updated_at';
+var scriptSearchQuery = '';
+var activeScriptCategory = '';
+var scriptSearchFrame = 0;
+var scriptSearchIndex = [];
+var MAX_SCRIPT_BOOKMARKS = 500;
+var MAX_SCRIPT_CATEGORIES = 100;
+var MAX_SCRIPT_COMMAND_CHARS = 20000;
+var EMOJI_OPTIONS = ['🛠️','⚙️','🔧','🔨','🧰','💻','🖥️','⌨️','🖱️','📦','🐳','☁️','🌐','🛰️','📡','🔐','🛡️','🔑','🚀','⚡','🔥','💡','🧪','🧹','🗄️','💾','📊','📈','🔍','📝','📌','⭐','✅','🚨','🩺','🔄','⬆️','⬇️','🐧','🍎','🤖','👾','🎯','🏠','🏢','🧱','🔌','🕸️','🧭','⏱️','📁','📜','🪄','🎨','🌈','💎','❤️','💚','💙','🟣'];
 var currentAccount = null;
 var authMode = 'login';
+var allowRegistration = false;
 var accountAutoSynced = false;
 var scriptSyncTimer = null;
 var managedAccounts = [];
+var managedAdminCount = 0;
 var editingManagedAccount = null;
 var versionUpdatePollTimer = null;
 
-function loadBM(k) { try { return JSON.parse(localStorage.getItem(k)) || []; } catch (e) { return []; } }
-function getScriptUpdatedAt() { return parseInt(localStorage.getItem(SBK_UPDATED)) || 0; }
-function setScriptUpdatedAt(ts) { localStorage.setItem(SBK_UPDATED, parseInt(ts) || Date.now()); }
+function loadBM(k) { try { return JSON.parse(safeStorageGet(k)) || []; } catch (e) { return []; } }
+function getScriptUpdatedAt() { return parseInt(safeStorageGet(SBK_UPDATED)) || 0; }
+function setScriptUpdatedAt(ts) { safeStorageSet(SBK_UPDATED, parseInt(ts) || Date.now()); }
 function saveScriptBookmarksData(v, ts) {
-    localStorage.setItem(SBK, JSON.stringify(v || []));
+    safeStorageSet(SBK, JSON.stringify(v || []));
+    setScriptUpdatedAt(ts || Date.now());
+}
+function loadScriptCategories() {
+    return normalizeScriptCategories(loadBM(SCAT));
+}
+function saveScriptCategoriesData(v, ts) {
+    safeStorageSet(SCAT, JSON.stringify(normalizeScriptCategories(v)));
     setScriptUpdatedAt(ts || Date.now());
 }
 function saveBM(k, v) {
-    localStorage.setItem(k, JSON.stringify(v));
+    safeStorageSet(k, JSON.stringify(v));
     if (k === SBK) setScriptUpdatedAt(Date.now());
 }
 function ensureScriptBookmarkClock() {
     if (loadBM(SBK).length && !getScriptUpdatedAt()) setScriptUpdatedAt(Date.now());
 }
 
+function createScriptCategoryId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return 'cat_' + window.crypto.randomUUID();
+    return 'cat_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function normalizeScriptCategories(items) {
+    var out = [], seen = {};
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+        if (!item || typeof item !== 'object') return;
+        var id = typeof item.id === 'string' ? item.id.trim().slice(0, 80) : '';
+        var emoji = typeof item.emoji === 'string' ? Array.from(item.emoji.trim()).slice(0, 8).join('') : '';
+        var name = typeof item.name === 'string' ? item.name.trim().slice(0, 40) : '';
+        if (!name) return;
+        if (!id || seen[id]) id = createScriptCategoryId();
+        seen[id] = true;
+        out.push({ id: id, emoji: emoji || '📁', name: name, createdAt: parseInt(item.createdAt, 10) || Date.now() });
+    });
+    return out.slice(0, MAX_SCRIPT_CATEGORIES);
+}
+
+function cleanScriptCategoryReferences(items, categories) {
+    var valid = {};
+    (Array.isArray(categories) ? categories : []).forEach(function (cat) { if (cat && cat.id) valid[cat.id] = true; });
+    var cleaned = 0;
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+        if (item && item.categoryId && !valid[item.categoryId]) {
+            delete item.categoryId;
+            cleaned++;
+        }
+    });
+    return cleaned;
+}
+
+function getScriptCategory(id, categories) {
+    id = typeof id === 'string' ? id.trim() : '';
+    if (!id) return null;
+    categories = categories || loadScriptCategories();
+    for (var i = 0; i < categories.length; i++) if (categories[i].id === id) return categories[i];
+    return null;
+}
+
 function exportScriptBookmarks() {
     var scripts = loadBM(SBK);
-    if (!scripts.length) { showToast('暂无脚本可导出', 'info'); return; }
+    var categories = loadScriptCategories();
+    if (!scripts.length && !categories.length) { showToast('暂无脚本或分类可导出', 'info'); return; }
     var data = {
         app: 'webssh2',
         type: 'script_bookmarks',
-        version: 1,
+        version: 2,
         exportedAt: new Date().toISOString(),
         origin: location.origin,
         updatedAt: getScriptUpdatedAt(),
+        categories: categories,
         scripts: scripts
     };
     var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -1710,7 +1784,7 @@ function exportScriptBookmarks() {
     a.click();
     a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    showToast('导出成功：已下载 ' + scripts.length + ' 个脚本', 'success');
+    showToast('导出成功：' + scripts.length + ' 个脚本，' + categories.length + ' 个分类', 'success');
 }
 
 function triggerScriptImport() {
@@ -1729,9 +1803,17 @@ function extractImportedScripts(data) {
     return [];
 }
 
+function extractImportedCategories(data) {
+    if (data && Array.isArray(data.categories)) return data.categories;
+    if (data && data.bookmarks && Array.isArray(data.bookmarks.categories)) return data.bookmarks.categories;
+    if (data && data.storage && Array.isArray(data.storage[SCAT])) return data.storage[SCAT];
+    if (data && Array.isArray(data[SCAT])) return data[SCAT];
+    return [];
+}
+
 function normalizeImportedScripts(items) {
     var out = [];
-    items.forEach(function (item, idx) {
+    (Array.isArray(items) ? items : []).forEach(function (item, idx) {
         if (!item || typeof item !== 'object') return;
         var name = typeof item.name === 'string' ? item.name.trim() : '';
         var cmd = '';
@@ -1740,15 +1822,47 @@ function normalizeImportedScripts(items) {
         else if (typeof item.content === 'string') cmd = item.content;
         cmd = cmd.trim();
         if (!cmd) return;
+        cmd = Array.from(cmd).slice(0, MAX_SCRIPT_COMMAND_CHARS).join('');
         if (!name) name = '导入脚本 ' + (idx + 1);
-        var normalized = { name: name, cmd: cmd };
+        var normalized = { name: name.slice(0, 80), cmd: cmd };
+        var categoryId = typeof item.categoryId === 'string' ? item.categoryId.trim().slice(0, 80) : '';
+        if (categoryId) normalized.categoryId = categoryId;
         var useCount = parseScriptUseCount(item);
         var lastUsed = parseScriptLastUsed(item);
         if (useCount > 0) normalized.useCount = useCount;
         if (lastUsed > 0) normalized.lastUsed = lastUsed;
         out.push(normalized);
     });
-    return out;
+    return out.slice(0, MAX_SCRIPT_BOOKMARKS);
+}
+
+function mergeImportedScriptCategories(incoming) {
+    var current = loadScriptCategories();
+    var byId = {}, bySignature = {}, idMap = {}, added = 0, capacitySkipped = 0;
+    current.forEach(function (cat) {
+        byId[cat.id] = cat;
+        bySignature[cat.emoji + '\n' + cat.name.toLowerCase()] = cat;
+    });
+    normalizeScriptCategories(incoming).forEach(function (cat) {
+        var sig = cat.emoji + '\n' + cat.name.toLowerCase();
+        if (bySignature[sig]) {
+            idMap[cat.id] = bySignature[sig].id;
+            return;
+        }
+        var originalId = cat.id;
+        if (current.length >= MAX_SCRIPT_CATEGORIES) {
+            idMap[originalId] = '';
+            capacitySkipped++;
+            return;
+        }
+        if (byId[cat.id]) cat.id = createScriptCategoryId();
+        idMap[originalId] = cat.id;
+        current.push(cat);
+        byId[cat.id] = cat;
+        bySignature[sig] = cat;
+        added++;
+    });
+    return { categories: current, idMap: idMap, added: added, capacitySkipped: capacitySkipped };
 }
 
 function importScriptBookmarks(input) {
@@ -1758,28 +1872,45 @@ function importScriptBookmarks(input) {
     reader.onload = function () {
         try {
             var data = JSON.parse(reader.result);
+            var categoryMerge = mergeImportedScriptCategories(extractImportedCategories(data));
+            var validCategoryIds = {};
+            categoryMerge.categories.forEach(function (cat) { validCategoryIds[cat.id] = true; });
             var incoming = normalizeImportedScripts(extractImportedScripts(data));
-            if (!incoming.length) { showToast('未找到可导入的脚本书签', 'error'); return; }
+            incoming.forEach(function (script) {
+                if (!script.categoryId) return;
+                script.categoryId = categoryMerge.idMap[script.categoryId] || script.categoryId;
+                if (!validCategoryIds[script.categoryId]) delete script.categoryId;
+            });
+            if (!incoming.length && !categoryMerge.added) { showToast('未找到可导入的脚本书签或分类', 'error'); return; }
             var current = loadSortedScriptBookmarks();
             var seen = {};
-            current.forEach(function (b) {
-                seen[((b.name || '').trim()) + '\n' + ((b.cmd || '').trim())] = true;
-            });
-            var added = 0, skipped = 0;
+            current.forEach(function (b) { seen[scriptBookmarkKey(b)] = true; });
+            var added = 0, skipped = 0, capacitySkipped = 0;
             incoming.forEach(function (b) {
-                var key = b.name + '\n' + b.cmd;
+                var key = scriptBookmarkKey(b);
                 if (seen[key]) { skipped++; return; }
+                if (current.length >= MAX_SCRIPT_BOOKMARKS) { capacitySkipped++; return; }
                 current.push(b);
                 seen[key] = true;
                 added++;
             });
-            if (added) {
+            var cleaned = cleanScriptCategoryReferences(current, categoryMerge.categories);
+            var now = Date.now();
+            if (added || cleaned) {
                 sortScriptBookmarks(current);
-                saveBM(SBK, current);
-                renderScriptBookmarks();
-                syncLocalScriptsIfLogged();
+                saveScriptBookmarksData(current, now);
             }
-            showToast(added ? ('已导入 ' + added + ' 个脚本') : ('没有新增脚本，跳过 ' + skipped + ' 个重复项'), added ? 'success' : 'info');
+            if (categoryMerge.added) saveScriptCategoriesData(categoryMerge.categories, now);
+            renderScriptBookmarks();
+            renderCategoryManager();
+            updateScriptManagerSummary();
+            if (added || categoryMerge.added || cleaned) syncLocalScriptsIfLogged();
+            var message = '已导入 ' + added + ' 个脚本、' + categoryMerge.added + ' 个分类';
+            if (!added && !categoryMerge.added) message = '没有新增内容，跳过 ' + skipped + ' 个重复脚本';
+            if (capacitySkipped || categoryMerge.capacitySkipped) {
+                message += '；容量已满，另跳过 ' + capacitySkipped + ' 个脚本、' + categoryMerge.capacitySkipped + ' 个分类';
+            }
+            showToast(message, (added || categoryMerge.added) ? 'success' : 'info');
         } catch (e) {
             showToast('导入失败：JSON 文件无效', 'error');
         } finally {
@@ -1795,12 +1926,12 @@ function importScriptBookmarks(input) {
 
 var _cloudStatusTimer = null;
 function hideCloudStatus() {
-    var el = document.getElementById('scriptCloudStatus');
-    if (!el) return;
     if (_cloudStatusTimer) {
         clearTimeout(_cloudStatusTimer);
         _cloudStatusTimer = null;
     }
+    var el = document.getElementById('scriptCloudStatus');
+    if (!el) return;
     el.className = 'script-cloud-status';
     el.textContent = '';
 }
@@ -1887,25 +2018,87 @@ function openAuthModal(mode) {
 function hideAuthModal() {
     document.getElementById('authModal').classList.remove('show');
     clearPasswordChangeForm();
+    setForgotPasswordHelp(false);
 }
 
 function switchAuthMode(mode) {
-    authMode = mode === 'register' ? 'register' : 'login';
+    authMode = mode === 'register' && allowRegistration ? 'register' : 'login';
     var loginTab = document.getElementById('authLoginTab');
     var registerTab = document.getElementById('authRegisterTab');
     var submit = document.querySelector('.auth-submit-btn');
     var hint = document.getElementById('authHint');
+    var forgotToggle = document.getElementById('forgotPasswordToggle');
     if (loginTab) loginTab.classList.toggle('active', authMode === 'login');
     if (registerTab) registerTab.classList.toggle('active', authMode === 'register');
     if (submit) submit.textContent = authMode === 'register' ? '注册并登录' : '登录';
-    if (hint) hint.textContent = authMode === 'register' ? '用户名只能用字母或数字，用户名大于 4 位，密码大于 6 位。' : '登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。';
+    if (hint) hint.textContent = authMode === 'register' ? '用户名只能用字母或数字，用户名大于 4 位；密码至少 7 个字符且不超过 72 个 UTF-8 字节。' : '登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。';
+    if (forgotToggle) forgotToggle.style.display = authMode === 'login' ? '' : 'none';
+    if (authMode !== 'login') setForgotPasswordHelp(false);
+}
+
+function getAdminResetCommand() {
+    var input = document.getElementById('authUsername');
+    var username = input ? input.value.trim().toLowerCase() : '';
+    if (!/^[A-Za-z0-9]{5,32}$/.test(username)) username = 'admin';
+    return "WEBSSH_ADMIN_USER=" + username + " WEBSSH_ADMIN_PASSWORD='请替换为新密码' WEBSSH_ADMIN_RESET=true docker compose up -d --force-recreate";
+}
+
+function updateAdminResetCommand() {
+    var command = getAdminResetCommand();
+    var el = document.getElementById('adminResetCommand');
+    if (el) el.textContent = command;
+    return command;
+}
+
+function setForgotPasswordHelp(show) {
+    var help = document.getElementById('forgotPasswordHelp');
+    var toggle = document.getElementById('forgotPasswordToggle');
+    if (help) help.classList.toggle('show', !!show);
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', show ? 'true' : 'false');
+        toggle.textContent = show ? '收起密码帮助' : '忘记密码？';
+    }
+    if (show) updateAdminResetCommand();
+}
+
+function toggleForgotPasswordHelp() {
+    var help = document.getElementById('forgotPasswordHelp');
+    setForgotPasswordHelp(!(help && help.classList.contains('show')));
+}
+
+function copyAdminResetCommand() {
+    var command = updateAdminResetCommand();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(command).then(showCopyToast).catch(function () { fallbackCopy(command); });
+    } else {
+        fallbackCopy(command);
+    }
+}
+
+function utf8ByteLength(value) {
+    value = String(value || '');
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+    return unescape(encodeURIComponent(value)).length;
+}
+
+function validateAccountPasswordInput(password, label) {
+    label = label || '密码';
+    if (Array.from(password).length < 7) {
+        showToast(label + '必须大于 6 位', 'error');
+        return false;
+    }
+    if (utf8ByteLength(password) > 72) {
+        showToast(label + '不能超过 72 个 UTF-8 字节', 'error');
+        return false;
+    }
+    return true;
 }
 
 function submitAuthForm() {
     var username = document.getElementById('authUsername').value.trim();
-    var password = document.getElementById('authPassword').value.trim();
+    var password = document.getElementById('authPassword').value;
     if (!/^[A-Za-z0-9]{5,32}$/.test(username)) { showToast('用户名只能使用 5-32 位字母或数字', 'error'); return; }
-    if (password.length < 7) { showToast('密码必须大于 6 位', 'error'); return; }
+    if (!validateAccountPasswordInput(password, '密码')) return;
     var path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
     apiJSON(path, { method: 'POST', body: { username: username, password: password } })
         .then(function (res) {
@@ -1941,11 +2134,11 @@ function changeAccountPassword() {
         showToast('请先登录后再修改密码', 'info');
         return;
     }
-    var oldPassword = document.getElementById('oldPassword').value.trim();
-    var newPassword = document.getElementById('newPassword').value.trim();
-    var confirmPassword = document.getElementById('confirmNewPassword').value.trim();
+    var oldPassword = document.getElementById('oldPassword').value;
+    var newPassword = document.getElementById('newPassword').value;
+    var confirmPassword = document.getElementById('confirmNewPassword').value;
     if (!oldPassword) { showToast('请输入当前密码', 'error'); return; }
-    if (newPassword.length < 7) { showToast('新密码必须大于 6 位', 'error'); return; }
+    if (!validateAccountPasswordInput(newPassword, '新密码')) return;
     if (newPassword !== confirmPassword) { showToast('两次输入的新密码不一致', 'error'); return; }
     apiJSON('/api/auth/change-password', {
         method: 'POST',
@@ -2008,6 +2201,9 @@ function formatAccountTime(ts) {
 function updateManagedAccounts(data) {
     data = data || {};
     managedAccounts = Array.isArray(data.users) ? data.users : [];
+    managedAdminCount = parseInt(data.adminCount) || 0;
+    var stats = document.getElementById('managedAccountStats');
+    if (stats) stats.textContent = '（' + managedAccounts.length + ' 个账号 / ' + managedAdminCount + ' 个管理员）';
     renderManagedAccounts();
 }
 
@@ -2045,7 +2241,7 @@ function renderManagedAccounts() {
             '<div class="account-row-meta">' + esc(meta) + '</div>' +
             '</div>' +
             '<div class="account-row-actions">' +
-            '<button class="script-tool-btn" type="button" onclick="openAccountEdit(\'' + esc(username) + '\')">编辑</button>' +
+            '<button class="script-tool-btn" type="button" onclick="openAccountEdit(\'' + esc(username) + '\')">改密 / 编辑</button>' +
             '<button class="script-tool-btn danger-inline" type="button" onclick="deleteManagedAccount(\'' + esc(username) + '\')">删除</button>' +
             '</div>' +
             '</div>';
@@ -2055,10 +2251,10 @@ function renderManagedAccounts() {
 function createManagedAccount() {
     if (!requireAdminAccountAccess()) return;
     var username = document.getElementById('managedNewUsername').value.trim();
-    var password = document.getElementById('managedNewPassword').value.trim();
+    var password = document.getElementById('managedNewPassword').value;
     var isAdmin = document.getElementById('managedNewIsAdmin').checked;
     if (!/^[A-Za-z0-9]{5,32}$/.test(username)) { showToast('用户名只能使用 5-32 位字母或数字', 'error'); return; }
-    if (password.length < 7) { showToast('密码必须大于 6 位', 'error'); return; }
+    if (!validateAccountPasswordInput(password, '密码')) return;
     apiJSON('/api/admin/accounts', {
         method: 'POST',
         body: { username: username, password: password, isAdmin: isAdmin }
@@ -2101,10 +2297,10 @@ function hideAccountEditModal() {
 function saveManagedAccount() {
     if (!requireAdminAccountAccess()) return;
     var username = (editingManagedAccount || document.getElementById('managedEditUsername').value || '').trim();
-    var password = document.getElementById('managedEditPassword').value.trim();
+    var password = document.getElementById('managedEditPassword').value;
     var isAdmin = document.getElementById('managedEditIsAdmin').checked;
     if (!username) { showToast('账号不能为空', 'error'); return; }
-    if (password && password.length < 7) { showToast('新密码必须大于 6 位', 'error'); return; }
+    if (password && !validateAccountPasswordInput(password, '新密码')) return;
     apiJSON('/api/admin/accounts', {
         method: 'PUT',
         body: { username: username, password: password, isAdmin: isAdmin }
@@ -2169,19 +2365,33 @@ function syncScriptBookmarks(mode, silent) {
         return;
     }
     if (!silent) setCloudStatus('正在同步书签...', '');
-    var payload = { mode: mode, scripts: loadSortedScriptBookmarks(), updatedAt: getScriptUpdatedAt() };
+    var payload = {
+        mode: mode,
+        scripts: loadSortedScriptBookmarks(),
+        categories: loadScriptCategories(),
+        updatedAt: getScriptUpdatedAt()
+    };
     apiJSON('/api/scripts/sync', { method: 'POST', body: payload })
         .then(function (res) {
             var d = res.data || {};
             var scripts = normalizeCloudScripts(d.scripts);
-            var merged = mergeScriptBookmarksIncremental(scripts, d.updatedAt || Date.now());
+            var categories = Array.isArray(d.categories) ? normalizeScriptCategories(d.categories) : loadScriptCategories();
+            cleanScriptCategoryReferences(scripts, categories);
+            if (Array.isArray(d.categories)) saveScriptCategoriesData(categories, d.updatedAt || Date.now());
+            var merged = mergeScriptBookmarksIncremental(scripts, d.updatedAt || Date.now(), d.mode === 'pull' || d.mode === 'push');
+            if (cleanScriptCategoryReferences(merged.scripts, categories)) saveScriptBookmarksData(merged.scripts, d.updatedAt || Date.now());
+            renderScriptBookmarks();
+            renderCategoryManager();
+            updateScriptManagerSummary();
             updateAccountUI();
             var msg = '书签已是最新';
             if (d.mode === 'push') msg = '本地书签已同步到云端';
             else if (d.mode === 'pull') msg = '云端书签已同步到本地';
             if (merged.added) msg += '，新增 ' + merged.added + ' 个';
-            if (!silent) setCloudStatus(msg + ' · ' + merged.scripts.length + ' 个脚本', 'synced', 3500);
-            if (!silent) showToast(msg + '（' + merged.scripts.length + ' 个）', 'success');
+            var categoryCount = categories.length;
+            var detail = merged.scripts.length + ' 个脚本 · ' + categoryCount + ' 个分类';
+            if (!silent) setCloudStatus(msg + ' · ' + detail, 'synced', 3500);
+            if (!silent) showToast(msg + '（' + detail + '）', 'success');
         })
         .catch(function (err) {
             if (!silent) setCloudStatus('同步失败：' + (err.msg || '请稍后重试'), 'warn', 5000);
@@ -2213,7 +2423,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.39');
+    var current = clean(data.currentVersion || data.current, '0.5.41');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -2410,6 +2620,10 @@ function scriptBookmarkKey(b) {
     return ((b && b.name ? b.name : '').trim()) + '\n' + ((b && b.cmd ? b.cmd : '').trim());
 }
 
+function normalizeScriptSearchText(value) {
+    return String(value == null ? '' : value).toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 function parseScriptUseCount(b) {
     if (!b) return 0;
     var v = parseInt(b.useCount != null ? b.useCount : (b.usageCount != null ? b.usageCount : b.count), 10);
@@ -2441,92 +2655,151 @@ function sortScriptBookmarks(bms) {
 }
 
 function loadSortedScriptBookmarks() {
-    var bms = loadBM(SBK);
-    if (sortScriptBookmarks(bms)) {
-        localStorage.setItem(SBK, JSON.stringify(bms));
-    }
+    var bms = normalizeImportedScripts(loadBM(SBK));
+    if (sortScriptBookmarks(bms)) safeStorageSet(SBK, JSON.stringify(bms));
     return bms;
 }
 
-function scriptBookmarkItemHtml(b, i) {
+function categoryMapFromList(categories) {
+    var map = {};
+    categories.forEach(function (cat) { map[cat.id] = cat; });
+    return map;
+}
+
+function scriptCategoryBadgeHtml(b, categoryMap) {
+    var cat = b.categoryId ? categoryMap[b.categoryId] : null;
+    if (cat) return '<button class="script-category-badge" type="button" data-category-id="' + escAttr(cat.id) + '" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="分类：' + escAttr(cat.name) + '">' + esc(cat.emoji) + '</button>';
+    return '<button class="script-category-badge uncategorized" type="button" data-category-id="__uncategorized__" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="未分类">▫️</button>';
+}
+
+function scriptBookmarkItemHtml(b, i, categoryMap) {
     var name = b.name || '';
     var cmd = b.cmd || '';
-    return '<div class="bm-item" data-script-row="1" data-script-index="' + i + '" onclick="event.stopPropagation();runScript(' + i + ')" title="' + esc(cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(name) + '</div><div class="bm-item-host">' + esc(cmd.substring(0, 35)) + '</div></div><div class="bm-item-actions"><span class="bm-item-run">▶</span><button class="bm-item-icon-btn bm-item-edit" title="编辑脚本" onclick="event.stopPropagation();openEditScriptModal(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button><button class="bm-item-del" title="删除脚本" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>';
+    return '<div class="bm-item" data-script-row="1" data-script-index="' + i + '" onclick="event.stopPropagation();runScript(' + i + ')" title="' + escAttr(cmd) + '">' + scriptCategoryBadgeHtml(b, categoryMap || categoryMapFromList(loadScriptCategories())) + '<div class="bm-item-info"><div class="bm-item-name">' + esc(name) + '</div><div class="bm-item-host">' + esc(cmd.substring(0, 52)) + '</div></div><div class="bm-item-actions"><span class="bm-item-run">▶</span><button class="bm-item-icon-btn bm-item-edit" title="编辑脚本" onclick="event.stopPropagation();openEditScriptModal(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button><button class="bm-item-del" title="删除脚本" onclick="event.stopPropagation();delScript(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>';
 }
 
-function makeScriptBookmarkNode(b, i) {
-    var t = document.createElement('template');
-    t.innerHTML = scriptBookmarkItemHtml(b, i).trim();
-    return t.content.firstElementChild;
+function presetScriptItemHtml(p, i) {
+    return '<div class="bm-item preset-script-item" onclick="event.stopPropagation();runPresetScript(' + i + ')" title="' + escAttr(p.cmd) + '"><span class="script-category-badge preset-badge" title="推荐脚本">📦</span><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 52)) + '</div></div><span class="bm-item-run">▶</span></div>';
 }
 
-function refreshScriptBookmarkIndices() {
-    var rows = document.querySelectorAll('#scriptBookmarkList .bm-item[data-script-row]:not(.removing)');
-    rows.forEach(function (row, i) {
-        row.dataset.scriptIndex = i;
-        row.setAttribute('onclick', 'event.stopPropagation();runScript(' + i + ')');
-        var edit = row.querySelector('.bm-item-edit');
-        var del = row.querySelector('.bm-item-del');
-        if (edit) edit.setAttribute('onclick', 'event.stopPropagation();openEditScriptModal(' + i + ')');
-        if (del) del.setAttribute('onclick', 'event.stopPropagation();delScript(' + i + ')');
+function rebuildScriptSearchIndex(bms) {
+    scriptSearchIndex = [];
+    PRESET_SCRIPTS.forEach(function (p, i) {
+        scriptSearchIndex.push({ type: 'preset', index: i, search: normalizeScriptSearchText((p.name || '') + ' ' + (p.cmd || '')) });
+    });
+    bms.forEach(function (b, i) {
+        scriptSearchIndex.push({ type: 'bookmark', index: i, categoryId: b.categoryId || '', search: normalizeScriptSearchText((b.name || '') + ' ' + (b.cmd || '')) });
     });
 }
 
-function ensureScriptEmptyState() {
+function scheduleScriptSearch(value) {
+    scriptSearchQuery = normalizeScriptSearchText(value);
+    var clear = document.getElementById('scriptSearchClear');
+    if (clear) clear.classList.toggle('show', !!scriptSearchQuery);
+    if (scriptSearchFrame) cancelAnimationFrame(scriptSearchFrame);
+    scriptSearchFrame = requestAnimationFrame(function () {
+        scriptSearchFrame = 0;
+        renderScriptBookmarks(true);
+    });
+}
+
+function clearScriptSearch() {
+    var input = document.getElementById('scriptSearchInput');
+    if (input) { input.value = ''; input.focus(); }
+    scheduleScriptSearch('');
+}
+
+function setScriptCategoryFilter(categoryId) {
+    activeScriptCategory = categoryId || '';
+    showPresets = false;
+    renderScriptBookmarks();
+}
+
+function renderScriptCategoryFilters(categories, bms) {
+    var wrap = document.getElementById('scriptCategoryFilters');
+    if (!wrap) return;
+    var counts = {}, uncategorized = 0;
+    bms.forEach(function (b) {
+        if (b.categoryId) counts[b.categoryId] = (counts[b.categoryId] || 0) + 1;
+        else uncategorized++;
+    });
+    if (activeScriptCategory && activeScriptCategory !== '__uncategorized__' && !getScriptCategory(activeScriptCategory, categories)) activeScriptCategory = '';
+    var html = '<button type="button" class="script-category-filter' + (!activeScriptCategory ? ' active' : '') + '" data-category-id="" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="全部脚本">📚<small>全部</small></button>';
+    categories.forEach(function (cat) {
+        html += '<button type="button" class="script-category-filter' + (activeScriptCategory === cat.id ? ' active' : '') + '" data-category-id="' + escAttr(cat.id) + '" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="' + escAttr(cat.name) + '（' + (counts[cat.id] || 0) + '）">' + esc(cat.emoji) + '</button>';
+    });
+    if (uncategorized) html += '<button type="button" class="script-category-filter' + (activeScriptCategory === '__uncategorized__' ? ' active' : '') + '" data-category-id="__uncategorized__" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="未分类（' + uncategorized + '）">▫️</button>';
+    html += '<button type="button" class="script-category-filter category-add-shortcut" onclick="openScriptManager(&quot;categories&quot;)" title="管理分类">＋</button>';
+    wrap.innerHTML = html;
+}
+
+function bookmarkMatchesActiveCategory(b) {
+    if (!activeScriptCategory) return true;
+    if (activeScriptCategory === '__uncategorized__') return !b.categoryId;
+    return b.categoryId === activeScriptCategory;
+}
+
+function renderScriptBookmarks(searchOnly) {
     var l = document.getElementById('scriptBookmarkList');
-    if (!l || showPresets) return;
-    var hasRows = !!l.querySelector('.bm-item[data-script-row]');
-    var empty = l.querySelector('.bm-empty');
-    if (hasRows && empty) empty.remove();
-    if (!hasRows && !empty) {
-        var div = document.createElement('div');
-        div.className = 'bm-empty';
-        div.textContent = '暂无自定义脚本';
-        l.appendChild(div);
+    if (!l) return;
+    var bms = loadSortedScriptBookmarks();
+    var categories = loadScriptCategories();
+    var categoryMap = categoryMapFromList(categories);
+    renderScriptCategoryFilters(categories, bms);
+    if (!searchOnly || !scriptSearchIndex.length) rebuildScriptSearchIndex(bms);
+    var html = '';
+
+    if (scriptSearchQuery) {
+        var matches = scriptSearchIndex.filter(function (entry) {
+            if (entry.search.indexOf(scriptSearchQuery) < 0) return false;
+            if (entry.type === 'preset') return !activeScriptCategory;
+            return bookmarkMatchesActiveCategory(bms[entry.index] || {});
+        });
+        var presetMatches = matches.filter(function (entry) { return entry.type === 'preset'; });
+        var bookmarkMatches = matches.filter(function (entry) { return entry.type === 'bookmark'; });
+        if (presetMatches.length) {
+            html += '<div class="script-list-section"><span>📦 推荐脚本</span><small>' + presetMatches.length + '</small></div>';
+            html += presetMatches.map(function (entry) { return presetScriptItemHtml(PRESET_SCRIPTS[entry.index], entry.index); }).join('');
+        }
+        if (bookmarkMatches.length) {
+            html += '<div class="script-list-section"><span>⭐ 我的脚本</span><small>' + bookmarkMatches.length + '</small></div>';
+            html += bookmarkMatches.map(function (entry) { return scriptBookmarkItemHtml(bms[entry.index], entry.index, categoryMap); }).join('');
+        }
+        if (!matches.length) html = '<div class="bm-empty script-search-empty"><b>🔍</b><span>没有找到匹配脚本</span><small>可搜索名称、完整命令或命令片段</small></div>';
+        l.innerHTML = html;
+        return;
     }
+
+    if (showPresets && !activeScriptCategory) {
+        html = '<div class="bm-item preset-back" onclick="event.stopPropagation();showPresets=false;renderScriptBookmarks()"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回我的脚本</div></div></div>';
+        html += PRESET_SCRIPTS.map(function (p, i) { return presetScriptItemHtml(p, i); }).join('');
+        l.innerHTML = html;
+        return;
+    }
+
+    if (!activeScriptCategory) html += '<div class="bm-item preset-entry" onclick="event.stopPropagation();showPresets=true;renderScriptBookmarks()"><span class="script-category-badge preset-badge">📦</span><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">推荐脚本</div><div class="bm-item-host">点击查看常用命令，也可在上方直接搜索</div></div><span class="bm-item-run" style="color:var(--c1)">›</span></div>';
+    var visible = bms.map(function (b, i) { return { bookmark: b, index: i }; }).filter(function (entry) { return bookmarkMatchesActiveCategory(entry.bookmark); });
+    if (visible.length) html += visible.map(function (entry) { return scriptBookmarkItemHtml(entry.bookmark, entry.index, categoryMap); }).join('');
+    else html += '<div class="bm-empty">' + (activeScriptCategory ? '此分类暂无脚本' : '暂无自定义脚本') + '</div>';
+    l.innerHTML = html;
 }
 
-function appendScriptBookmarkItems(items, startIndex) {
-    var l = document.getElementById('scriptBookmarkList');
-    if (!l || showPresets || !items || !items.length) return;
-    var empty = l.querySelector('.bm-empty');
-    if (empty) empty.remove();
-    var frag = document.createDocumentFragment();
-    items.forEach(function (b, offset) {
-        frag.appendChild(makeScriptBookmarkNode(b, startIndex + offset));
-    });
-    l.appendChild(frag);
-}
-
-function replaceScriptBookmarkRow(i, b) {
-    if (showPresets) return;
-    var row = document.querySelector('#scriptBookmarkList .bm-item[data-script-row][data-script-index="' + i + '"]');
-    if (!row) return;
-    row.replaceWith(makeScriptBookmarkNode(b, i));
-}
-
-function removeScriptBookmarkRow(i) {
-    if (showPresets) return;
-    var row = document.querySelector('#scriptBookmarkList .bm-item[data-script-row][data-script-index="' + i + '"]');
-    if (!row) return;
-    row.classList.add('removing');
-    refreshScriptBookmarkIndices();
-    setTimeout(function () {
-        if (row.parentNode) row.parentNode.removeChild(row);
-        refreshScriptBookmarkIndices();
-        ensureScriptEmptyState();
-    }, 160);
-}
-
-function mergeScriptBookmarksIncremental(incoming, updatedAt) {
+function mergeScriptBookmarksIncremental(incoming, updatedAt, replaceExisting) {
     incoming = normalizeCloudScripts(incoming);
+    if (replaceExisting) {
+        sortScriptBookmarks(incoming);
+        saveScriptBookmarksData(incoming, updatedAt || Date.now());
+        rebuildScriptSearchIndex(incoming);
+        return { scripts: incoming, added: 0, capacitySkipped: 0 };
+    }
     var current = loadSortedScriptBookmarks();
     var seen = {};
     current.forEach(function (b) { seen[scriptBookmarkKey(b)] = true; });
-    var added = [];
+    var added = [], capacitySkipped = 0;
     incoming.forEach(function (b) {
         var key = scriptBookmarkKey(b);
         if (!key.trim() || seen[key]) return;
+        if (current.length >= MAX_SCRIPT_BOOKMARKS) { capacitySkipped++; return; }
         current.push(b);
         added.push(b);
         seen[key] = true;
@@ -2535,93 +2808,101 @@ function mergeScriptBookmarksIncremental(incoming, updatedAt) {
         sortScriptBookmarks(current);
         saveScriptBookmarksData(current, updatedAt || Date.now());
     }
-    if (added.length) renderScriptBookmarks();
-    return { scripts: current, added: added.length };
+    rebuildScriptSearchIndex(current);
+    return { scripts: current, added: added.length, capacitySkipped: capacitySkipped };
 }
 
-function renderScriptBookmarks() {
-    var l = document.getElementById('scriptBookmarkList'), bms = loadSortedScriptBookmarks();
-    var html = '';
-
-    // Preset entry
-    if (!showPresets) {
-        html += '<div class="bm-item preset-entry" onclick="event.stopPropagation();showPresets=true;renderScriptBookmarks()"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">📦 推荐脚本</div><div class="bm-item-host">点击查看常用命令</div></div><span class="bm-item-run" style="color:var(--c1)">›</span></div>';
-    } else {
-        html += '<div class="bm-item" onclick="event.stopPropagation();showPresets=false;renderScriptBookmarks()" style="border-color:rgba(0,212,255,.15)"><div class="bm-item-info"><div class="bm-item-name" style="color:var(--c1)">‹ 返回</div></div></div>';
-        html += PRESET_SCRIPTS.map(function (p) {
-            return '<div class="bm-item" onclick="event.stopPropagation();runPresetScript(\'' + p.cmd.replace(/'/g, "\\'").replace(/"/g, "&quot;") + '\')" title="' + esc(p.cmd) + '"><div class="bm-item-info"><div class="bm-item-name">' + esc(p.name) + '</div><div class="bm-item-host">' + esc(p.cmd.substring(0, 35)) + '</div></div><span class="bm-item-run">▶</span></div>';
-        }).join('');
-        l.innerHTML = html;
-        return;
-    }
-
-    // User scripts
-    if (bms.length) {
-        html += bms.map(function (b, i) {
-            return scriptBookmarkItemHtml(b, i);
-        }).join('');
-    } else {
-        html += '<div class="bm-empty">暂无自定义脚本</div>';
-    }
-    l.innerHTML = html;
-}
-
-function runPresetScript(cmd) {
+function runPresetScript(i) {
+    var preset = PRESET_SCRIPTS[i];
+    if (!preset) return;
     if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].ws || sessions[activeIdx].ws.readyState !== 1) { showToast('无活动连接', 'error'); return; }
-    sessions[activeIdx].ws.send(cmd + '\n');
-    showToast('已执行', 'success');
+    sessions[activeIdx].ws.send(preset.cmd + '\n');
+    showToast('已执行: ' + preset.name, 'success');
     sessions[activeIdx].term.focus();
 }
 
-function saveScriptBookmark() {
-    var n = document.getElementById('scriptName').value.trim(), c = document.getElementById('scriptContent').value.trim();
-    if (!n || !c) { showToast('名称和命令不能为空', 'error'); return; }
-    var item = { name: n, cmd: c };
-    var bms = loadBM(SBK); bms.push(item); saveBM(SBK, bms);
-    document.getElementById('scriptName').value = ''; document.getElementById('scriptContent').value = '';
-    appendScriptBookmarkItems([item], bms.length - 1);
-    syncLocalScriptsIfLogged(); showToast('脚本已保存', 'success');
+function renderEditScriptCategoryOptions(selected) {
+    var wrap = document.getElementById('editScriptCategoryOptions');
+    if (!wrap) return;
+    var categories = loadScriptCategories();
+    var html = '<button type="button" class="' + (!selected ? 'active' : '') + '" data-category-id="" onclick="selectEditScriptCategory(this.dataset.categoryId)">▫️ 未分类</button>';
+    categories.forEach(function (cat) {
+        html += '<button type="button" class="' + (selected === cat.id ? 'active' : '') + '" data-category-id="' + escAttr(cat.id) + '" onclick="selectEditScriptCategory(this.dataset.categoryId)" title="' + escAttr(cat.name) + '">' + esc(cat.emoji) + ' ' + esc(cat.name) + '</button>';
+    });
+    wrap.innerHTML = html;
+}
+
+function selectEditScriptCategory(categoryId) {
+    var hidden = document.getElementById('editScriptCategory');
+    if (hidden) hidden.value = categoryId || '';
+    renderEditScriptCategoryOptions(categoryId || '');
+}
+
+function openAddScriptModal() {
+    openScriptModal(-1, null);
 }
 
 function openEditScriptModal(i) {
     var b = loadSortedScriptBookmarks()[i];
     if (!b) return;
-    document.getElementById('editScriptIndex').value = i;
-    document.getElementById('editScriptName').value = b.name || '';
-    document.getElementById('editScriptContent').value = b.cmd || '';
+    openScriptModal(i, b);
+}
+
+function openScriptModal(i, bookmark) {
+    var editing = i >= 0 && bookmark;
+    document.getElementById('editScriptIndex').value = editing ? i : -1;
+    document.getElementById('editScriptName').value = editing ? (bookmark.name || '') : '';
+    document.getElementById('editScriptContent').value = editing ? (bookmark.cmd || '') : '';
+    document.getElementById('editScriptCategory').value = editing ? (bookmark.categoryId || '') : (activeScriptCategory && activeScriptCategory !== '__uncategorized__' ? activeScriptCategory : '');
+    var title = document.getElementById('editScriptModalTitle');
+    if (title) title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>' + (editing ? '编辑脚本' : '添加脚本');
+    var saveBtn = document.getElementById('editScriptSaveBtn');
+    if (saveBtn) saveBtn.textContent = editing ? '保存修改' : '添加脚本';
+    renderEditScriptCategoryOptions(document.getElementById('editScriptCategory').value);
     document.getElementById('editScriptModal').classList.add('show');
-    setTimeout(function () {
-        var input = document.getElementById('editScriptName');
-        if (input) input.focus();
-    }, 60);
+    setTimeout(function () { var input = document.getElementById('editScriptName'); if (input) input.focus(); }, 60);
 }
 
 function hideEditScriptModal() {
     var modal = document.getElementById('editScriptModal');
     if (modal) modal.classList.remove('show');
-    var idx = document.getElementById('editScriptIndex');
-    var name = document.getElementById('editScriptName');
-    var content = document.getElementById('editScriptContent');
-    if (idx) idx.value = '-1';
-    if (name) name.value = '';
-    if (content) content.value = '';
+    ['editScriptIndex','editScriptName','editScriptContent','editScriptCategory'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.value = id === 'editScriptIndex' ? '-1' : '';
+    });
 }
 
 function saveEditedScriptBookmark() {
     var idx = parseInt(document.getElementById('editScriptIndex').value, 10);
     var name = document.getElementById('editScriptName').value.trim();
     var cmd = document.getElementById('editScriptContent').value.trim();
-    if (idx < 0 || !isFinite(idx)) { hideEditScriptModal(); return; }
+    var categoryId = document.getElementById('editScriptCategory').value.trim();
     if (!name || !cmd) { showToast('名称和命令不能为空', 'error'); return; }
+    if (categoryId && !getScriptCategory(categoryId)) categoryId = '';
     var bms = loadSortedScriptBookmarks();
-    if (!bms[idx]) { hideEditScriptModal(); return; }
-    bms[idx] = Object.assign({}, bms[idx], { name: name, cmd: cmd });
+    var item = { name: name.slice(0, 80), cmd: cmd };
+    if (categoryId) item.categoryId = categoryId;
+    var editing = idx >= 0 && isFinite(idx);
+    if (editing) {
+        if (!bms[idx]) { hideEditScriptModal(); return; }
+        item = Object.assign({}, bms[idx], item);
+        if (!categoryId) delete item.categoryId;
+        bms[idx] = item;
+    } else {
+        if (bms.length >= MAX_SCRIPT_BOOKMARKS) { showToast('脚本数量已达到 ' + MAX_SCRIPT_BOOKMARKS + ' 个上限', 'error'); return; }
+        bms.push(item);
+    }
     sortScriptBookmarks(bms);
     saveBM(SBK, bms);
     hideEditScriptModal();
     renderScriptBookmarks();
+    updateScriptManagerSummary();
     syncLocalScriptsIfLogged();
-    showToast('脚本已更新', 'success');
+    showToast(editing ? '脚本已更新' : '脚本已添加', 'success');
+}
+
+function saveScriptBookmark() {
+    openAddScriptModal();
 }
 
 function runScript(i) {
@@ -2644,9 +2925,148 @@ function delScript(i) {
     if (!bms[i]) return;
     bms.splice(i, 1);
     saveBM(SBK, bms);
-    removeScriptBookmarkRow(i);
+    renderScriptBookmarks();
+    updateScriptManagerSummary();
     syncLocalScriptsIfLogged();
     showToast('已删除', 'info');
+}
+
+function openScriptManager(tab) {
+    var modal = document.getElementById('scriptManagerModal');
+    if (!modal) return;
+    renderEmojiPicker();
+    renderCategoryManager();
+    updateScriptManagerSummary();
+    switchScriptManagerTab(tab || 'bookmarks');
+    modal.classList.add('show');
+}
+
+function hideScriptManager() {
+    var modal = document.getElementById('scriptManagerModal');
+    if (modal) modal.classList.remove('show');
+    resetCategoryEditor();
+}
+
+function switchScriptManagerTab(tab) {
+    var categories = tab === 'categories';
+    var bookmarkPanel = document.getElementById('scriptManagerBookmarks');
+    var categoryPanel = document.getElementById('scriptManagerCategories');
+    var bookmarkTab = document.getElementById('scriptManagerBookmarksTab');
+    var categoryTab = document.getElementById('scriptManagerCategoriesTab');
+    if (bookmarkPanel) bookmarkPanel.style.display = categories ? 'none' : '';
+    if (categoryPanel) categoryPanel.style.display = categories ? '' : 'none';
+    if (bookmarkTab) bookmarkTab.classList.toggle('active', !categories);
+    if (categoryTab) categoryTab.classList.toggle('active', categories);
+    if (categories) renderCategoryManager();
+}
+
+function updateScriptManagerSummary() {
+    var el = document.getElementById('scriptManagerSummary');
+    if (!el) return;
+    el.innerHTML = '<span><b>' + loadBM(SBK).length + '</b> 个脚本</span><span><b>' + loadScriptCategories().length + '</b> 个分类</span><span>' + (currentAccount ? ('已登录 ' + esc(currentAccount.username)) : '仅保存在本机') + '</span>';
+}
+
+function renderEmojiPicker() {
+    var wrap = document.getElementById('categoryEmojiPicker');
+    if (!wrap || wrap.dataset.ready === '1') return;
+    wrap.innerHTML = EMOJI_OPTIONS.map(function (emoji) {
+        return '<button type="button" data-emoji="' + escAttr(emoji) + '" onclick="selectCategoryEmoji(this.dataset.emoji)" title="选择 ' + escAttr(emoji) + '">' + esc(emoji) + '</button>';
+    }).join('');
+    wrap.dataset.ready = '1';
+    selectCategoryEmoji(document.getElementById('categoryEmoji').value || '🛠️');
+}
+
+function selectCategoryEmoji(emoji) {
+    var hidden = document.getElementById('categoryEmoji');
+    if (hidden) hidden.value = emoji || '📁';
+    document.querySelectorAll('#categoryEmojiPicker button').forEach(function (btn) { btn.classList.toggle('active', btn.dataset.emoji === (emoji || '📁')); });
+}
+
+function resetCategoryEditor() {
+    var id = document.getElementById('categoryEditId');
+    var name = document.getElementById('categoryName');
+    var save = document.getElementById('categorySaveBtn');
+    if (id) id.value = '';
+    if (name) name.value = '';
+    if (save) save.textContent = '添加分类';
+    selectCategoryEmoji('🛠️');
+}
+
+function saveScriptCategory() {
+    var id = document.getElementById('categoryEditId').value.trim();
+    var name = document.getElementById('categoryName').value.trim();
+    var emoji = document.getElementById('categoryEmoji').value || '📁';
+    if (!name) { showToast('请填写分类名称', 'error'); return; }
+    var categories = loadScriptCategories();
+    var duplicate = categories.some(function (cat) { return cat.name.toLowerCase() === name.toLowerCase() && cat.id !== id; });
+    if (duplicate) { showToast('分类名称已存在', 'error'); return; }
+    var editing = false;
+    categories = categories.map(function (cat) {
+        if (cat.id !== id) return cat;
+        editing = true;
+        return Object.assign({}, cat, { name: name.slice(0, 40), emoji: emoji });
+    });
+    if (!editing) {
+        if (categories.length >= MAX_SCRIPT_CATEGORIES) { showToast('分类数量已达到 ' + MAX_SCRIPT_CATEGORIES + ' 个上限', 'error'); return; }
+        categories.push({ id: createScriptCategoryId(), name: name.slice(0, 40), emoji: emoji, createdAt: Date.now() });
+    }
+    saveScriptCategoriesData(categories);
+    resetCategoryEditor();
+    renderCategoryManager();
+    renderScriptBookmarks();
+    updateScriptManagerSummary();
+    syncLocalScriptsIfLogged();
+    showToast(editing ? '分类已更新' : '分类已添加', 'success');
+}
+
+function editScriptCategory(id) {
+    var cat = getScriptCategory(id);
+    if (!cat) return;
+    document.getElementById('categoryEditId').value = cat.id;
+    document.getElementById('categoryName').value = cat.name;
+    document.getElementById('categorySaveBtn').textContent = '保存分类';
+    selectCategoryEmoji(cat.emoji);
+    document.getElementById('categoryName').focus();
+}
+
+function deleteScriptCategory(id) {
+    var categories = loadScriptCategories();
+    var cat = getScriptCategory(id, categories);
+    if (!cat) return;
+    var bms = loadSortedScriptBookmarks();
+    var count = bms.filter(function (b) { return b.categoryId === id; }).length;
+    var tip = count ? ('\n该分类下的 ' + count + ' 个脚本会移至“未分类”，脚本不会删除。') : '';
+    if (!confirm('确定删除分类 “' + cat.name + '” 吗？' + tip)) return;
+    categories = categories.filter(function (item) { return item.id !== id; });
+    bms.forEach(function (b) { if (b.categoryId === id) delete b.categoryId; });
+    var now = Date.now();
+    saveScriptCategoriesData(categories, now);
+    saveScriptBookmarksData(bms, now);
+    if (activeScriptCategory === id) activeScriptCategory = '';
+    resetCategoryEditor();
+    renderCategoryManager();
+    renderScriptBookmarks();
+    updateScriptManagerSummary();
+    syncLocalScriptsIfLogged();
+    showToast('分类已删除，脚本已移至未分类', 'success');
+}
+
+function renderCategoryManager() {
+    var list = document.getElementById('categoryManageList');
+    var label = document.getElementById('categoryCountLabel');
+    if (!list) return;
+    var categories = loadScriptCategories();
+    var bms = loadSortedScriptBookmarks();
+    var counts = {};
+    bms.forEach(function (b) { if (b.categoryId) counts[b.categoryId] = (counts[b.categoryId] || 0) + 1; });
+    if (label) label.textContent = categories.length + ' 个';
+    if (!categories.length) {
+        list.innerHTML = '<div class="category-empty"><b>🎨</b><span>还没有分类</span><small>从上方选择 Emoji 并填写名称即可添加</small></div>';
+        return;
+    }
+    list.innerHTML = categories.map(function (cat) {
+        return '<div class="category-manage-item"><button type="button" class="category-manage-emoji" data-category-id="' + escAttr(cat.id) + '" onclick="hideScriptManager();setScriptCategoryFilter(this.dataset.categoryId)" title="筛选 ' + escAttr(cat.name) + '">' + esc(cat.emoji) + '</button><div><b>' + esc(cat.name) + '</b><small>' + (counts[cat.id] || 0) + ' 个脚本</small></div><button type="button" class="category-row-action" data-category-id="' + escAttr(cat.id) + '" onclick="editScriptCategory(this.dataset.categoryId)" title="编辑分类">编辑</button><button type="button" class="category-row-action danger" data-category-id="' + escAttr(cat.id) + '" onclick="deleteScriptCategory(this.dataset.categoryId)" title="删除分类">删除</button></div>';
+    }).join('');
 }
 
 // ==================== SFTP ====================
@@ -2656,7 +3076,7 @@ function sftpLoad(path) {
     sftpCurrentPath = path;
     document.getElementById('sftpPath').value = path;
     document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">加载中...</div>';
-    fetch('/file/list?sshInfo=' + encodeURIComponent(sshInfo) + '&path=' + encodeURIComponent(path))
+    fetch('/file/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: sshInfo, path: path }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg !== 'success') { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(d.Msg) + '</div>'; return; }
@@ -2680,7 +3100,24 @@ function sftpUp() { var p = sftpCurrentPath.replace(/\/$/, ''); var i = p.lastIn
 
 function sftpDownload(path) {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
-    window.open('/file/download?sshInfo=' + encodeURIComponent(sessions[activeIdx].sshInfo) + '&path=' + encodeURIComponent(path), '_blank');
+    var sshInfo = sessions[activeIdx].sshInfo;
+    showToast('正在准备下载...', 'info');
+    fetch('/file/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sshInfo: sshInfo, path: path })
+    }).then(function (response) {
+        if (!response.ok) return response.json().then(function (data) { throw new Error(data.Msg || '下载失败'); });
+        return response.blob().then(function (blob) { return { blob: blob, disposition: response.headers.get('Content-Disposition') || '' }; });
+    }).then(function (result) {
+        var filename = String(path || '').split('/').pop() || 'download';
+        var match = /filename(?:\*=UTF-8''|=)\"?([^\";]+)/i.exec(result.disposition);
+        if (match && match[1]) { try { filename = decodeURIComponent(match[1]); } catch (e) { filename = match[1]; } }
+        var objectURL = URL.createObjectURL(result.blob);
+        var link = document.createElement('a');
+        link.href = objectURL; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+        setTimeout(function () { URL.revokeObjectURL(objectURL); }, 1000);
+    }).catch(function (err) { showToast(err.message || '下载失败', 'error'); });
 }
 
 function normalizeSftpDir(path) {
@@ -2778,7 +3215,7 @@ function sftpDirLoad(path) {
     if (pathInput) pathInput.value = path;
     if (!listEl) return;
     listEl.innerHTML = '<div class="sftp-loading">加载中...</div>';
-    fetch('/file/list?sshInfo=' + encodeURIComponent(sessions[activeIdx].sshInfo) + '&path=' + encodeURIComponent(path))
+    fetch('/file/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: sessions[activeIdx].sshInfo, path: path }) })
         .then(function (r) { return r.json(); })
         .then(function (d) {
             if (d.Msg !== 'success') { listEl.innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(d.Msg) + '</div>'; return; }
@@ -2813,9 +3250,12 @@ function sftpUpload() {
     var input = document.getElementById('sftpUploadInput');
     if (!input.files.length || activeIdx < 0) return;
     var sshInfo = sessions[activeIdx].sshInfo;
-    Array.from(input.files).forEach(function (f) {
+    Array.from(input.files).forEach(function (f, index) {
         var fd = new FormData();
-        fd.append('file', f); fd.append('sshInfo', sshInfo); fd.append('path', sftpCurrentPath); fd.append('id', Date.now().toString());
+        var uploadId = window.crypto && typeof window.crypto.randomUUID === 'function'
+            ? window.crypto.randomUUID()
+            : Date.now().toString(36) + '_' + index + '_' + Math.random().toString(36).slice(2);
+        fd.append('file', f); fd.append('sshInfo', sshInfo); fd.append('path', sftpCurrentPath); fd.append('id', uploadId);
         fetch('/file/upload', { method: 'POST', body: fd })
             .then(function (r) { return r.json(); })
             .then(function (d) { if (d.Msg === 'success') { showToast('上传成功: ' + f.name, 'success'); sftpLoad(sftpCurrentPath); } else showToast('上传失败', 'error'); })
@@ -3070,7 +3510,7 @@ function refreshTerminalThemesForCurrentTheme() {
 }
 
 function getCurrentFontSize() {
-    var saved = parseInt(localStorage.getItem(FONT_KEY));
+    var saved = parseInt(safeStorageGet(FONT_KEY));
     return saved || (window.innerWidth <= 520 ? 13 : 15);
 }
 
@@ -3080,7 +3520,7 @@ function changeFontSize(delta) {
     var cur = s.term.options.fontSize || 15;
     var nv = Math.max(8, Math.min(30, cur + delta));
     s.term.options.fontSize = nv;
-    localStorage.setItem(FONT_KEY, nv);
+    safeStorageSet(FONT_KEY, nv);
     document.getElementById('fontSizeLabel').textContent = nv;
     try { s.fitAddon.fit(); } catch (e) { }
     if (s.ws && s.ws.readyState === 1) s.ws.send('resize:' + s.term.rows + ':' + s.term.cols);
@@ -3131,7 +3571,7 @@ function renderSwatchGroup(containerId, palette, active, onClick) {
 function getSavedColors() {
     var defaults = defaultSavedTermColors();
     try {
-        var c = JSON.parse(localStorage.getItem(COLOR_KEY));
+        var c = JSON.parse(safeStorageGet(COLOR_KEY));
         if (c) {
             return {
                 fg: isDefaultTermFg(c.fg) ? defaults.fg : c.fg,
@@ -3144,7 +3584,7 @@ function getSavedColors() {
 }
 
 function saveColors(fg, bg, cursor) {
-    localStorage.setItem(COLOR_KEY, JSON.stringify({ fg: fg, bg: bg, cursor: cursor }));
+    safeStorageSet(COLOR_KEY, JSON.stringify({ fg: fg, bg: bg, cursor: cursor }));
 }
 
 function applyFgColor(color) {
@@ -3173,7 +3613,7 @@ function applyCursorColor(color) {
 }
 
 function resetTermColors() {
-    localStorage.removeItem(COLOR_KEY);
+    safeStorageRemove(COLOR_KEY);
     var defaults = defaultSavedTermColors();
     if (activeIdx >= 0 && sessions[activeIdx]) {
         sessions[activeIdx].term.options.theme = buildTerminalTheme(defaults);
@@ -3217,16 +3657,16 @@ function applyTheme(theme) {
 }
 
 function cycleTheme() {
-    var cur = localStorage.getItem(THEME_KEY) || 'auto';
+    var cur = safeStorageGet(THEME_KEY) || 'auto';
     var idx = themes.indexOf(cur);
     var next = themes[(idx + 1) % themes.length];
-    localStorage.setItem(THEME_KEY, next);
+    safeStorageSet(THEME_KEY, next);
     applyTheme(next);
     showToast(themeLabels[next], 'info');
 }
 
 function initTheme() {
-    var saved = localStorage.getItem(THEME_KEY) || 'dark';
+    var saved = safeStorageGet(THEME_KEY) || 'dark';
     applyTheme(saved);
 }
 
@@ -3266,7 +3706,7 @@ var SYS_INTERVAL_KEY = 'webssh_sys_interval';
 var _sysIntervalTemp = 60;
 
 function getSysInterval() {
-    var v = parseInt(localStorage.getItem(SYS_INTERVAL_KEY));
+    var v = parseInt(safeStorageGet(SYS_INTERVAL_KEY));
     return (v && v >= 5 && v <= 600) ? v : 60;
 }
 
@@ -3289,7 +3729,7 @@ function saveSysInterval() {
         btn.textContent = '保存';
         return;
     }
-    localStorage.setItem(SYS_INTERVAL_KEY, _sysIntervalTemp);
+    safeStorageSet(SYS_INTERVAL_KEY, _sysIntervalTemp);
     btn.classList.add('saved');
     btn.textContent = '已保存';
 
@@ -3313,7 +3753,7 @@ function saveSysInterval() {
 function saveTopbarMetricsPreference() {
     var cb = document.getElementById('enableSysInfo');
     var enabled = !!(cb && cb.checked);
-    try { localStorage.setItem(TOPBAR_METRICS_KEY, enabled ? 'true' : 'false'); } catch (e) { }
+    try { safeStorageSet(TOPBAR_METRICS_KEY, enabled ? 'true' : 'false'); } catch (e) { }
     updateSysInfoHint();
     if (!enabled) {
         sessions.forEach(function (s) {
@@ -3363,9 +3803,9 @@ var SETTINGS_KEY = 'webssh_settings';
 var BG_PRESETS = ['#0a0a1a','#0d1117','#1a1a2e','#000000','#1e1e2e','#282a36','#002b36','#2e3440','#e8eaf0','#f0f0f5','#ffffff','#fdf6e3'];
 
 function loadSettings() {
-    try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch (e) { return {}; }
+    try { return JSON.parse(safeStorageGet(SETTINGS_KEY)) || {}; } catch (e) { return {}; }
 }
-function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
+function saveSettings(s) { safeStorageSet(SETTINGS_KEY, JSON.stringify(s)); }
 
 function toggleSettings() {
     var p = document.getElementById('settingsPanel');
@@ -3514,7 +3954,7 @@ function changeBlur(val) {
 }
 
 function resetAllSettings() {
-    localStorage.removeItem(SETTINGS_KEY);
+    safeStorageRemove(SETTINGS_KEY);
     document.body.style.zoom = '';
     document.documentElement.style.removeProperty('--bg');
     document.documentElement.style.removeProperty('--blur');
@@ -3529,7 +3969,7 @@ function resetAllSettings() {
     if (footer) footer.classList.remove('user-hidden');
     var toggleF = document.getElementById('toggleFooter');
     if (toggleF) toggleF.checked = true;
-    try { localStorage.removeItem(TOPBAR_METRICS_KEY); } catch (e) { }
+    try { safeStorageRemove(TOPBAR_METRICS_KEY); } catch (e) { }
     var topbarToggle = document.getElementById('enableSysInfo');
     if (topbarToggle) topbarToggle.checked = false;
     updateSysInfoHint();
@@ -3578,8 +4018,7 @@ function initSettings() {
 function isPrivateKey(s) {
     if (!s) return false;
     var decoded = safeDecodeURIComponent(s);
-    // Private keys start with -----BEGIN or are very long (>200 chars)
-    return decoded.indexOf('-----BEGIN') === 0 || decoded.indexOf('-----BEGIN') !== -1 || decoded.length > 200;
+    return /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(decoded);
 }
 
 function parseUrlLoginPath(pathname) {
@@ -3608,7 +4047,14 @@ function parseUrlLoginPath(pathname) {
         user = 'root';
     } else if (parts.length === 3) {
         var hp3 = parseHostPortInput(safeDecodeURIComponent(parts[0]), 22);
-        if (/^\d+$/.test(parts[1])) {
+        var middle = safeDecodeURIComponent(parts[1]);
+        if (middle.charAt(0) === '@') {
+            // Explicit username syntax, including all-numeric usernames: host/@12345/password
+            host = hp3.host;
+            port = hp3.port;
+            user = middle.slice(1);
+            pass = safeDecodeURIComponent(parts[2]);
+        } else if (/^\d+$/.test(parts[1])) {
             // ip/port/password
             host = hp3.host;
             port = normalizePortValue(parts[1], hp3.port);
@@ -3618,7 +4064,7 @@ function parseUrlLoginPath(pathname) {
             // ip:port/user/password OR ip/user/password OR ipv6/user/password
             host = hp3.host;
             port = hp3.port;
-            user = safeDecodeURIComponent(parts[1]);
+            user = middle;
             pass = safeDecodeURIComponent(parts[2]);
         }
     } else if (parts.length === 4) {
@@ -3640,8 +4086,47 @@ function parseUrlLoginPath(pathname) {
     return { host: host, port: port || 22, user: user || 'root', pass: pass || '', authType: authType };
 }
 
+function decodeBase64UrlUTF8(value) {
+    var normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    while (normalized.length % 4) normalized += '=';
+    var binary = atob(normalized);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    if (window.TextDecoder) return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    var escaped = '';
+    for (var j = 0; j < bytes.length; j++) escaped += '%' + bytes[j].toString(16).padStart(2, '0');
+    return decodeURIComponent(escaped);
+}
+
+function parseUrlLoginFragment(hash) {
+    var raw = String(hash || '').replace(/^#/, '');
+    if (!raw) return null;
+    var encoded = new URLSearchParams(raw).get('ssh');
+    if (!encoded) return null;
+    try {
+        var data = JSON.parse(decodeBase64UrlUTF8(encoded));
+        if (!data || typeof data !== 'object') return null;
+        var hostValue = data.hostname !== undefined ? data.hostname : data.host;
+        var hp = parseHostPortInput(String(hostValue || ''), data.port || 22);
+        if (!hp.host) return null;
+        var privateKey = typeof data.privateKey === 'string' ? data.privateKey : '';
+        var password = typeof data.password === 'string' ? data.password : (typeof data.pass === 'string' ? data.pass : '');
+        var keyLogin = data.logintype === 1 || data.loginType === 1 || data.authType === 'key' || !!privateKey;
+        return {
+            host: hp.host,
+            port: hp.port,
+            user: String(data.username !== undefined ? data.username : (data.user || 'root')),
+            pass: keyLogin ? privateKey : password,
+            passphrase: typeof data.passphrase === 'string' ? data.passphrase : '',
+            authType: keyLogin ? 'key' : 'password'
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
 function parseUrlLogin() {
-    return parseUrlLoginPath(location.pathname);
+    return parseUrlLoginFragment(location.hash) || parseUrlLoginPath(location.pathname);
 }
 
 function tryAutoLogin() {
@@ -3656,6 +4141,8 @@ function tryAutoLogin() {
     if (info.authType === 'key') {
         switchAuthTab('key');
         document.getElementById('privateKey').value = info.pass;
+        var passphrase = document.getElementById('passphrase');
+        if (passphrase) passphrase.value = info.passphrase || '';
     } else {
         switchAuthTab('password');
         document.getElementById('password').value = info.pass;
@@ -3752,6 +4239,16 @@ if (editScriptModalEl) {
         if (e.target === editScriptModalEl) hideEditScriptModal();
     });
 }
+var scriptManagerModalEl = document.getElementById('scriptManagerModal');
+if (scriptManagerModalEl) {
+    scriptManagerModalEl.addEventListener('click', function (e) {
+        if (e.target === scriptManagerModalEl) hideScriptManager();
+    });
+}
+var categoryNameEl = document.getElementById('categoryName');
+if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') saveScriptCategory();
+});
 ['authUsername', 'authPassword'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) {
@@ -3780,6 +4277,10 @@ if (editScriptModalEl) {
 // Fetch server config (footer visibility etc.), then dismiss splash
 (function () {
     function applyServerConfig(cfg) {
+        allowRegistration = !!(cfg && cfg.allowRegistration);
+        var registerTab = document.getElementById('authRegisterTab');
+        if (registerTab) registerTab.style.display = allowRegistration ? '' : 'none';
+        if (!allowRegistration && authMode === 'register') switchAuthMode('login');
         if (cfg && cfg.showFooter === false) {
             var footer = document.querySelector('.global-footer');
             if (footer) footer.classList.add('server-hidden');

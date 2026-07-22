@@ -1,13 +1,16 @@
 package core
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -81,13 +84,32 @@ func normalizeSSHClientAddress(client *SSHClient) {
 	}
 }
 
+const sshConnectTimeout = 5 * time.Second
+
+func sshClientFromConn(conn net.Conn, addr string, clientConfig *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("failed to set ssh handshake deadline: %v", err)
+	}
+	connection, channels, requests, err := ssh.NewClientConn(conn, addr, clientConfig)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = connection.Close()
+		return nil, fmt.Errorf("failed to clear ssh handshake deadline: %v", err)
+	}
+	return ssh.NewClient(connection, channels, requests), nil
+}
+
 func (sclient *SSHClient) GenerateClient() error {
 	var (
 		auth         []ssh.AuthMethod
 		addr         string
 		clientConfig *ssh.ClientConfig
-		client       *ssh.Client
 		config       ssh.Config
+		hostKeyCheck ssh.HostKeyCallback
 		err          error
 	)
 	auth = make([]ssh.AuthMethod, 0)
@@ -120,17 +142,20 @@ func (sclient *SSHClient) GenerateClient() error {
 		auth = append(auth, ssh.PublicKeys(signer))
 	}
 
-	config = ssh.Config{
-		Ciphers: []string{"aes128-ctr", "aes192-ctr", "aes256-ctr", "aes128-gcm@openssh.com", "arcfour256", "arcfour128", "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc"},
+	config.SetDefaults()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("WEBSSH_ALLOW_LEGACY_CIPHERS")), "true") {
+		config.Ciphers = append(config.Ciphers, "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc")
+	}
+	hostKeyCheck, err = hostKeyCallback()
+	if err != nil {
+		return err
 	}
 	clientConfig = &ssh.ClientConfig{
-		User:    sclient.Username,
-		Auth:    auth,
-		Timeout: 5 * time.Second,
-		Config:  config,
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			return nil
-		},
+		User:            sclient.Username,
+		Auth:            auth,
+		Timeout:         sshConnectTimeout,
+		Config:          config,
+		HostKeyCallback: hostKeyCheck,
 	}
 	if sclient.Port == 0 {
 		sclient.Port = 22
@@ -138,6 +163,7 @@ func (sclient *SSHClient) GenerateClient() error {
 	// JoinHostPort automatically converts a bare IPv6 literal into [IPv6]:port.
 	addr = net.JoinHostPort(sclient.Hostname, strconv.Itoa(sclient.Port))
 
+	networkDialer := &net.Dialer{Timeout: sshConnectTimeout, KeepAlive: 30 * time.Second}
 	if sclient.ProxyHost != "" {
 		if sclient.ProxyPort == 0 {
 			sclient.ProxyPort = 1080
@@ -147,25 +173,35 @@ func (sclient *SSHClient) GenerateClient() error {
 		if sclient.ProxyUser != "" {
 			proxyAuth = &proxy.Auth{User: sclient.ProxyUser, Password: sclient.ProxyPass}
 		}
-		dialer, err := proxy.SOCKS5("tcp", proxyAddr, proxyAuth, proxy.Direct)
+		dialer, err := proxy.SOCKS5("tcp", proxyAddr, proxyAuth, networkDialer)
 		if err != nil {
 			return fmt.Errorf("failed to create socks5 proxy: %v", err)
 		}
-		conn, err := dialer.Dial("tcp", addr)
+		contextDialer, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return fmt.Errorf("socks5 proxy does not support bounded dialing")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sshConnectTimeout)
+		conn, err := contextDialer.DialContext(ctx, "tcp", addr)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to connect via proxy: %v", err)
 		}
-		c, chans, reqs, err := ssh.NewClientConn(conn, addr, clientConfig)
+		client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
 		if err != nil {
-			conn.Close()
 			return fmt.Errorf("failed to ssh handshake via proxy: %v", err)
 		}
-		sclient.Client = ssh.NewClient(c, chans, reqs)
+		sclient.Client = client
 		return nil
 	}
 
-	if client, err = ssh.Dial("tcp", addr, clientConfig); err != nil {
+	conn, err := networkDialer.Dial("tcp", addr)
+	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
+	}
+	client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
+	if err != nil {
+		return fmt.Errorf("failed to ssh handshake: %v", err)
 	}
 	sclient.Client = client
 	return nil
@@ -185,10 +221,14 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 		return nil
 	}
 	sclient.StdinPipe = stdinPipe
+	if sclient.wsWriteMu == nil {
+		sclient.wsWriteMu = &sync.Mutex{}
+	}
 	wsOutput := new(wsOutput)
 	sshSession.Stdout = wsOutput
 	sshSession.Stderr = wsOutput
 	wsOutput.ws = ws
+	wsOutput.mu = sclient.wsWriteMu
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
 		ssh.TTY_OP_ISPEED: 14400,
@@ -262,7 +302,12 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 		case <-stopCh:
 			return
 		case <-stopTimer.C:
-			ws.WriteMessage(1, []byte(fmt.Sprintf("\033[33m%s\033[0m", closeTip)))
+			if sclient.wsWriteMu == nil {
+				sclient.wsWriteMu = &sync.Mutex{}
+			}
+			sclient.wsWriteMu.Lock()
+			_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\033[33m%s\033[0m", closeTip)))
+			sclient.wsWriteMu.Unlock()
 			return
 		}
 	}

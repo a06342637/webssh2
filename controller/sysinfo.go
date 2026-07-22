@@ -17,7 +17,11 @@ func SysInfo(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
 
-	sshInfo := c.DefaultQuery("sshInfo", "")
+	sshInfo, err := bindSSHInfoJSON(c)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
 	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
@@ -109,15 +113,15 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	}
 	defer wsConn.Close()
 
-	sshInfo := c.DefaultQuery("sshInfo", "")
-	if sshInfo == "" {
-		_, initMsg, err := wsConn.ReadMessage()
-		if err != nil {
-			responseBody.Msg = err.Error()
-			return &responseBody
-		}
-		sshInfo = string(initMsg)
+	wsConn.SetReadLimit(websocketInitLimit)
+	_ = wsConn.SetReadDeadline(time.Now().Add(websocketInitTimeout))
+	_, initMsg, err := wsConn.ReadMessage()
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
 	}
+	_ = wsConn.SetReadDeadline(time.Time{})
+	sshInfo := string(initMsg)
 
 	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
 	if err != nil {

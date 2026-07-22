@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"flag"
 	"fmt"
@@ -40,6 +42,11 @@ func init() {
 			savePass = b
 		}
 	}
+	if envVal, ok := os.LookupEnv("SAVE_PASS"); ok {
+		if b, err := strconv.ParseBool(envVal); err == nil {
+			savePass = b
+		}
+	}
 	if envVal, ok := os.LookupEnv("showFooter"); ok {
 		if b, err := strconv.ParseBool(envVal); err == nil {
 			showFooter = b
@@ -65,26 +72,33 @@ func init() {
 			*port = b
 		}
 	}
+}
+
+func configureRuntime() {
 	flag.Parse()
 	if *v {
 		fmt.Printf("Version: %s\n", version)
 		os.Exit(0)
 	}
 	if *authInfo != "" {
-		accountInfo := strings.Split(*authInfo, ":")
-		if len(accountInfo) != 2 || accountInfo[0] == "" || accountInfo[1] == "" {
+		accountUsername, accountPassword, ok := strings.Cut(*authInfo, ":")
+		if !ok || accountUsername == "" || accountPassword == "" {
 			fmt.Println("请按'user:pass'的格式来传参或设置环境变量, 且账号密码都不能为空!")
 			os.Exit(0)
 		}
-		username, password = accountInfo[0], accountInfo[1]
+		username, password = accountUsername, accountPassword
 	}
 }
 
 func main() {
+	configureRuntime()
 	gin.SetMode(gin.ReleaseMode)
 	server := gin.New()
 	server.Use(gin.Recovery())
 	server.SetTrustedProxies(nil)
+	server.Use(securityHeaders())
+	server.Use(requestBodyLimit(4 << 20))
+	server.Use(basicAuthMiddleware())
 	server.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	if err := controller.InitAccountStore(""); err != nil {
@@ -92,8 +106,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	server.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	server.GET("/config", func(c *gin.Context) {
-		c.JSON(200, gin.H{"showFooter": showFooter})
+		c.JSON(200, gin.H{"showFooter": showFooter, "allowRegistration": controller.AllowRegistration()})
 	})
 
 	api := server.Group("/api")
@@ -117,14 +134,14 @@ func main() {
 	server.GET("/term", func(c *gin.Context) {
 		controller.TermWs(c, time.Duration(timeout)*time.Minute)
 	})
-	server.GET("/check", func(c *gin.Context) {
+	server.POST("/check", func(c *gin.Context) {
 		responseBody := controller.CheckSSH(c)
 		responseBody.Data = map[string]interface{}{
 			"savePass": savePass,
 		}
 		c.JSON(200, responseBody)
 	})
-	server.GET("/sysinfo", func(c *gin.Context) {
+	server.POST("/sysinfo", func(c *gin.Context) {
 		c.JSON(200, controller.SysInfo(c))
 	})
 	server.GET("/sysinfo/net", func(c *gin.Context) {
@@ -132,10 +149,10 @@ func main() {
 	})
 	file := server.Group("/file")
 	{
-		file.GET("/list", func(c *gin.Context) {
+		file.POST("/list", func(c *gin.Context) {
 			c.JSON(200, controller.FileList(c))
 		})
-		file.GET("/download", func(c *gin.Context) {
+		file.POST("/download", func(c *gin.Context) {
 			controller.DownloadFile(c)
 		})
 		file.POST("/upload", func(c *gin.Context) {
@@ -153,14 +170,6 @@ func main() {
 	server.StaticFS("/static", http.FS(staticFS))
 
 	server.NoRoute(func(c *gin.Context) {
-		if *authInfo != "" {
-			user, pass, hasAuth := c.Request.BasicAuth()
-			if !hasAuth || user != username || pass != password {
-				c.Header("WWW-Authenticate", `Basic realm="Restricted"`)
-				c.AbortWithStatus(http.StatusUnauthorized)
-				return
-			}
-		}
 		indexHTML, err := f.ReadFile("public/index.html")
 		if err != nil {
 			c.String(http.StatusInternalServerError, "index.html not found")
@@ -171,5 +180,56 @@ func main() {
 
 	fmt.Printf("🚀 WebSSH server starting on port %d\n", *port)
 	fmt.Printf("🌐 Open http://localhost:%d in your browser\n", *port)
-	server.Run(fmt.Sprintf(":%d", *port))
+	httpServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", *port),
+		Handler:           server,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Println("WebSSH server stopped:", err)
+		os.Exit(1)
+	}
+}
+
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "SAMEORIGIN")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Next()
+	}
+}
+
+func requestBodyLimit(limit int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil && c.Request.URL.Path != "/file/upload" {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		}
+		c.Next()
+	}
+}
+
+func basicAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if *authInfo == "" || c.Request.URL.Path == "/healthz" {
+			c.Next()
+			return
+		}
+		user, pass, ok := c.Request.BasicAuth()
+		userHash := sha256.Sum256([]byte(user))
+		expectedUserHash := sha256.Sum256([]byte(username))
+		passHash := sha256.Sum256([]byte(pass))
+		expectedPassHash := sha256.Sum256([]byte(password))
+		userOK := subtle.ConstantTimeCompare(userHash[:], expectedUserHash[:]) == 1
+		passOK := subtle.ConstantTimeCompare(passHash[:], expectedPassHash[:]) == 1
+		if !ok || !userOK || !passOK {
+			c.Header("WWW-Authenticate", "Basic realm=\"Restricted\"")
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Next()
+	}
 }

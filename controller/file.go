@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	pathpkg "path"
 	"sort"
 	"strconv"
@@ -23,6 +26,22 @@ type File struct {
 	Size       string
 	ModifyTime string
 	IsDir      bool
+}
+
+type fileRequest struct {
+	SSHInfo string `json:"sshInfo"`
+	Path    string `json:"path"`
+}
+
+func bindFileRequest(c *gin.Context) (fileRequest, error) {
+	var request fileRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		return request, fmt.Errorf("invalid request: %w", err)
+	}
+	if strings.TrimSpace(request.SSHInfo) == "" {
+		return request, fmt.Errorf("missing sshInfo")
+	}
+	return request, nil
 }
 
 const (
@@ -69,8 +88,8 @@ func Bytefmt(bytes uint64) string {
 
 type fileSplice []File
 
-func (f fileSplice) Len() int           { return len(f) }
-func (f fileSplice) Swap(i, j int)      { f[i], f[j] = f[j], f[i] }
+func (f fileSplice) Len() int      { return len(f) }
+func (f fileSplice) Swap(i, j int) { f[i], f[j] = f[j], f[i] }
 func (f fileSplice) Less(i, j int) bool {
 	if f[i].IsDir != f[j].IsDir {
 		return f[i].IsDir
@@ -85,6 +104,7 @@ func UploadFile(c *gin.Context) *ResponseBody {
 	)
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, uploadMaxBytes()+(1<<20))
 	sshInfo := c.PostForm("sshInfo")
 	id := c.PostForm("id")
 	if sshClient, err = core.DecodedMsgToSSHClient(sshInfo); err != nil {
@@ -116,7 +136,12 @@ func UploadFile(c *gin.Context) *ResponseBody {
 			return &responseBody
 		}
 	}
-	pathArr = append(pathArr, header.Filename)
+	filename := sanitizeRemoteFilename(header.Filename)
+	if filename == "" {
+		responseBody.Msg = "invalid upload filename"
+		return &responseBody
+	}
+	pathArr = append(pathArr, filename)
 	err = sshClient.Upload(file, id, strings.Join(pathArr, "/"))
 	if err != nil {
 		fmt.Println(err)
@@ -132,8 +157,14 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 	)
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
-	path := strings.TrimSpace(c.DefaultQuery("path", ""))
-	sshInfo := c.DefaultQuery("sshInfo", "")
+	request, bindErr := bindFileRequest(c)
+	if bindErr != nil {
+		responseBody.Msg = bindErr.Error()
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	path := strings.TrimSpace(request.Path)
+	sshInfo := request.SSHInfo
 	if sshClient, err = core.DecodedMsgToSSHClient(sshInfo); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
@@ -184,8 +215,12 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		responseBody.Msg = "only http/https url is supported"
+	if err != nil {
+		responseBody.Msg = "invalid remote url"
+		return &responseBody
+	}
+	if err := validateRemoteURL(c.Request.Context(), parsedURL); err != nil {
+		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	if sshClient, err = core.DecodedMsgToSSHClient(sshInfo); err != nil {
@@ -207,7 +242,7 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	httpClient := http.Client{Timeout: 30 * time.Minute}
+	httpClient := newRemoteDownloadClient()
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		responseBody.Msg = err.Error()
@@ -225,31 +260,76 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = fmt.Sprintf("remote server returned %s", resp.Status)
 		return &responseBody
 	}
+	maxBytes := remoteDownloadMaxBytes()
+	if resp.ContentLength > maxBytes {
+		responseBody.Msg = fmt.Sprintf("remote file exceeds %d bytes", maxBytes)
+		return &responseBody
+	}
 	if filename == "" {
 		filename = filenameFromDisposition(resp.Header.Get("Content-Disposition"))
 	}
 	if filename == "" {
-		urlFilename, _ := url.PathUnescape(pathpkg.Base(parsedURL.EscapedPath()))
+		urlFilename, _ := url.PathUnescape(pathpkg.Base(resp.Request.URL.EscapedPath()))
 		filename = sanitizeRemoteFilename(urlFilename)
 	}
 	if filename == "" || filename == "." || filename == "/" {
 		filename = fmt.Sprintf("download-%d", time.Now().Unix())
 	}
 	dstPath := pathpkg.Join(dir, filename)
-	dstFile, err := sshClient.Sftp.Create(dstPath)
+	tmpPath, dstFile, err := createRemoteDownloadTempFile(sshClient.Sftp, dir)
 	if err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	defer dstFile.Close()
-	if _, err = io.Copy(dstFile, resp.Body); err != nil {
-		fmt.Println(err)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = dstFile.Close()
+		}
+		_ = sshClient.Sftp.Remove(tmpPath)
+	}()
+	limited := &io.LimitedReader{R: resp.Body, N: maxBytes + 1}
+	written, copyErr := io.Copy(dstFile, limited)
+	if copyErr != nil || written > maxBytes {
+		if copyErr != nil {
+			fmt.Println(copyErr)
+			responseBody.Msg = copyErr.Error()
+		} else {
+			responseBody.Msg = fmt.Sprintf("remote file exceeds %d bytes", maxBytes)
+		}
+		return &responseBody
+	}
+	if err := dstFile.Close(); err != nil {
+		closed = true
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	closed = true
+	if err := sshClient.Sftp.Rename(tmpPath, dstPath); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	responseBody.Data = gin.H{"path": dstPath, "filename": filename}
 	return &responseBody
+}
+
+func createRemoteDownloadTempFile(client *sftp.Client, dir string) (string, *sftp.File, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		randomBytes := make([]byte, 12)
+		if _, err := rand.Read(randomBytes); err != nil {
+			return "", nil, fmt.Errorf("create download temp name: %w", err)
+		}
+		tmpPath := pathpkg.Join(dir, ".webssh-download-"+hex.EncodeToString(randomBytes)+".tmp")
+		file, err := client.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err == nil {
+			return tmpPath, file, nil
+		}
+		if !os.IsExist(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, fmt.Errorf("unable to create a unique download temp file")
 }
 
 func filenameFromDisposition(value string) string {
@@ -270,10 +350,17 @@ func sanitizeRemoteFilename(filename string) string {
 	filename = strings.TrimSpace(filename)
 	filename = strings.ReplaceAll(filename, "\\", "/")
 	filename = pathpkg.Base(filename)
-	if filename == "." || filename == "/" {
+	filename = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, filename)
+	filename = strings.TrimSpace(filename)
+	if filename == "" || filename == "." || filename == ".." || filename == "/" {
 		return ""
 	}
-	return strings.Trim(filename, "\x00\r\n\t ")
+	return filename
 }
 
 func UploadProgressWs(c *gin.Context) *ResponseBody {
@@ -338,8 +425,13 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 func FileList(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
-	path := c.DefaultQuery("path", "")
-	sshInfo := c.DefaultQuery("sshInfo", "")
+	request, err := bindFileRequest(c)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	path := request.Path
+	sshInfo := request.SSHInfo
 	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
 	if err != nil {
 		fmt.Println(err)
@@ -391,6 +483,19 @@ func FileList(c *gin.Context) *ResponseBody {
 		"home": home,
 	}
 	return &responseBody
+}
+
+func uploadMaxBytes() int64 {
+	const defaultLimit = int64(1 << 30)
+	raw := strings.TrimSpace(os.Getenv("WEBSSH_UPLOAD_MAX_BYTES"))
+	if raw == "" {
+		return defaultLimit
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1<<20 {
+		return defaultLimit
+	}
+	return value
 }
 
 func detectHomeDir(sftpClient *sftp.Client, username string) string {

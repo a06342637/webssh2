@@ -14,7 +14,7 @@ FROM alpine:3.20
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata git docker-cli docker-cli-compose && \
+RUN apk add --no-cache ca-certificates tzdata git iproute2 docker-cli docker-cli-compose && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone
 

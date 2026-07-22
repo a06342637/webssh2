@@ -7,8 +7,8 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>WebSSH Terminal</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖥️</text></svg>">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <link rel="stylesheet" href="/static/css/style.css?v=80">
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.min.css?v=5.3.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=82">
     <style>
     /* Splash screen – shown from first byte, hides FOUC */
     #splash{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg,#0a0a1a);transition:opacity .55s ease,visibility .55s ease}
@@ -186,8 +186,8 @@
             <div class="set-group admin-update-group">
                 <div class="set-group-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>版本更新</div>
                 <div class="update-version-card" id="updateVersionInfo">
-                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.39</b></div>
-                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.39</b></div>
+                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.41</b></div>
+                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.41</b></div>
                     <div class="update-version-status" id="updateVersionStatus">只有管理员账号可以检测和更新版本。</div>
                 </div>
                 <label class="checkbox-field" for="forceUpdateVersion" style="padding:0">
@@ -445,17 +445,19 @@
                         <button class="script-account-btn" id="scriptAccountBtn" type="button" onclick="openAuthModal()">登录/注册</button>
                     </div>
                     <div class="script-toolbar">
-                        <button class="script-tool-btn" type="button" onclick="exportScriptBookmarks()">导出脚本</button>
-                        <button class="script-tool-btn" type="button" onclick="triggerScriptImport()">导入脚本</button>
-                        <button class="script-tool-btn primary" type="button" onclick="syncScriptBookmarks('auto')">同步书签</button>
+                        <button class="script-tool-btn script-manage-btn" type="button" onclick="openScriptManager('bookmarks')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M4 6h16M4 12h16M4 18h16"/></svg>书签管理</button>
                     </div>
+                    <div class="script-search-wrap">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                        <input type="search" id="scriptSearchInput" placeholder="搜索名称或命令..." autocomplete="off" oninput="scheduleScriptSearch(this.value)">
+                        <button type="button" id="scriptSearchClear" class="script-search-clear" onclick="clearScriptSearch()" title="清空搜索">×</button>
+                    </div>
+                    <div class="script-category-strip" id="scriptCategoryFilters" aria-label="脚本分类"></div>
                     <div class="script-cloud-status" id="scriptCloudStatus"></div>
                     <input type="file" id="scriptImportFile" accept="application/json,.json" style="display:none" onchange="importScriptBookmarks(this)">
                     <div class="drawer-list" id="scriptBookmarkList"></div>
-                    <div class="script-form" id="scriptForm">
-                        <input type="text" id="scriptName" placeholder="脚本名称" class="script-input">
-                        <textarea id="scriptContent" placeholder="输入命令..." rows="3" class="script-textarea"></textarea>
-                        <button class="drawer-add" onclick="saveScriptBookmark()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>保存脚本</button>
+                    <div class="script-add-panel">
+                        <button class="drawer-add script-add-open" type="button" onclick="openAddScriptModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加脚本</button>
                     </div>
                 </div>
             </div>
@@ -591,26 +593,76 @@
         </div>
     </div>
 
-    <!-- Edit Script Dialog -->
+    <!-- Add / Edit Script Dialog -->
     <div class="modal-overlay" id="editScriptModal">
         <div class="glass-card modal-card script-edit-card">
             <div class="drawer-hd auth-hd">
-                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>编辑脚本</span>
+                <span id="editScriptModalTitle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>编辑脚本</span>
                 <button class="settings-close" type="button" onclick="hideEditScriptModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
             <div class="modal-body script-edit-body">
                 <input type="hidden" id="editScriptIndex" value="-1">
+                <input type="hidden" id="editScriptCategory" value="">
                 <div class="input-field">
                     <label>脚本名称</label>
-                    <input type="text" id="editScriptName" class="script-input" placeholder="脚本名称">
+                    <input type="text" id="editScriptName" class="script-input" placeholder="例如：安装 Docker" maxlength="80">
+                </div>
+                <div class="input-field">
+                    <label>分类 <small>点击即可选择</small></label>
+                    <div class="script-category-select" id="editScriptCategoryOptions"></div>
                 </div>
                 <div class="input-field">
                     <label>命令内容</label>
-                    <textarea id="editScriptContent" class="script-textarea" placeholder="输入命令..." rows="6"></textarea>
+                    <textarea id="editScriptContent" class="script-textarea" placeholder="输入要执行的命令..." rows="6"></textarea>
                 </div>
                 <div class="edit-actions">
-                    <button class="drawer-add" type="button" onclick="saveEditedScriptBookmark()">保存修改</button>
+                    <button class="drawer-add primary-action" id="editScriptSaveBtn" type="button" onclick="saveEditedScriptBookmark()">保存修改</button>
                     <button class="drawer-add" type="button" onclick="hideEditScriptModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script Bookmark / Category Manager -->
+    <div class="modal-overlay" id="scriptManagerModal">
+        <div class="glass-card modal-card script-manager-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M4 6h16M4 12h16M4 18h16"/></svg>书签管理</span>
+                <button class="settings-close" type="button" onclick="hideScriptManager()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="script-manager-tabs">
+                <button type="button" id="scriptManagerBookmarksTab" class="active" onclick="switchScriptManagerTab('bookmarks')">书签管理</button>
+                <button type="button" id="scriptManagerCategoriesTab" onclick="switchScriptManagerTab('categories')">分类管理</button>
+            </div>
+            <div class="modal-body script-manager-body">
+                <div id="scriptManagerBookmarks" class="script-manager-panel">
+                    <p class="script-manager-hint">导入、导出或将脚本与当前账号同步。导出文件会保留分类和 Emoji。</p>
+                    <div class="script-manager-actions">
+                        <button type="button" onclick="exportScriptBookmarks()"><b>📤</b><span>导出脚本<small>下载 JSON 备份</small></span></button>
+                        <button type="button" onclick="triggerScriptImport()"><b>📥</b><span>导入脚本<small>兼容旧版文件</small></span></button>
+                        <button type="button" onclick="syncScriptBookmarks('auto')"><b>☁️</b><span>同步书签<small>与登录账号同步</small></span></button>
+                    </div>
+                    <div class="script-manager-summary" id="scriptManagerSummary"></div>
+                </div>
+                <div id="scriptManagerCategories" class="script-manager-panel" style="display:none">
+                    <div class="category-editor">
+                        <input type="hidden" id="categoryEditId" value="">
+                        <div class="input-field">
+                            <label>分类名称 / 备注</label>
+                            <input type="text" id="categoryName" class="script-input" maxlength="40" placeholder="例如：系统运维">
+                        </div>
+                        <div class="input-field">
+                            <label>选择彩色 Emoji <small>鼠标悬停时显示分类名称</small></label>
+                            <input type="hidden" id="categoryEmoji" value="🛠️">
+                            <div class="emoji-picker" id="categoryEmojiPicker"></div>
+                        </div>
+                        <div class="category-editor-actions">
+                            <button class="drawer-add primary-action" type="button" onclick="saveScriptCategory()" id="categorySaveBtn">添加分类</button>
+                            <button class="drawer-add" type="button" onclick="resetCategoryEditor()">清空</button>
+                        </div>
+                    </div>
+                    <div class="category-list-head"><span>已添加分类</span><small id="categoryCountLabel">0 个</small></div>
+                    <div class="category-manage-list" id="categoryManageList"></div>
                 </div>
             </div>
         </div>
@@ -638,10 +690,26 @@
                     </div>
                     <div class="input-field">
                         <label>密码</label>
-                        <input type="password" id="authPassword" class="script-input" placeholder="大于 6 位" autocomplete="current-password">
+                        <input type="password" id="authPassword" class="script-input" placeholder="至少 7 个字符，最多 72 UTF-8 字节" autocomplete="current-password">
                     </div>
                     <div class="auth-hint" id="authHint">登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。</div>
                     <button class="drawer-add auth-submit-btn" type="button" onclick="submitAuthForm()">登录</button>
+                    <button class="forgot-password-toggle" id="forgotPasswordToggle" type="button" onclick="toggleForgotPasswordHelp()" aria-expanded="false">忘记密码？</button>
+                    <div class="forgot-password-help" id="forgotPasswordHelp">
+                        <div class="forgot-help-item">
+                            <b>普通用户忘记密码</b>
+                            <span>请联系管理员。管理员登录后可在「账号管理」中找到该用户并重置密码。</span>
+                        </div>
+                        <div class="forgot-help-item admin-reset-help">
+                            <b>管理员忘记密码（Docker Compose）</b>
+                            <span>在项目目录执行下面的命令；用户名会优先使用上方已填写的用户名。</span>
+                            <div class="admin-reset-command-row">
+                                <code id="adminResetCommand">WEBSSH_ADMIN_USER=admin WEBSSH_ADMIN_PASSWORD='请替换为新密码' WEBSSH_ADMIN_RESET=true docker compose up -d --force-recreate</code>
+                                <button class="script-tool-btn" type="button" onclick="copyAdminResetCommand()">复制</button>
+                            </div>
+                            <small>重置成功后将 <code>WEBSSH_ADMIN_RESET</code> 改回 <code>false</code>，或删除该项，避免以后重启时重复重置。</small>
+                        </div>
+                    </div>
                 </div>
                 <div id="authLoggedIn" style="display:none">
                     <div class="auth-user-card">
@@ -665,7 +733,7 @@
                         <div class="input-row">
                             <div class="input-field flex-1">
                                 <label>新密码</label>
-                                <input type="password" id="newPassword" class="script-input" placeholder="大于 6 位" autocomplete="new-password">
+                                <input type="password" id="newPassword" class="script-input" placeholder="至少 7 个字符，最多 72 UTF-8 字节" autocomplete="new-password">
                             </div>
                             <div class="input-field flex-1">
                                 <label>确认新密码</label>
@@ -688,7 +756,7 @@
                 <button class="settings-close" type="button" onclick="hideAccountAdminModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
             <div class="modal-body account-admin-body">
-                <div class="auth-hint account-admin-hint">仅管理员可管理服务器账号。这里修改的是服务器账号，不会显示任何账号密码明文。</div>
+                <div class="auth-hint account-admin-hint">仅管理员可查看、新增、修改、重置密码和删除服务器账号；密码始终不会以明文显示。普通用户忘记密码时，可在这里为其设置新密码。</div>
                 <div class="account-create-card">
                     <div class="auth-section-title">新增账号</div>
                     <div class="input-row">
@@ -698,7 +766,7 @@
                         </div>
                         <div class="input-field flex-1">
                             <label>初始密码</label>
-                            <input type="password" id="managedNewPassword" class="script-input" placeholder="大于 6 位" autocomplete="new-password">
+                            <input type="password" id="managedNewPassword" class="script-input" placeholder="至少 7 个字符，最多 72 UTF-8 字节" autocomplete="new-password">
                         </div>
                     </div>
                     <div class="account-create-actions">
@@ -711,7 +779,7 @@
                     </div>
                 </div>
                 <div class="account-list-head">
-                    <div class="auth-section-title">服务器账号</div>
+                    <div class="auth-section-title">服务器账号 <span class="account-list-stats" id="managedAccountStats"></span></div>
                     <button class="script-tool-btn" type="button" onclick="loadManagedAccounts()">刷新</button>
                 </div>
                 <div class="account-list" id="managedAccountList">
@@ -724,7 +792,7 @@
     <div class="modal-overlay account-edit-overlay" id="accountEditModal">
         <div class="glass-card modal-card account-edit-card">
             <div class="drawer-hd auth-hd">
-                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>编辑账号</span>
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>编辑账号 / 重置密码</span>
                 <button class="settings-close" type="button" onclick="hideAccountEditModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
             <div class="modal-body account-edit-body">
@@ -733,8 +801,9 @@
                     <input type="text" id="managedEditUsername" class="script-input" readonly>
                 </div>
                 <div class="input-field">
-                    <label>新密码（不填则不修改）</label>
-                    <input type="password" id="managedEditPassword" class="script-input" placeholder="大于 6 位" autocomplete="new-password">
+                    <label>重置为新密码（不填则不修改）</label>
+                    <input type="password" id="managedEditPassword" class="script-input" placeholder="至少 7 个字符，最多 72 UTF-8 字节" autocomplete="new-password">
+                    <small class="account-edit-hint">填写后会立即重置密码，并让该用户的其他登录会话失效。</small>
                 </div>
                 <label class="checkbox-field" for="managedEditIsAdmin" style="padding:0">
                     <input type="checkbox" id="managedEditIsAdmin">
@@ -742,7 +811,7 @@
                     <span>管理员权限</span>
                 </label>
                 <div class="edit-actions">
-                    <button class="drawer-add" type="button" onclick="saveManagedAccount()">保存修改</button>
+                    <button class="drawer-add" type="button" onclick="saveManagedAccount()">保存 / 重置密码</button>
                     <button class="drawer-add" type="button" onclick="hideAccountEditModal()">取消</button>
                 </div>
             </div>
@@ -777,9 +846,9 @@
     <div id="toastContainer" class="toast-container"></div>
     <div class="global-footer">© 2026 <a href="https://t.me/ok_gy" target="_blank" rel="noopener">棍之勇者</a>. <a href="https://github.com/a06342637/webssh2" target="_blank" rel="noopener">All Rights Reserved</a></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
-    <script src="/static/js/app.js?v=80"></script>
+    <script src="/static/vendor/xterm/xterm.min.js?v=5.3.0"></script>
+    <script src="/static/vendor/xterm/xterm-addon-fit.min.js?v=0.8.0"></script>
+    <script src="/static/vendor/xterm/xterm-addon-web-links.min.js?v=0.9.0"></script>
+    <script src="/static/js/app.js?v=82"></script>
 </body>
 </html>

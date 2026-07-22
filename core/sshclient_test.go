@@ -4,6 +4,9 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestNormalizeHostPort(t *testing.T) {
@@ -67,5 +70,18 @@ func TestIPv6DialAddressUsesBrackets(t *testing.T) {
 	want := "[2603:c021:8012:ef00:0:dd95:ca1:7387]:22"
 	if got != want {
 		t.Fatalf("IPv6 dial address = %q, want %q", got, want)
+	}
+}
+
+func TestSSHClientFromConnHonorsHandshakeDeadline(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+	started := time.Now()
+	_, err := sshClientFromConn(clientConn, "example.test:22", &ssh.ClientConfig{User: "test"}, 25*time.Millisecond)
+	if err == nil {
+		t.Fatal("stalled SSH handshake unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("SSH handshake deadline was not enforced promptly: %v", elapsed)
 	}
 }

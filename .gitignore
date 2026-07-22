@@ -7,3 +7,6 @@ webssh
 .DS_Store
 tmp/
 data/
+
+.env
+.webssh-update-backups/

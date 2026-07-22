@@ -26,6 +26,8 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		return &responseBody
 	}
 
+	wsConn.SetReadLimit(websocketInitLimit)
+	_ = wsConn.SetReadDeadline(time.Now().Add(websocketInitTimeout))
 	_, initMsg, err := wsConn.ReadMessage()
 	if err != nil {
 		fmt.Println("read init message error:", err)
@@ -33,6 +35,7 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	_ = wsConn.SetReadDeadline(time.Time{})
 
 	sshInfo := string(initMsg)
 	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)

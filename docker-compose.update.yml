@@ -1,0 +1,9 @@
+services:
+  webssh:
+    environment:
+      - WEBSSH_ENABLE_SELF_UPDATE=true
+      - WEBSSH_SOURCE_DIR=/app/source
+      - WEBSSH_HOST_PROJECT_DIR=${WEBSSH_HOST_PROJECT_DIR:?set WEBSSH_HOST_PROJECT_DIR to the absolute host project path}
+    volumes:
+      - ${WEBSSH_HOST_PROJECT_DIR:?set WEBSSH_HOST_PROJECT_DIR to the absolute host project path}:/app/source
+      - /var/run/docker.sock:/var/run/docker.sock

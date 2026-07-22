@@ -29,9 +29,14 @@ func (wc *WriteCounter) Write(p []byte) (int, error) {
 
 type wsOutput struct {
 	ws *websocket.Conn
+	mu *sync.Mutex
 }
 
 func (w *wsOutput) Write(p []byte) (int, error) {
+	if w.mu != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+	}
 	if !utf8.Valid(p) {
 		bufStr := string(p)
 		buf := make([]rune, 0, len(bufStr))
@@ -64,11 +69,13 @@ type SSHClient struct {
 	Sftp       *sftp.Client
 	StdinPipe  io.WriteCloser
 	Session    *ssh.Session
+	wsWriteMu  *sync.Mutex
 }
 
 func NewSSHClient() SSHClient {
 	client := SSHClient{}
 	client.Port = 22
+	client.wsWriteMu = &sync.Mutex{}
 	return client
 }
 
