@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -49,5 +50,16 @@ func TestBasicAuthProtectsAllRoutesExceptHealth(t *testing.T) {
 	router.ServeHTTP(recorder, authorized)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("valid Basic Auth returned %d", recorder.Code)
+	}
+}
+
+func TestRenderIndexHTMLVersionsMutableAssets(t *testing.T) {
+	input := []byte(`<link href="/static/css/style.css?v=__APP_VERSION__"><script src="/static/js/app.js?v=__APP_VERSION__"></script>`)
+	got := string(renderIndexHTML(input))
+	if strings.Contains(got, "__APP_VERSION__") {
+		t.Fatalf("asset version placeholder was not replaced: %s", got)
+	}
+	if count := strings.Count(got, "v="+version); count != 2 {
+		t.Fatalf("expected two versioned asset URLs, got %d in %s", count, got)
 	}
 }

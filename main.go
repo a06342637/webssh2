@@ -90,6 +90,10 @@ func configureRuntime() {
 	}
 }
 
+func renderIndexHTML(indexHTML []byte) []byte {
+	return []byte(strings.ReplaceAll(string(indexHTML), "__APP_VERSION__", version))
+}
+
 func main() {
 	configureRuntime()
 	gin.SetMode(gin.ReleaseMode)
@@ -175,7 +179,10 @@ func main() {
 			c.String(http.StatusInternalServerError, "index.html not found")
 			return
 		}
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", renderIndexHTML(indexHTML))
 	})
 
 	fmt.Printf("🚀 WebSSH server starting on port %d\n", *port)
