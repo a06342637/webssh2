@@ -146,6 +146,8 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
         if (sshAuthRetryModal && sshAuthRetryModal.classList.contains('show')) { hideSSHAuthRetryModal(true); return; }
+        var categoryDeleteModal = document.getElementById('categoryDeleteModal');
+        if (categoryDeleteModal && categoryDeleteModal.classList.contains('show')) { hideCategoryDeleteModal(); return; }
         var scriptManagerModal = document.getElementById('scriptManagerModal');
         if (scriptManagerModal && scriptManagerModal.classList.contains('show')) { hideScriptManager(); return; }
         var authModal = document.getElementById('authModal');
@@ -167,6 +169,10 @@ document.addEventListener('click', function (e) {
     var serverInfoDetailModal = document.getElementById('serverInfoDetailModal');
     if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show') && e.target === serverInfoDetailModal) {
         hideServerInfoDetailModal();
+    }
+    var categoryDeleteModal = document.getElementById('categoryDeleteModal');
+    if (categoryDeleteModal && categoryDeleteModal.classList.contains('show') && e.target === categoryDeleteModal) {
+        hideCategoryDeleteModal();
     }
 });
 
@@ -1703,6 +1709,13 @@ var accountAutoSynced = false;
 var scriptSyncTimer = null;
 var managedAccounts = [];
 var managedAdminCount = 0;
+var managedAccountPage = 1;
+var managedAccountPageSize = 5;
+var categoryManagerPage = 1;
+var categoryManagerPageSize = 5;
+var pendingDeleteCategoryId = '';
+var scriptManagerPreserveDrawer = false;
+var scriptCategoryRenderFrame = 0;
 var editingManagedAccount = null;
 var versionUpdatePollTimer = null;
 
@@ -2176,6 +2189,9 @@ function requireAdminAccountAccess() {
 function openAccountAdminModal() {
     if (!requireAdminAccountAccess()) return;
     hideAuthModal();
+    managedAccountPage = 1;
+    var pageSize = document.getElementById('accountPageSize');
+    if (pageSize) pageSize.value = String(managedAccountPageSize);
     var modal = document.getElementById('accountAdminModal');
     if (modal) modal.classList.add('show');
     loadManagedAccounts();
@@ -2207,10 +2223,14 @@ function formatAccountTime(ts) {
     }
 }
 
-function updateManagedAccounts(data) {
+function updateManagedAccounts(data, focusUsername) {
     data = data || {};
     managedAccounts = Array.isArray(data.users) ? data.users : [];
     managedAdminCount = parseInt(data.adminCount) || 0;
+    if (focusUsername) {
+        var focusIndex = managedAccounts.findIndex(function (item) { return item.username === focusUsername; });
+        if (focusIndex >= 0) managedAccountPage = Math.floor(focusIndex / managedAccountPageSize) + 1;
+    }
     var stats = document.getElementById('managedAccountStats');
     if (stats) stats.textContent = '（' + managedAccounts.length + ' 个账号 / ' + managedAdminCount + ' 个管理员）';
     renderManagedAccounts();
@@ -2232,11 +2252,16 @@ function loadManagedAccounts() {
 function renderManagedAccounts() {
     var list = document.getElementById('managedAccountList');
     if (!list) return;
+    var totalPages = Math.max(1, Math.ceil(managedAccounts.length / managedAccountPageSize));
+    managedAccountPage = Math.max(1, Math.min(managedAccountPage, totalPages));
+    updateManagedAccountPagination(totalPages);
     if (!managedAccounts.length) {
         list.innerHTML = '<div class="account-empty">暂无账号</div>';
         return;
     }
-    list.innerHTML = managedAccounts.map(function (u) {
+    var start = (managedAccountPage - 1) * managedAccountPageSize;
+    var pageItems = managedAccounts.slice(start, start + managedAccountPageSize);
+    list.innerHTML = pageItems.map(function (u) {
         var username = u.username || '';
         var badges = '';
         if (u.isAdmin) badges += '<span class="account-badge admin">管理员</span>';
@@ -2250,13 +2275,37 @@ function renderManagedAccounts() {
             '<div class="account-row-meta">' + esc(meta) + '</div>' +
             '</div>' +
             '<div class="account-row-actions">' +
-            '<button class="script-tool-btn" type="button" onclick="openAccountEdit(\'' + esc(username) + '\')">改密 / 编辑</button>' +
-            '<button class="script-tool-btn danger-inline" type="button" onclick="deleteManagedAccount(\'' + esc(username) + '\')">删除</button>' +
+            '<button class="script-tool-btn" type="button" data-username="' + escAttr(username) + '" onclick="openAccountEdit(this.dataset.username)">改密 / 编辑</button>' +
+            '<button class="script-tool-btn danger-inline" type="button" data-username="' + escAttr(username) + '" onclick="deleteManagedAccount(this.dataset.username)">删除</button>' +
             '</div>' +
             '</div>';
     }).join('');
 }
 
+function updateManagedAccountPagination(totalPages) {
+    var select = document.getElementById('accountPageSize');
+    var info = document.getElementById('accountPageInfo');
+    var prev = document.getElementById('accountPagePrev');
+    var next = document.getElementById('accountPageNext');
+    if (select) select.value = String(managedAccountPageSize);
+    if (info) info.textContent = managedAccountPage + ' / ' + totalPages;
+    if (prev) prev.disabled = managedAccountPage <= 1;
+    if (next) next.disabled = managedAccountPage >= totalPages;
+}
+
+function setManagedAccountPageSize(value) {
+    value = parseInt(value, 10);
+    if ([5, 10, 15].indexOf(value) < 0) value = 5;
+    managedAccountPageSize = value;
+    managedAccountPage = 1;
+    renderManagedAccounts();
+}
+
+function changeManagedAccountPage(delta) {
+    var totalPages = Math.max(1, Math.ceil(managedAccounts.length / managedAccountPageSize));
+    managedAccountPage = Math.max(1, Math.min(totalPages, managedAccountPage + (parseInt(delta, 10) || 0)));
+    renderManagedAccounts();
+}
 function createManagedAccount() {
     if (!requireAdminAccountAccess()) return;
     var username = document.getElementById('managedNewUsername').value.trim();
@@ -2270,7 +2319,7 @@ function createManagedAccount() {
     })
         .then(function (res) {
             clearManagedAccountCreateForm();
-            updateManagedAccounts(res.data || {});
+            updateManagedAccounts(res.data || {}, username);
             showToast(res.msg || '账号已创建', 'success');
         })
         .catch(function (err) { showToast(err.msg || '账号创建失败', 'error'); });
@@ -2727,21 +2776,18 @@ function setScriptCategoryFilter(categoryId) {
 function renderScriptCategoryFilters(categories, bms) {
     var wrap = document.getElementById('scriptCategoryFilters');
     if (!wrap) return;
-    var counts = {}, uncategorized = 0;
+    var counts = {};
     bms.forEach(function (b) {
         if (b.categoryId) counts[b.categoryId] = (counts[b.categoryId] || 0) + 1;
-        else uncategorized++;
     });
-    if (activeScriptCategory && activeScriptCategory !== '__uncategorized__' && !getScriptCategory(activeScriptCategory, categories)) activeScriptCategory = '';
+    if (activeScriptCategory && !getScriptCategory(activeScriptCategory, categories)) activeScriptCategory = '';
     var html = '<button type="button" class="script-category-filter' + (!activeScriptCategory ? ' active' : '') + '" data-category-id="" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="全部脚本">📚<small>全部</small></button>';
     categories.forEach(function (cat) {
         html += '<button type="button" class="script-category-filter' + (activeScriptCategory === cat.id ? ' active' : '') + '" data-category-id="' + escAttr(cat.id) + '" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="' + escAttr(cat.name) + '（' + (counts[cat.id] || 0) + '）">' + esc(cat.emoji) + '</button>';
     });
-    if (uncategorized) html += '<button type="button" class="script-category-filter' + (activeScriptCategory === '__uncategorized__' ? ' active' : '') + '" data-category-id="__uncategorized__" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="未分类（' + uncategorized + '）">▫️</button>';
     html += '<button type="button" class="script-category-filter category-add-shortcut" onclick="event.stopPropagation();openScriptManager(&quot;categories&quot;)" title="管理分类">＋</button>';
     wrap.innerHTML = html;
 }
-
 function bookmarkMatchesActiveCategory(b) {
     if (!activeScriptCategory) return true;
     if (activeScriptCategory === '__uncategorized__') return !b.categoryId;
@@ -2943,6 +2989,10 @@ function delScript(i) {
 function openScriptManager(tab) {
     var modal = document.getElementById('scriptManagerModal');
     if (!modal) return;
+    var drawer = document.getElementById('scriptDrawer');
+    scriptManagerPreserveDrawer = !!(drawer && drawer.classList.contains('open'));
+    var pageSize = document.getElementById('categoryPageSize');
+    if (pageSize) pageSize.value = String(categoryManagerPageSize);
     renderEmojiPicker();
     renderCategoryManager();
     updateScriptManagerSummary();
@@ -2967,10 +3017,12 @@ function switchScriptManagerTab(tab) {
     if (categories) renderCategoryManager();
 }
 
-function updateScriptManagerSummary() {
+function updateScriptManagerSummary(scriptCount, categoryCount) {
     var el = document.getElementById('scriptManagerSummary');
     if (!el) return;
-    el.innerHTML = '<span><b>' + loadBM(SBK).length + '</b> 个脚本</span><span><b>' + loadScriptCategories().length + '</b> 个分类</span><span>' + (currentAccount ? ('已登录 ' + esc(currentAccount.username)) : '仅保存在本机') + '</span>';
+    if (typeof scriptCount !== 'number') scriptCount = loadBM(SBK).length;
+    if (typeof categoryCount !== 'number') categoryCount = loadScriptCategories().length;
+    el.innerHTML = '<span><b>' + scriptCount + '</b> 个脚本</span><span><b>' + categoryCount + '</b> 个分类</span><span>' + (currentAccount ? ('已登录 ' + esc(currentAccount.username)) : '仅保存在本机') + '</span>';
 }
 
 function renderEmojiPicker() {
@@ -2999,6 +3051,22 @@ function resetCategoryEditor() {
     selectCategoryEmoji('🛠️');
 }
 
+function preserveScriptDrawerAfterCategoryChange() {
+    if (!scriptManagerPreserveDrawer) return;
+    var drawer = document.getElementById('scriptDrawer');
+    if (drawer) drawer.classList.add('open');
+}
+
+function scheduleScriptCategorySidebarRefresh() {
+    preserveScriptDrawerAfterCategoryChange();
+    if (scriptCategoryRenderFrame) cancelAnimationFrame(scriptCategoryRenderFrame);
+    scriptCategoryRenderFrame = requestAnimationFrame(function () {
+        scriptCategoryRenderFrame = 0;
+        renderScriptBookmarks();
+        preserveScriptDrawerAfterCategoryChange();
+    });
+}
+
 function saveScriptCategory() {
     var id = document.getElementById('categoryEditId').value.trim();
     var name = document.getElementById('categoryName').value.trim();
@@ -3016,12 +3084,15 @@ function saveScriptCategory() {
     if (!editing) {
         if (categories.length >= MAX_SCRIPT_CATEGORIES) { showToast('分类数量已达到 ' + MAX_SCRIPT_CATEGORIES + ' 个上限', 'error'); return; }
         categories.push({ id: createScriptCategoryId(), name: name.slice(0, 40), emoji: emoji, createdAt: Date.now() });
+        categoryManagerPage = Math.max(1, Math.ceil(categories.length / categoryManagerPageSize));
     }
+    var bms = loadSortedScriptBookmarks();
     saveScriptCategoriesData(categories);
     resetCategoryEditor();
-    renderCategoryManager();
-    renderScriptBookmarks();
-    updateScriptManagerSummary();
+    renderCategoryManager(categories, bms);
+    renderScriptCategoryFilters(categories, bms);
+    updateScriptManagerSummary(bms.length, categories.length);
+    scheduleScriptCategorySidebarRefresh();
     syncLocalScriptsIfLogged();
     showToast(editing ? '分类已更新' : '分类已添加', 'success');
 }
@@ -3042,36 +3113,97 @@ function deleteScriptCategory(id) {
     if (!cat) return;
     var bms = loadSortedScriptBookmarks();
     var count = bms.filter(function (b) { return b.categoryId === id; }).length;
-    var tip = count ? ('\n该分类下的 ' + count + ' 个脚本会移至“未分类”，脚本不会删除。') : '';
-    if (!confirm('确定删除分类 “' + cat.name + '” 吗？' + tip)) return;
+    pendingDeleteCategoryId = id;
+    var title = document.getElementById('categoryDeleteTitle');
+    var description = document.getElementById('categoryDeleteDescription');
+    if (title) title.textContent = '确定删除分类“' + cat.name + '”吗？';
+    if (description) description.textContent = count ? ('该分类下的 ' + count + ' 个脚本会移至未分类，脚本不会删除。') : '这个分类中没有脚本，删除后无法恢复。';
+    var modal = document.getElementById('categoryDeleteModal');
+    if (modal) modal.classList.add('show');
+    preserveScriptDrawerAfterCategoryChange();
+}
+
+function hideCategoryDeleteModal() {
+    var modal = document.getElementById('categoryDeleteModal');
+    if (modal) modal.classList.remove('show');
+    pendingDeleteCategoryId = '';
+    preserveScriptDrawerAfterCategoryChange();
+}
+
+function confirmDeleteScriptCategory() {
+    var id = pendingDeleteCategoryId;
+    if (!id) return;
+    var categories = loadScriptCategories();
+    var cat = getScriptCategory(id, categories);
+    if (!cat) { hideCategoryDeleteModal(); return; }
+    var bms = loadSortedScriptBookmarks();
+    var moved = 0;
     categories = categories.filter(function (item) { return item.id !== id; });
-    bms.forEach(function (b) { if (b.categoryId === id) delete b.categoryId; });
+    bms.forEach(function (b) {
+        if (b.categoryId === id) {
+            delete b.categoryId;
+            moved++;
+        }
+    });
     var now = Date.now();
     saveScriptCategoriesData(categories, now);
     saveScriptBookmarksData(bms, now);
     if (activeScriptCategory === id) activeScriptCategory = '';
+    hideCategoryDeleteModal();
     resetCategoryEditor();
-    renderCategoryManager();
-    renderScriptBookmarks();
-    updateScriptManagerSummary();
+    renderCategoryManager(categories, bms);
+    renderScriptCategoryFilters(categories, bms);
+    updateScriptManagerSummary(bms.length, categories.length);
+    scheduleScriptCategorySidebarRefresh();
     syncLocalScriptsIfLogged();
-    showToast('分类已删除，脚本已移至未分类', 'success');
+    showToast(moved ? ('分类已删除，' + moved + ' 个脚本已移至未分类') : '分类已删除', 'success');
 }
 
-function renderCategoryManager() {
+function updateCategoryPagination(totalPages) {
+    var select = document.getElementById('categoryPageSize');
+    var info = document.getElementById('categoryPageInfo');
+    var prev = document.getElementById('categoryPagePrev');
+    var next = document.getElementById('categoryPageNext');
+    if (select) select.value = String(categoryManagerPageSize);
+    if (info) info.textContent = categoryManagerPage + ' / ' + totalPages;
+    if (prev) prev.disabled = categoryManagerPage <= 1;
+    if (next) next.disabled = categoryManagerPage >= totalPages;
+}
+
+function setCategoryPageSize(value) {
+    value = parseInt(value, 10);
+    if ([5, 10, 15].indexOf(value) < 0) value = 5;
+    categoryManagerPageSize = value;
+    categoryManagerPage = 1;
+    renderCategoryManager();
+}
+
+function changeCategoryPage(delta) {
+    var total = loadScriptCategories().length;
+    var totalPages = Math.max(1, Math.ceil(total / categoryManagerPageSize));
+    categoryManagerPage = Math.max(1, Math.min(totalPages, categoryManagerPage + (parseInt(delta, 10) || 0)));
+    renderCategoryManager();
+}
+
+function renderCategoryManager(categories, bms) {
     var list = document.getElementById('categoryManageList');
     var label = document.getElementById('categoryCountLabel');
     if (!list) return;
-    var categories = loadScriptCategories();
-    var bms = loadSortedScriptBookmarks();
+    categories = Array.isArray(categories) ? categories : loadScriptCategories();
+    bms = Array.isArray(bms) ? bms : loadSortedScriptBookmarks();
     var counts = {};
     bms.forEach(function (b) { if (b.categoryId) counts[b.categoryId] = (counts[b.categoryId] || 0) + 1; });
     if (label) label.textContent = categories.length + ' 个';
+    var totalPages = Math.max(1, Math.ceil(categories.length / categoryManagerPageSize));
+    categoryManagerPage = Math.max(1, Math.min(categoryManagerPage, totalPages));
+    updateCategoryPagination(totalPages);
     if (!categories.length) {
         list.innerHTML = '<div class="category-empty"><b>🎨</b><span>还没有分类</span><small>从上方选择 Emoji 并填写名称即可添加</small></div>';
         return;
     }
-    list.innerHTML = categories.map(function (cat) {
+    var start = (categoryManagerPage - 1) * categoryManagerPageSize;
+    var pageCategories = categories.slice(start, start + categoryManagerPageSize);
+    list.innerHTML = pageCategories.map(function (cat) {
         return '<div class="category-manage-item"><button type="button" class="category-manage-emoji" data-category-id="' + escAttr(cat.id) + '" onclick="hideScriptManager();setScriptCategoryFilter(this.dataset.categoryId)" title="筛选 ' + escAttr(cat.name) + '">' + esc(cat.emoji) + '</button><div><b>' + esc(cat.name) + '</b><small>' + (counts[cat.id] || 0) + ' 个脚本</small></div><button type="button" class="category-row-action" data-category-id="' + escAttr(cat.id) + '" onclick="editScriptCategory(this.dataset.categoryId)" title="编辑分类">编辑</button><button type="button" class="category-row-action danger" data-category-id="' + escAttr(cat.id) + '" onclick="deleteScriptCategory(this.dataset.categoryId)" title="删除分类">删除</button></div>';
     }).join('');
 }

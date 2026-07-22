@@ -660,6 +660,42 @@
                     </div>
                     <div class="category-list-head"><span>已添加分类</span><small id="categoryCountLabel">0 个</small></div>
                     <div class="category-manage-list" id="categoryManageList"></div>
+                    <div class="manage-pagination" id="categoryPagination">
+                        <label>每页
+                            <select id="categoryPageSize" onchange="setCategoryPageSize(this.value)">
+                                <option value="5">5</option>
+                                <option value="10">10</option>
+                                <option value="15">15</option>
+                            </select>
+                            个
+                        </label>
+                        <div class="manage-page-actions">
+                            <button type="button" id="categoryPagePrev" onclick="changeCategoryPage(-1)">上一页</button>
+                            <span id="categoryPageInfo">1 / 1</span>
+                            <button type="button" id="categoryPageNext" onclick="changeCategoryPage(1)">下一页</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Category Delete Confirmation -->
+    <div class="modal-overlay category-delete-overlay" id="categoryDeleteModal">
+        <div class="glass-card modal-card category-delete-card">
+            <div class="drawer-hd auth-hd">
+                <span>删除分类</span>
+                <button class="settings-close" type="button" onclick="hideCategoryDeleteModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body category-delete-body">
+                <div class="category-delete-icon">🗑️</div>
+                <div class="category-delete-copy">
+                    <b id="categoryDeleteTitle">确定删除这个分类吗？</b>
+                    <p id="categoryDeleteDescription">分类下的脚本不会删除。</p>
+                </div>
+                <div class="edit-actions category-delete-actions">
+                    <button class="drawer-add" type="button" onclick="hideCategoryDeleteModal()">取消</button>
+                    <button class="drawer-add danger-confirm" type="button" onclick="confirmDeleteScriptCategory()">删除分类</button>
                 </div>
             </div>
         </div>
@@ -781,6 +817,21 @@
                 </div>
                 <div class="account-list" id="managedAccountList">
                     <div class="auth-hint">正在读取账号列表...</div>
+                </div>
+                <div class="manage-pagination" id="accountPagination">
+                    <label>每页
+                        <select id="accountPageSize" onchange="setManagedAccountPageSize(this.value)">
+                            <option value="5">5</option>
+                            <option value="10">10</option>
+                            <option value="15">15</option>
+                        </select>
+                        个
+                    </label>
+                    <div class="manage-page-actions">
+                        <button type="button" id="accountPagePrev" onclick="changeManagedAccountPage(-1)">上一页</button>
+                        <span id="accountPageInfo">1 / 1</span>
+                        <button type="button" id="accountPageNext" onclick="changeManagedAccountPage(1)">下一页</button>
+                    </div>
                 </div>
             </div>
         </div>
