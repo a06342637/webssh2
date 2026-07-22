@@ -13,7 +13,7 @@ services:
       - WEBSSH_ADMIN_USER=${WEBSSH_ADMIN_USER:-admin}
       - WEBSSH_ADMIN_PASSWORD=${WEBSSH_ADMIN_PASSWORD:-}
       - WEBSSH_ADMIN_RESET=${WEBSSH_ADMIN_RESET:-false}
-      - WEBSSH_ENABLE_SELF_UPDATE=false
+      - WEBSSH_ENABLE_SELF_UPDATE=${WEBSSH_ENABLE_SELF_UPDATE:-true}
       # Uncomment to enable basic auth for the web UI:
       # - authInfo=admin:your_password
     env_file:

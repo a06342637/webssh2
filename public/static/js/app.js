@@ -2423,7 +2423,7 @@ function setVersionLabels(data) {
         v = (v == null ? '' : String(v)).trim();
         return /^\d+(?:\.\d+){1,3}$/.test(v) ? v : fallback;
     }
-    var current = clean(data.currentVersion || data.current, '0.5.42');
+    var current = clean(data.currentVersion || data.current, '0.5.43');
     var latest = clean(data.latestVersion || data.latest, current);
     if (cur) cur.textContent = current;
     if (remote) remote.textContent = latest;
@@ -2724,12 +2724,12 @@ function renderScriptCategoryFilters(categories, bms) {
         else uncategorized++;
     });
     if (activeScriptCategory && activeScriptCategory !== '__uncategorized__' && !getScriptCategory(activeScriptCategory, categories)) activeScriptCategory = '';
-    var html = '<button type="button" class="script-category-filter' + (!activeScriptCategory ? ' active' : '') + '" data-category-id="" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="全部脚本">📚<small>全部</small></button>';
+    var html = '<button type="button" class="script-category-filter' + (!activeScriptCategory ? ' active' : '') + '" data-category-id="" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="全部脚本">📚<small>全部</small></button>';
     categories.forEach(function (cat) {
-        html += '<button type="button" class="script-category-filter' + (activeScriptCategory === cat.id ? ' active' : '') + '" data-category-id="' + escAttr(cat.id) + '" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="' + escAttr(cat.name) + '（' + (counts[cat.id] || 0) + '）">' + esc(cat.emoji) + '</button>';
+        html += '<button type="button" class="script-category-filter' + (activeScriptCategory === cat.id ? ' active' : '') + '" data-category-id="' + escAttr(cat.id) + '" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="' + escAttr(cat.name) + '（' + (counts[cat.id] || 0) + '）">' + esc(cat.emoji) + '</button>';
     });
-    if (uncategorized) html += '<button type="button" class="script-category-filter' + (activeScriptCategory === '__uncategorized__' ? ' active' : '') + '" data-category-id="__uncategorized__" onclick="setScriptCategoryFilter(this.dataset.categoryId)" title="未分类（' + uncategorized + '）">▫️</button>';
-    html += '<button type="button" class="script-category-filter category-add-shortcut" onclick="openScriptManager(&quot;categories&quot;)" title="管理分类">＋</button>';
+    if (uncategorized) html += '<button type="button" class="script-category-filter' + (activeScriptCategory === '__uncategorized__' ? ' active' : '') + '" data-category-id="__uncategorized__" onclick="event.stopPropagation();setScriptCategoryFilter(this.dataset.categoryId)" title="未分类（' + uncategorized + '）">▫️</button>';
+    html += '<button type="button" class="script-category-filter category-add-shortcut" onclick="event.stopPropagation();openScriptManager(&quot;categories&quot;)" title="管理分类">＋</button>';
     wrap.innerHTML = html;
 }
 
@@ -2951,12 +2951,10 @@ function switchScriptManagerTab(tab) {
     var categories = tab === 'categories';
     var bookmarkPanel = document.getElementById('scriptManagerBookmarks');
     var categoryPanel = document.getElementById('scriptManagerCategories');
-    var bookmarkTab = document.getElementById('scriptManagerBookmarksTab');
-    var categoryTab = document.getElementById('scriptManagerCategoriesTab');
+    var title = document.getElementById('scriptManagerTitleText');
     if (bookmarkPanel) bookmarkPanel.style.display = categories ? 'none' : '';
     if (categoryPanel) categoryPanel.style.display = categories ? '' : 'none';
-    if (bookmarkTab) bookmarkTab.classList.toggle('active', !categories);
-    if (categoryTab) categoryTab.classList.toggle('active', categories);
+    if (title) title.textContent = categories ? '分类管理' : '书签管理';
     if (categories) renderCategoryManager();
 }
 
@@ -3685,8 +3683,10 @@ document.addEventListener('click', function (e) {
     // Close script bookmark drawer
     var scriptDrawer = document.getElementById('scriptDrawer');
     var termEdge = document.getElementById('termEdgeBtns');
+    var eventPath = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    var startedInsideScriptDrawer = scriptDrawer && (scriptDrawer.contains(e.target) || eventPath.indexOf(scriptDrawer) !== -1);
     if (scriptDrawer && scriptDrawer.classList.contains('open')) {
-        if (!scriptDrawer.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
+        if (!startedInsideScriptDrawer && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
             scriptDrawer.classList.remove('open');
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
         }

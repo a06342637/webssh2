@@ -311,7 +311,7 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 
 ## 页面内版本更新
 
-普通 Compose 默认不具有 Docker socket 权限。`setup.sh` 只有在你选择启用页面更新时，才在 `.env` 写入：
+普通 Compose 默认不具有 Docker socket 权限。安装向导默认启用页面内版本更新（该问题直接回车即可）；`setup.sh` 会在 `.env` 写入：
 
 ```env
 COMPOSE_FILE=docker-compose.yml:docker-compose.update.yml
@@ -394,7 +394,7 @@ go run . -a admin:password
 | `WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES` | 1073741824 | 远程下载文件上限 |
 | `WEBSSH_ALLOW_PRIVATE_DOWNLOADS` | false | 是否允许远程下载访问私网/本机 |
 | `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 额外允许来源 |
-| `WEBSSH_ENABLE_SELF_UPDATE` | false | 是否启用页面内更新 |
+| `WEBSSH_ENABLE_SELF_UPDATE` | true（Docker Compose） | 是否启用页面内更新；Render/Railway 仍需使用平台重新部署 |
 | `WEBSSH_SOURCE_DIR` | /app/source | 容器内源码目录 |
 | `WEBSSH_HOST_PROJECT_DIR` | 空 | 页面更新使用的宿主机绝对路径 |
 | `WEBSSH_DATA_DIR` | data | 账号数据库和 `known_hosts` 目录 |
