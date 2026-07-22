@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"net"
 	"strconv"
 	"testing"
@@ -83,5 +84,28 @@ func TestSSHClientFromConnHonorsHandshakeDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("SSH handshake deadline was not enforced promptly: %v", elapsed)
+	}
+}
+
+type chunkWriter struct {
+	bytes.Buffer
+	max int
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestWriteAllHandlesPartialWrites(t *testing.T) {
+	writer := &chunkWriter{max: 3}
+	payload := []byte("printf '低延迟 SSH 输出'\n")
+	if err := writeAll(writer, payload); err != nil {
+		t.Fatalf("writeAll returned an error: %v", err)
+	}
+	if !bytes.Equal(writer.Bytes(), payload) {
+		t.Fatalf("writeAll payload = %q, want %q", writer.Bytes(), payload)
 	}
 }

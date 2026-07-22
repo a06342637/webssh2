@@ -361,6 +361,17 @@ AUTH_INFO="admin:请替换为强密码"
 浏览器运行所需的 xterm.js、FitAddon、WebLinksAddon、Noto Sans SC 和 JetBrains Mono 都位于 `public/static`，构建时嵌入 Go 二进制并随 Docker 镜像发布。页面启动不请求 jsDelivr、Google Fonts 等远程 CDN。
 
 第三方版本、许可证和 SHA-256 记录在 `public/static/THIRD_PARTY_ASSETS.md`，许可证文件位于 `public/static/vendor/licenses/`。推荐命令中出现的下载 URL、用户自行设置的远程背景图和页脚外链不是页面启动依赖。
+## SSH 低延迟与本地资源
+
+- 首次连接、重连和新标签连接不再固定等待 120–300 ms，会在终端完成首帧布局后立即建立 WebSocket/SSH。
+- SSH 输出使用二进制 WebSocket 帧直接交给 xterm.js，减少 UTF-8 重复校验、字符串转换和大输出时的浏览器开销，并可正确处理跨数据块的多字节字符。
+- SSH TCP 连接显式启用 `TCP_NODELAY`；域名双栈连接的备用地址族回退时间缩短到 100 ms。
+- 大段命令粘贴会循环写完全部数据，避免底层发生短写时命令被截断。
+- WebSocket 使用共享的 32 KiB 写缓冲池，提高连续命令输出吞吐，同时不启用可能增加交互延迟的 WebSocket 压缩。
+
+xterm.js、FitAddon、WebLinksAddon、Noto Sans SC、JetBrains Mono、应用 JavaScript 和 CSS 均嵌入 Go 程序并随 Docker 镜像本地部署。页脚链接、推荐脚本中的下载地址以及用户主动填写的远程下载/背景地址不会在页面启动时加载。
+
+实际按键延迟仍受“浏览器 → WebSSH 服务器 → SSH 目标服务器”的网络往返时间、反向代理和目标服务器负载影响。若两台服务器跨洲或线路丢包，应用无法消除物理网络延迟，建议将 WebSSH 部署在靠近 SSH 目标服务器的地区。
 
 ## 从源码运行
 

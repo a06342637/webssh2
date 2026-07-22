@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"webssh/core"
 
@@ -14,9 +15,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var websocketWriteBufferPool sync.Pool
+
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  4 << 10,
+	WriteBufferSize: 32 << 10,
+	WriteBufferPool: &websocketWriteBufferPool,
 	CheckOrigin: func(r *http.Request) bool {
 		return websocketOriginAllowed(r)
 	},

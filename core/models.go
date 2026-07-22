@@ -1,14 +1,14 @@
 package core
 
 import (
-	"github.com/gorilla/websocket"
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 	"io"
 	"log"
 	"sync"
 	"sync/atomic"
-	"unicode/utf8"
+
+	"github.com/gorilla/websocket"
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -37,19 +37,9 @@ func (w *wsOutput) Write(p []byte) (int, error) {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 	}
-	if !utf8.Valid(p) {
-		bufStr := string(p)
-		buf := make([]rune, 0, len(bufStr))
-		for _, r := range bufStr {
-			if r == utf8.RuneError {
-				buf = append(buf, []rune("@")...)
-			} else {
-				buf = append(buf, r)
-			}
-		}
-		p = []byte(string(buf))
-	}
-	err := w.ws.WriteMessage(websocket.TextMessage, p)
+	// SSH is a byte stream. Binary WebSocket frames avoid UTF-8 validation,
+	// preserve multibyte characters split across reads and reduce output copies.
+	err := w.ws.WriteMessage(websocket.BinaryMessage, p)
 	return len(p), err
 }
 

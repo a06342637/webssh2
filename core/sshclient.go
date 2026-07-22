@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -86,7 +87,34 @@ func normalizeSSHClientAddress(client *SSHClient) {
 
 const sshConnectTimeout = 5 * time.Second
 
+func tuneInteractiveConn(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		// Go enables TCP_NODELAY by default for TCP connections; set it explicitly
+		// because proxied connections may come from a custom dialer.
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+}
+
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if n > 0 {
+			p = p[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
 func sshClientFromConn(conn net.Conn, addr string, clientConfig *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	tuneInteractiveConn(conn)
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to set ssh handshake deadline: %v", err)
@@ -163,7 +191,7 @@ func (sclient *SSHClient) GenerateClient() error {
 	// JoinHostPort automatically converts a bare IPv6 literal into [IPv6]:port.
 	addr = net.JoinHostPort(sclient.Hostname, strconv.Itoa(sclient.Port))
 
-	networkDialer := &net.Dialer{Timeout: sshConnectTimeout, KeepAlive: 30 * time.Second}
+	networkDialer := &net.Dialer{Timeout: sshConnectTimeout, KeepAlive: 30 * time.Second, FallbackDelay: 100 * time.Millisecond}
 	if sclient.ProxyHost != "" {
 		if sclient.ProxyPort == 0 {
 			sclient.ProxyPort = 1080
@@ -231,8 +259,8 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 	wsOutput.mu = sclient.wsWriteMu
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
+		ssh.TTY_OP_ISPEED: 115200,
+		ssh.TTY_OP_OSPEED: 115200,
 	}
 	if err := sshSession.RequestPty("xterm", rows, cols, modes); err != nil {
 		log.Println(err)
@@ -278,7 +306,7 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 				}
 				continue
 			}
-			_, err = sclient.StdinPipe.Write(p)
+			err = writeAll(sclient.StdinPipe, p)
 			if err != nil {
 				close(stopCh)
 				return

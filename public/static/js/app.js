@@ -555,14 +555,25 @@ function submitSSHAuthRetry() {
     hideSSHAuthRetryModal(false);
     renderTabs();
     showToast('正在重新连接 ' + host + '...', 'info');
-    setTimeout(function () {
-        try { s.fitAddon.fit(); } catch (e) { }
-        connectSession(s);
-    }, 120);
+    startSessionConnection(s);
+}
+
+function startSessionConnection(session, afterStart) {
+    var start = function () {
+        try { session.fitAddon.fit(); } catch (e) { }
+        connectSession(session);
+        if (typeof afterStart === 'function') afterStart();
+    };
+    if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
+    else setTimeout(start, 0);
 }
 
 function connectSession(session) {
     if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
+    if (session._resizeHandler) {
+        removeEventListener('resize', session._resizeHandler);
+        session._resizeHandler = null;
+    }
     if (session._dataDisposable && typeof session._dataDisposable.dispose === 'function') {
         try { session._dataDisposable.dispose(); } catch (e) { }
         session._dataDisposable = null;
@@ -571,6 +582,7 @@ function connectSession(session) {
     var cols = session.term.cols, rows = session.term.rows;
     var wsUrl = proto + '//' + location.host + '/term?cols=' + cols + '&rows=' + rows;
     var ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
     session.ws = ws;
     session._connected = false;
     var failedBeforeConnect = false;
@@ -578,16 +590,18 @@ function connectSession(session) {
     ws.onopen = function () { ws.send(session.sshInfo); };
 
     ws.onmessage = function (e) {
+        var isText = typeof e.data === 'string';
+        var terminalData = isText ? e.data : new Uint8Array(e.data);
         if (!session._connected) {
-            if (isPasswordAuthFailure(e.data, session)) {
+            if (isText && isPasswordAuthFailure(e.data, session)) {
                 failedBeforeConnect = true;
-                session.term.write(e.data);
+                session.term.write(terminalData);
                 handleSSHAuthFailure(session, e.data);
                 return;
             }
-            if (isSSHPreConnectFailure(e.data)) {
+            if (isText && isSSHPreConnectFailure(e.data)) {
                 failedBeforeConnect = true;
-                session.term.write(e.data);
+                session.term.write(terminalData);
                 showToast(session.hostname + ' 连接失败：' + stripAnsiText(e.data), 'error');
                 return;
             }
@@ -600,7 +614,7 @@ function connectSession(session) {
             session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
             startTopbarMetricsPolling(session);
         }
-        session.term.write(e.data);
+        session.term.write(terminalData);
     };
 
     ws.onerror = function () { showToast(session.hostname + ' 连接失败', 'error'); };
@@ -638,13 +652,11 @@ function connectFromLogin() {
     showView('terminalView');
     switchTab(sessions.length - 1);
 
-    setTimeout(function () {
-        try { session.fitAddon.fit(); } catch (e) { }
-        connectSession(session);
+    startSessionConnection(session, function () {
         btn.classList.remove('loading');
         setStatus('', '就绪');
         renderScriptBookmarks();
-    }, 300);
+    });
 }
 
 function maybeShowFirstServerInfoGuide(session) {
@@ -728,7 +740,7 @@ function reconnectTab() {
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
     if (s.sysInfoTimer) { clearInterval(s.sysInfoTimer); s.sysInfoTimer = null; }
     showToast('重新连接 ' + s.hostname + '...', 'info');
-    setTimeout(function () { connectSession(s); }, 300);
+    startSessionConnection(s);
 }
 
 function showAddTab() { document.getElementById('addTabModal').classList.add('show'); document.getElementById('newTabHost').focus(); }
@@ -747,10 +759,7 @@ function addNewTab() {
     var session = createSession(h, p, u, sshInfo, { authType: 'password' });
     switchTab(sessions.length - 1);
     hideAddTab();
-    setTimeout(function () {
-        try { session.fitAddon.fit(); } catch (e) { }
-        connectSession(session);
-    }, 300);
+    startSessionConnection(session);
 }
 
 // ==================== System Info ====================
