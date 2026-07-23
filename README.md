@@ -373,6 +373,19 @@ xterm.js、FitAddon、WebLinksAddon、Noto Sans SC、JetBrains Mono、应用 Jav
 
 实际按键延迟仍受“浏览器 → WebSSH 服务器 → SSH 目标服务器”的网络往返时间、反向代理和目标服务器负载影响。若两台服务器跨洲或线路丢包，应用无法消除物理网络延迟，建议将 WebSSH 部署在靠近 SSH 目标服务器的地区。
 
+### 终端 WebSocket 直连（可选）
+
+如果页面域名经过高延迟 CDN、跨洲反向代理或远程 Worker，可以只让终端 WebSocket 使用一个靠近 WebSSH 建站机的直连 HTTPS/WSS 入口：
+
+```env
+WEBSSH_TERMINAL_WS_URL=wss://direct-webssh.example.com/term
+WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com
+```
+
+`WEBSSH_TERMINAL_WS_URL` 为空时仍使用页面同源 `/term`，不改变普通部署。配置后只有 SSH 终端输入/输出改走该地址，页面、API 和静态资源仍使用原域名。直连入口必须具备浏览器信任的 TLS 证书、支持 WebSocket Upgrade，并反向代理到 WebSSH 的 `/term`；跨域时还必须把页面 Origin 加入 `WEBSSH_ALLOWED_ORIGINS`。
+
+该方式减少的是反向代理绕路延迟，不能消除 WebSSH 建站机到 SSH 目标机之间的物理 RTT。项目没有使用不安全的“本地假回显”，因此不会重复字符、破坏 Vim/nano，也不会在远端关闭回显时泄露密码输入。
+
 ## 从源码运行
 
 ```bash
@@ -407,6 +420,7 @@ go run . -a admin:password
 | `WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES` | 1073741824 | 远程下载文件上限 |
 | `WEBSSH_ALLOW_PRIVATE_DOWNLOADS` | false | 是否允许远程下载访问私网/本机 |
 | `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 额外允许来源 |
+| `WEBSSH_TERMINAL_WS_URL` | 空（同源 `/term`） | 可选的终端直连 `ws://` / `wss://` 完整地址，用于绕过高延迟代理 |
 | `WEBSSH_ENABLE_SELF_UPDATE` | true（Docker Compose） | 是否启用页面内更新；Render/Railway 仍需使用平台重新部署 |
 | `WEBSSH_SOURCE_DIR` | /app/source | 容器内源码目录 |
 | `WEBSSH_HOST_PROJECT_DIR` | 空 | 页面更新使用的宿主机绝对路径 |

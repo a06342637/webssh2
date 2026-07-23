@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -22,15 +24,16 @@ import (
 var f embed.FS
 
 var (
-	port       = flag.Int("p", 8008, "服务运行端口")
-	v          = flag.Bool("v", false, "显示版本号")
-	authInfo   = flag.String("a", "", "开启账号密码登录验证, '-a user:pass'的格式传参")
-	timeout    int
-	savePass   bool
-	showFooter bool
-	version    = controller.AppVersion
-	username   string
-	password   string
+	port                 = flag.Int("p", 8008, "服务运行端口")
+	v                    = flag.Bool("v", false, "显示版本号")
+	authInfo             = flag.String("a", "", "开启账号密码登录验证, '-a user:pass'的格式传参")
+	timeout              int
+	savePass             bool
+	showFooter           bool
+	version              = controller.AppVersion
+	username             string
+	password             string
+	terminalWebSocketURL string
 )
 
 func init() {
@@ -72,6 +75,14 @@ func init() {
 			*port = b
 		}
 	}
+	if envVal, ok := os.LookupEnv("WEBSSH_TERMINAL_WS_URL"); ok {
+		normalized, err := normalizeTerminalWebSocketURL(envVal)
+		if err != nil {
+			fmt.Printf("Warning: ignoring invalid WEBSSH_TERMINAL_WS_URL: %v\n", err)
+		} else {
+			terminalWebSocketURL = normalized
+		}
+	}
 }
 
 func configureRuntime() {
@@ -90,8 +101,33 @@ func configureRuntime() {
 	}
 }
 
+func normalizeTerminalWebSocketURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse URL: %w", err)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if (parsed.Scheme != "ws" && parsed.Scheme != "wss") || parsed.Host == "" {
+		return "", fmt.Errorf("must be an absolute ws:// or wss:// URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("userinfo, query and fragment are not allowed")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/term"
+	}
+	return parsed.String(), nil
+}
+
 func renderIndexHTML(indexHTML []byte) []byte {
-	return []byte(strings.ReplaceAll(string(indexHTML), "__APP_VERSION__", version))
+	rendered := strings.ReplaceAll(string(indexHTML), "__APP_VERSION__", version)
+	encodedURL, _ := json.Marshal(terminalWebSocketURL)
+	rendered = strings.ReplaceAll(rendered, "__TERMINAL_WEBSOCKET_URL__", string(encodedURL))
+	return []byte(rendered)
 }
 
 func main() {

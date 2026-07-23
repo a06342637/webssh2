@@ -580,6 +580,23 @@ function startSessionConnection(session, afterStart) {
     else setTimeout(start, 0);
 }
 
+function buildTerminalWebSocketURL(cols, rows) {
+    var fallbackProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var fallback = fallbackProto + '//' + location.host + '/term';
+    var configured = typeof window.__WEBSSH_TERMINAL_WS_URL__ === 'string'
+        ? window.__WEBSSH_TERMINAL_WS_URL__.trim()
+        : '';
+    try {
+        var wsUrl = new URL(configured || fallback, location.href);
+        if (wsUrl.protocol !== 'ws:' && wsUrl.protocol !== 'wss:') throw new Error('invalid WebSocket protocol');
+        wsUrl.searchParams.set('cols', String(cols));
+        wsUrl.searchParams.set('rows', String(rows));
+        return wsUrl.toString();
+    } catch (e) {
+        return fallback + '?cols=' + encodeURIComponent(cols) + '&rows=' + encodeURIComponent(rows);
+    }
+}
+
 function connectSession(session) {
     if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
     if (session._resizeHandler) {
@@ -590,9 +607,8 @@ function connectSession(session) {
         try { session._dataDisposable.dispose(); } catch (e) { }
         session._dataDisposable = null;
     }
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var cols = session.term.cols, rows = session.term.rows;
-    var wsUrl = proto + '//' + location.host + '/term?cols=' + cols + '&rows=' + rows;
+    var wsUrl = buildTerminalWebSocketURL(cols, rows);
     var ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     session.ws = ws;
@@ -3873,7 +3889,11 @@ function initTheme() {
 
 // ==================== Click outside to close drawers ====================
 document.addEventListener('click', function (e) {
-    if (e.target.closest('.modal-overlay') || e.target.closest('[data-keep-script-drawer]')) return;
+    var eventPath = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    var startedInsideModal = eventPath.some(function (node) {
+        return node && node.classList && node.classList.contains('modal-overlay');
+    });
+    if (startedInsideModal || e.target.closest('.modal-overlay') || e.target.closest('[data-keep-script-drawer]')) return;
 
     // Close connection bookmark drawer
     var connDrawer = document.getElementById('connDrawer');
@@ -3886,7 +3906,6 @@ document.addEventListener('click', function (e) {
     // Close script bookmark drawer
     var scriptDrawer = document.getElementById('scriptDrawer');
     var termEdge = document.getElementById('termEdgeBtns');
-    var eventPath = typeof e.composedPath === 'function' ? e.composedPath() : [];
     var startedInsideScriptDrawer = scriptDrawer && (scriptDrawer.contains(e.target) || eventPath.indexOf(scriptDrawer) !== -1);
     if (scriptDrawer && scriptDrawer.classList.contains('open')) {
         if (!startedInsideScriptDrawer && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
