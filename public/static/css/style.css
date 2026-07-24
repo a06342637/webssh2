@@ -22,6 +22,9 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'WebSSH Noto Sans S
 .orb-4{width:350px;height:350px;background:radial-gradient(circle,rgba(0,255,136,.2),transparent 70%);top:20%;right:20%;animation-delay:-7s;animation-duration:22s}
 @keyframes fl{0%,100%{transform:translate(0,0) scale(1)}25%{transform:translate(50px,-80px) scale(1.1)}50%{transform:translate(-30px,60px) scale(.9)}75%{transform:translate(70px,30px) scale(1.05)}}
 #particles{position:fixed;inset:0;z-index:1;pointer-events:none}
+/* Keep terminal keystrokes/rendering free from decorative background work. */
+body.terminal-active .bg-animation,body.terminal-active #particles{display:none!important}
+body.terminal-active .gradient-orb{animation-play-state:paused!important}
 
 /* Views */
 .view{position:fixed;inset:0;z-index:10;display:flex;opacity:0;visibility:hidden;transition:opacity .4s,visibility .4s}

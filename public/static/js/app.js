@@ -28,6 +28,9 @@ var serverInfoGuideTimer = null;
     var c = document.getElementById('particles');
     if (!c) return;
     var x = c.getContext('2d'), ps = [], m = { x: null, y: null };
+    var bg = document.querySelector('.bg-animation');
+    var frameHandle = 0;
+    var effectsEnabled = false;
     function rs() { c.width = innerWidth; c.height = innerHeight; }
     rs(); addEventListener('resize', rs);
     document.addEventListener('mousemove', function (e) { m.x = e.clientX; m.y = e.clientY; });
@@ -37,12 +40,37 @@ var serverInfoGuideTimer = null;
     P.prototype.d = function () { x.beginPath(); x.arc(this.x, this.y, this.s, 0, Math.PI * 2); x.fillStyle = 'hsla(' + this.h + ',80%,60%,' + this.o + ')'; x.fill(); };
     var n = Math.min(50, Math.floor(innerWidth * innerHeight / 22000));
     for (var i = 0; i < n; i++) ps.push(new P());
-    (function a() {
+    function detectEnabled() {
+        if (document.hidden || (document.body && document.body.classList.contains('terminal-active'))) return false;
+        if (getComputedStyle(c).display === 'none') return false;
+        return !bg || getComputedStyle(bg).display !== 'none';
+    }
+    function stop() {
+        if (frameHandle) {
+            cancelAnimationFrame(frameHandle);
+            frameHandle = 0;
+        }
+        x.clearRect(0, 0, c.width, c.height);
+    }
+    function schedule() {
+        if (!frameHandle && effectsEnabled) frameHandle = requestAnimationFrame(frame);
+    }
+    function frame() {
+        frameHandle = 0;
+        if (!effectsEnabled) return;
         x.clearRect(0, 0, c.width, c.height);
         for (var i = 0; i < ps.length; i++) { ps[i].u(); ps[i].d(); }
         for (var i = 0; i < ps.length; i++) for (var j = i + 1; j < ps.length; j++) { var dx = ps[i].x - ps[j].x, dy = ps[i].y - ps[j].y, d = Math.sqrt(dx * dx + dy * dy); if (d < 120) { x.beginPath(); x.moveTo(ps[i].x, ps[i].y); x.lineTo(ps[j].x, ps[j].y); x.strokeStyle = 'rgba(0,212,255,' + ((1 - d / 120) * .15) + ')'; x.lineWidth = .5; x.stroke(); } }
-        requestAnimationFrame(a);
-    })();
+        schedule();
+    }
+    function sync() {
+        effectsEnabled = detectEnabled();
+        if (effectsEnabled) schedule(); else stop();
+    }
+    document.addEventListener('visibilitychange', sync);
+    document.addEventListener('webssh:viewchange', sync);
+    document.addEventListener('webssh:background-sync', sync);
+    sync();
 })();
 
 // ==================== Utility ====================
@@ -96,6 +124,10 @@ function setStatus(s, t) { var e = document.getElementById('statusIndicator'); e
 function showView(id) {
     document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
     document.getElementById(id).classList.add('active');
+    if (document.body) {
+        document.body.classList.toggle('terminal-active', id === 'terminalView');
+        document.dispatchEvent(new Event('webssh:viewchange'));
+    }
     var footer = document.querySelector('.global-footer');
     if (footer) {
         if (id === 'terminalView') {
@@ -393,12 +425,13 @@ function switchTab(idx, userActivated) {
     activeIdx = idx;
     sessions.forEach(function (s, i) {
         if (i === idx) { s.termDiv.classList.add('active'); }
-        else { s.termDiv.classList.remove('active'); }
+        else { s.termDiv.classList.remove('active'); stopTopbarMetricsPolling(s); }
     });
     renderTabs();
     var s = sessions[idx];
     setTimeout(function () { try { s.fitAddon.fit(); s.term.focus(); } catch (e) { } }, 100);
     updateMetricsForActive();
+    if (s._connected && (prevIdx !== idx || (!s.sysInfoTimer && !s.sysInfoStartTimer))) startTopbarMetricsPolling(s);
     updateFontSizeLabel();
     if ((prevIdx !== idx || userActivated) && s.authRetry) s.authRetry.dismissed = false;
     updateSSHAuthRetryModalForActive();
@@ -457,20 +490,35 @@ function setTopbarMetricsVisible(show) {
     if (!show) el.innerHTML = '';
 }
 
+function stopTopbarMetricsPolling(session) {
+    if (!session) return;
+    if (session.sysInfoTimer) {
+        clearInterval(session.sysInfoTimer);
+        session.sysInfoTimer = null;
+    }
+    if (session.sysInfoStartTimer) {
+        clearTimeout(session.sysInfoStartTimer);
+        session.sysInfoStartTimer = null;
+    }
+}
+
 function startTopbarMetricsPolling(session) {
-    if (!session || !isTopbarMetricsEnabled()) return;
-    if (session.sysInfoTimer) clearInterval(session.sysInfoTimer);
-    if (session.sysInfoStartTimer) clearTimeout(session.sysInfoStartTimer);
+    stopTopbarMetricsPolling(session);
+    if (!session || !isTopbarMetricsEnabled() || !session._connected || sessions[activeIdx] !== session) return;
     // Do not open a second SSH connection while the terminal is still
     // receiving its first prompt. This is only for the optional metrics UI;
     // the terminal WebSocket remains completely independent.
     session.sysInfoStartTimer = setTimeout(function () {
         session.sysInfoStartTimer = null;
-        if (session._connected && session.ws && session.ws.readyState === 1 && isTopbarMetricsEnabled()) {
+        if (session._connected && session.ws && session.ws.readyState === 1 && isTopbarMetricsEnabled() && sessions[activeIdx] === session) {
             fetchSysInfoFor(session);
         }
     }, 1500);
-    session.sysInfoTimer = setInterval(function () { fetchSysInfoFor(session); }, getSysInterval() * 1000);
+    session.sysInfoTimer = setInterval(function () {
+        if (session._connected && session.ws && session.ws.readyState === 1 && isTopbarMetricsEnabled() && sessions[activeIdx] === session) {
+            fetchSysInfoFor(session);
+        }
+    }, getSysInterval() * 1000);
 }
 
 function updateMetricsForActive() {
@@ -606,8 +654,39 @@ function buildTerminalWebSocketURL(cols, rows) {
     }
 }
 
+var terminalEndpointWarmStarted = false;
+function warmTerminalEndpoint() {
+    if (terminalEndpointWarmStarted || typeof fetch !== 'function') return;
+    var configured = typeof window.__WEBSSH_TERMINAL_WS_URL__ === 'string'
+        ? window.__WEBSSH_TERMINAL_WS_URL__.trim()
+        : '';
+    if (!configured) return;
+    var endpoint;
+    try {
+        endpoint = new URL(configured, location.href);
+        if (endpoint.protocol !== 'ws:' && endpoint.protocol !== 'wss:') return;
+        endpoint.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:';
+        endpoint.pathname = '/healthz';
+        endpoint.search = '';
+        endpoint.hash = '';
+    } catch (e) {
+        return;
+    }
+    terminalEndpointWarmStarted = true;
+    // A tiny, anonymous request warms DNS/TCP/TLS for the direct WebSocket
+    // endpoint without blocking the login flow. Failure is intentionally silent.
+    fetch(endpoint.toString(), {
+        method: 'GET',
+        mode: 'no-cors',
+        credentials: 'omit',
+        cache: 'no-store',
+        priority: 'low'
+    }).catch(function () {});
+}
+
 function connectSession(session) {
     if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
+    stopTopbarMetricsPolling(session);
     if (session._resizeHandler) {
         removeEventListener('resize', session._resizeHandler);
         session._resizeHandler = null;
@@ -657,8 +736,7 @@ function connectSession(session) {
     ws.onerror = function () { showToast(session.hostname + ' 连接失败', 'error'); };
     ws.onclose = function () {
         if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
-        if (session.sysInfoTimer) { clearInterval(session.sysInfoTimer); session.sysInfoTimer = null; }
-        if (session.sysInfoStartTimer) { clearTimeout(session.sysInfoStartTimer); session.sysInfoStartTimer = null; }
+        stopTopbarMetricsPolling(session);
         if (!session._connected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
     };
 
@@ -746,8 +824,7 @@ function closeTab(idx) {
     var s = sessions[idx];
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
-    if (s.sysInfoTimer) clearInterval(s.sysInfoTimer);
-    if (s.sysInfoStartTimer) clearTimeout(s.sysInfoStartTimer);
+    stopTopbarMetricsPolling(s);
     if (s.resizeObs) s.resizeObs.disconnect();
     if (s._resizeHandler) removeEventListener('resize', s._resizeHandler);
     if (s._dataDisposable && typeof s._dataDisposable.dispose === 'function') { try { s._dataDisposable.dispose(); } catch (e) { } }
@@ -777,8 +854,7 @@ function reconnectTab() {
     var s = sessions[activeIdx];
     if (s.ws) s.ws.close();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
-    if (s.sysInfoTimer) { clearInterval(s.sysInfoTimer); s.sysInfoTimer = null; }
-    if (s.sysInfoStartTimer) { clearTimeout(s.sysInfoStartTimer); s.sysInfoStartTimer = null; }
+    stopTopbarMetricsPolling(s);
     showToast('重新连接 ' + s.hostname + '...', 'info');
     startSessionConnection(s);
 }
@@ -3880,6 +3956,7 @@ function applyTheme(theme) {
     } else {
         document.documentElement.setAttribute('data-theme', theme);
     }
+    document.dispatchEvent(new Event('webssh:background-sync'));
     var icon = document.getElementById('themeIcon');
     if (icon) icon.innerHTML = themeIcons[theme] || themeIcons.auto;
     refreshTerminalThemesForCurrentTheme();
@@ -3970,13 +4047,9 @@ function saveSysInterval() {
     // Update login page hint text
     updateSysInfoHint();
 
-    // Restart polling for all active sessions
-    sessions.forEach(function (s) {
-        if (s.sysInfoTimer) {
-            clearInterval(s.sysInfoTimer);
-            s.sysInfoTimer = setInterval(function () { fetchSysInfoFor(s); }, _sysIntervalTemp * 1000);
-        }
-    });
+    // Only the visible terminal needs the optional status polling. Background
+    // tabs keep their SSH sessions alive without opening extra SSH probes.
+    if (activeIdx >= 0 && sessions[activeIdx]) startTopbarMetricsPolling(sessions[activeIdx]);
     restartServerInfoTimer();
     if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] && sessions[serverInfoModalIdx]._lastMetrics) {
         renderServerInfo(sessions[serverInfoModalIdx]._lastMetrics, sessions[serverInfoModalIdx]);
@@ -3991,14 +4064,7 @@ function saveTopbarMetricsPreference() {
     updateSysInfoHint();
     if (!enabled) {
         sessions.forEach(function (s) {
-            if (s.sysInfoTimer) {
-                clearInterval(s.sysInfoTimer);
-                s.sysInfoTimer = null;
-            }
-            if (s.sysInfoStartTimer) {
-                clearTimeout(s.sysInfoStartTimer);
-                s.sysInfoStartTimer = null;
-            }
+            stopTopbarMetricsPolling(s);
         });
         setTopbarMetricsVisible(false);
         return;
@@ -4165,6 +4231,7 @@ function toggleParticlesEffect() {
     saveSettings(s);
     document.getElementById('particles').style.display = show ? '' : 'none';
     document.querySelector('.bg-animation').style.display = show ? '' : 'none';
+    document.dispatchEvent(new Event('webssh:background-sync'));
 }
 
 function toggleFooterVisibility() {
@@ -4199,6 +4266,7 @@ function resetAllSettings() {
     setBgImage('');
     document.getElementById('particles').style.display = '';
     document.querySelector('.bg-animation').style.display = '';
+    document.dispatchEvent(new Event('webssh:background-sync'));
     var toggleP = document.getElementById('toggleParticles');
     if (toggleP) toggleP.checked = true;
     applyCardScale(100);
@@ -4212,10 +4280,7 @@ function resetAllSettings() {
     if (topbarToggle) topbarToggle.checked = false;
     updateSysInfoHint();
     sessions.forEach(function (s) {
-        if (s.sysInfoTimer) {
-            clearInterval(s.sysInfoTimer);
-            s.sysInfoTimer = null;
-        }
+        stopTopbarMetricsPolling(s);
     });
     setTopbarMetricsVisible(false);
     renderBgSwatches();
@@ -4239,6 +4304,7 @@ function initSettings() {
         var cb = document.getElementById('toggleParticles');
         if (cb) cb.checked = false;
     }
+    document.dispatchEvent(new Event('webssh:background-sync'));
     if (s.blur != null) {
         document.documentElement.style.setProperty('--blur', s.blur + 'px');
     }
@@ -4446,6 +4512,7 @@ function initPreviewMode() {
 })();
 
 // ==================== Init ====================
+warmTerminalEndpoint();
 initTheme();
 initSettings();
 initTopbarMetricsPreference();
