@@ -409,6 +409,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
         authType: opts.authType || 'password',
         authRetry: null,
         _connected: false,
+        _connectGeneration: 0,
         _dataDisposable: null
     };
 
@@ -611,6 +612,7 @@ function submitSSHAuthRetry() {
     if (!pass) { setSSHAuthRetryError('请输入正确的密码。'); return; }
     document.getElementById('retryHost').value = formatHostForInput(host);
     document.getElementById('retryPort').value = port;
+    invalidateSessionConnection(s);
     if (s.ws && (s.ws.readyState === 0 || s.ws.readyState === 1)) {
         try { s.ws.close(); } catch (e) { }
     }
@@ -637,10 +639,10 @@ function startSessionConnection(session, afterStart) {
     else setTimeout(start, 0);
 }
 
-function buildTerminalWebSocketURL(cols, rows) {
+function buildTerminalWebSocketURL(cols, rows, sameOriginOnly) {
     var fallbackProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var fallback = fallbackProto + '//' + location.host + '/term';
-    var configured = typeof window.__WEBSSH_TERMINAL_WS_URL__ === 'string'
+    var configured = !sameOriginOnly && typeof window.__WEBSSH_TERMINAL_WS_URL__ === 'string'
         ? window.__WEBSSH_TERMINAL_WS_URL__.trim()
         : '';
     try {
@@ -684,6 +686,11 @@ function warmTerminalEndpoint() {
     }).catch(function () {});
 }
 
+function invalidateSessionConnection(session) {
+    if (!session) return;
+    session._connectGeneration = (session._connectGeneration || 0) + 1;
+}
+
 function connectSession(session) {
     if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
     stopTopbarMetricsPolling(session);
@@ -696,55 +703,103 @@ function connectSession(session) {
         session._dataDisposable = null;
     }
     var cols = session.term.cols, rows = session.term.rows;
-    var wsUrl = buildTerminalWebSocketURL(cols, rows);
-    var ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
-    session.ws = ws;
+    var directWsUrl = buildTerminalWebSocketURL(cols, rows, false);
+    var fallbackWsUrl = buildTerminalWebSocketURL(cols, rows, true);
+    var canFallback = directWsUrl !== fallbackWsUrl;
+    var connectionGeneration = (session._connectGeneration || 0) + 1;
+    session._connectGeneration = connectionGeneration;
     session._connected = false;
     var failedBeforeConnect = false;
 
-    ws.onopen = function () { ws.send(session.sshInfo); };
+    function isCurrentConnection() {
+        return session._connectGeneration === connectionGeneration && sessions.indexOf(session) !== -1;
+    }
 
-    ws.onmessage = function (e) {
-        var isText = typeof e.data === 'string';
-        var terminalData = isText ? e.data : new Uint8Array(e.data);
-        if (!session._connected) {
-            if (isText && isPasswordAuthFailure(e.data, session)) {
-                failedBeforeConnect = true;
-                session.term.write(terminalData);
-                handleSSHAuthFailure(session, e.data);
+    function openSocket(wsUrl, isFallback) {
+        var ws;
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch (e) {
+            if (!isFallback && canFallback) {
+                showToast('直连通道不可用，正在切换兼容线路…', 'info');
+                openSocket(fallbackWsUrl, true);
                 return;
             }
-            if (isText && isSSHPreConnectFailure(e.data)) {
-                failedBeforeConnect = true;
-                session.term.write(terminalData);
-                showToast(session.hostname + ' 连接失败：' + stripAnsiText(e.data), 'error');
-                return;
-            }
-            session._connected = true;
-            session.authRetry = null;
-            updateSSHAuthRetryModalForActive();
-            showToast(session.hostname + ' 连接成功', 'success');
-            setupAutoCopy(session);
-            maybeShowFirstServerInfoGuide(session);
-            session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
-            startTopbarMetricsPolling(session);
+            showToast(session.hostname + ' 无法连接', 'error');
+            return;
         }
-        session.term.write(terminalData);
-    };
+        ws.binaryType = 'arraybuffer';
+        session.ws = ws;
+        var transportTimer = !isFallback && canFallback ? setTimeout(function () {
+            if (!isCurrentConnection() || session.ws !== ws || ws.readyState !== 0) return;
+            try { ws.close(); } catch (e) { }
+            showToast('直连通道响应超时，正在切换兼容线路…', 'info');
+            openSocket(fallbackWsUrl, true);
+        }, 4000) : null;
 
-    ws.onerror = function () { showToast(session.hostname + ' 连接失败', 'error'); };
-    ws.onclose = function () {
-        if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
-        stopTopbarMetricsPolling(session);
-        if (!session._connected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
-    };
+        ws.onopen = function () {
+            if (!isCurrentConnection() || session.ws !== ws) return;
+            if (transportTimer) { clearTimeout(transportTimer); transportTimer = null; }
+            ws.send(session.sshInfo);
+        };
 
-    session._dataDisposable = session.term.onData(function (data) { if (ws.readyState === 1) ws.send(data); });
+        ws.onmessage = function (e) {
+            if (!isCurrentConnection() || session.ws !== ws) return;
+            var isText = typeof e.data === 'string';
+            var terminalData = isText ? e.data : new Uint8Array(e.data);
+            if (!session._connected) {
+                if (isText && isPasswordAuthFailure(e.data, session)) {
+                    failedBeforeConnect = true;
+                    session.term.write(terminalData);
+                    handleSSHAuthFailure(session, e.data);
+                    return;
+                }
+                if (isText && isSSHPreConnectFailure(e.data)) {
+                    failedBeforeConnect = true;
+                    session.term.write(terminalData);
+                    showToast(session.hostname + ' 连接失败：' + stripAnsiText(e.data), 'error');
+                    return;
+                }
+                session._connected = true;
+                session.authRetry = null;
+                updateSSHAuthRetryModalForActive();
+                showToast(session.hostname + ' 连接成功', 'success');
+                setupAutoCopy(session);
+                maybeShowFirstServerInfoGuide(session);
+                session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
+                startTopbarMetricsPolling(session);
+            }
+            session.term.write(terminalData);
+        };
+
+        // Wait for close before showing an error so a temporarily unavailable
+        // direct endpoint can fall back to the page's same-origin WebSocket.
+        ws.onerror = function () {};
+        ws.onclose = function () {
+            if (transportTimer) { clearTimeout(transportTimer); transportTimer = null; }
+            if (!isCurrentConnection() || session.ws !== ws) return;
+            if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
+            stopTopbarMetricsPolling(session);
+            if (!session._connected && !failedBeforeConnect && !isFallback && canFallback) {
+                showToast('直连通道不可用，正在切换兼容线路…', 'info');
+                openSocket(fallbackWsUrl, true);
+                return;
+            }
+            if (!session._connected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
+        };
+    }
+
+    openSocket(directWsUrl, false);
+
+    session._dataDisposable = session.term.onData(function (data) {
+        var ws = session.ws;
+        if (ws && ws.readyState === 1) ws.send(data);
+    });
 
     var resizeHandler = function () {
         try { session.fitAddon.fit(); } catch (e) { }
-        if (ws.readyState === 1 && session.term) ws.send('resize:' + session.term.rows + ':' + session.term.cols);
+        var ws = session.ws;
+        if (ws && ws.readyState === 1 && session.term) ws.send('resize:' + session.term.rows + ':' + session.term.cols);
     };
     addEventListener('resize', resizeHandler);
     session._resizeHandler = resizeHandler;
@@ -822,6 +877,7 @@ function closeTab(idx) {
     if (idx < 0 || idx >= sessions.length) return;
     if (serverInfoModalIdx === idx) hideServerInfoModal();
     var s = sessions[idx];
+    invalidateSessionConnection(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
     stopTopbarMetricsPolling(s);
@@ -852,6 +908,7 @@ function closeActiveTab() { if (activeIdx >= 0) closeTab(activeIdx); }
 function reconnectTab() {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
     var s = sessions[activeIdx];
+    invalidateSessionConnection(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
     stopTopbarMetricsPolling(s);
