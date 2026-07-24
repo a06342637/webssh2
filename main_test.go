@@ -96,11 +96,33 @@ func TestRenderIndexHTMLInjectsTerminalWebSocketURL(t *testing.T) {
 	terminalWebSocketURL = "wss://direct.example.com/term"
 	t.Cleanup(func() { terminalWebSocketURL = original })
 
-	got := string(renderIndexHTML([]byte(`<script>window.ws = __TERMINAL_WEBSOCKET_URL__;</script>`)))
+	got := string(renderIndexHTML([]byte(`<head>__TERMINAL_PRECONNECT__</head><script>window.ws = __TERMINAL_WEBSOCKET_URL__;</script>`)))
 	if strings.Contains(got, "__TERMINAL_WEBSOCKET_URL__") {
 		t.Fatalf("terminal WebSocket placeholder was not replaced: %s", got)
 	}
+	if strings.Contains(got, "__TERMINAL_PRECONNECT__") || !strings.Contains(got, `rel="preconnect"`) {
+		t.Fatalf("terminal preconnect placeholder was not replaced: %s", got)
+	}
 	if !strings.Contains(got, `window.ws = "wss://direct.example.com/term";`) {
 		t.Fatalf("terminal WebSocket URL was not JSON encoded into the page: %s", got)
+	}
+}
+
+func TestTerminalPreconnectHTML(t *testing.T) {
+	original := terminalWebSocketURL
+	t.Cleanup(func() { terminalWebSocketURL = original })
+
+	terminalWebSocketURL = "wss://direct.example.com:8443/term"
+	got := terminalPreconnectHTML()
+	if !strings.Contains(got, `rel="dns-prefetch" href="//direct.example.com:8443"`) {
+		t.Fatalf("missing DNS prefetch hint: %s", got)
+	}
+	if !strings.Contains(got, `rel="preconnect" href="https://direct.example.com:8443" crossorigin`) {
+		t.Fatalf("missing HTTPS preconnect hint: %s", got)
+	}
+
+	terminalWebSocketURL = ""
+	if got := terminalPreconnectHTML(); got != "" {
+		t.Fatalf("disabled direct endpoint produced a preconnect hint: %s", got)
 	}
 }

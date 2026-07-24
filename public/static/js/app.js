@@ -373,7 +373,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
     var session = {
         id: id, hostname: hostname, port: port, username: username,
         sshInfo: sshInfo, ws: null, term: t, fitAddon: fa, termDiv: termDiv,
-        heartbeat: null, sysInfoTimer: null, resizeObs: null,
+        heartbeat: null, sysInfoTimer: null, sysInfoStartTimer: null, resizeObs: null,
         authType: opts.authType || 'password',
         authRetry: null,
         _connected: false,
@@ -460,7 +460,16 @@ function setTopbarMetricsVisible(show) {
 function startTopbarMetricsPolling(session) {
     if (!session || !isTopbarMetricsEnabled()) return;
     if (session.sysInfoTimer) clearInterval(session.sysInfoTimer);
-    fetchSysInfoFor(session);
+    if (session.sysInfoStartTimer) clearTimeout(session.sysInfoStartTimer);
+    // Do not open a second SSH connection while the terminal is still
+    // receiving its first prompt. This is only for the optional metrics UI;
+    // the terminal WebSocket remains completely independent.
+    session.sysInfoStartTimer = setTimeout(function () {
+        session.sysInfoStartTimer = null;
+        if (session._connected && session.ws && session.ws.readyState === 1 && isTopbarMetricsEnabled()) {
+            fetchSysInfoFor(session);
+        }
+    }, 1500);
     session.sysInfoTimer = setInterval(function () { fetchSysInfoFor(session); }, getSysInterval() * 1000);
 }
 
@@ -649,6 +658,7 @@ function connectSession(session) {
     ws.onclose = function () {
         if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
         if (session.sysInfoTimer) { clearInterval(session.sysInfoTimer); session.sysInfoTimer = null; }
+        if (session.sysInfoStartTimer) { clearTimeout(session.sysInfoStartTimer); session.sysInfoStartTimer = null; }
         if (!session._connected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
     };
 
@@ -737,6 +747,7 @@ function closeTab(idx) {
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
     if (s.sysInfoTimer) clearInterval(s.sysInfoTimer);
+    if (s.sysInfoStartTimer) clearTimeout(s.sysInfoStartTimer);
     if (s.resizeObs) s.resizeObs.disconnect();
     if (s._resizeHandler) removeEventListener('resize', s._resizeHandler);
     if (s._dataDisposable && typeof s._dataDisposable.dispose === 'function') { try { s._dataDisposable.dispose(); } catch (e) { } }
@@ -767,6 +778,7 @@ function reconnectTab() {
     if (s.ws) s.ws.close();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
     if (s.sysInfoTimer) { clearInterval(s.sysInfoTimer); s.sysInfoTimer = null; }
+    if (s.sysInfoStartTimer) { clearTimeout(s.sysInfoStartTimer); s.sysInfoStartTimer = null; }
     showToast('重新连接 ' + s.hostname + '...', 'info');
     startSessionConnection(s);
 }
@@ -3982,6 +3994,10 @@ function saveTopbarMetricsPreference() {
             if (s.sysInfoTimer) {
                 clearInterval(s.sysInfoTimer);
                 s.sysInfoTimer = null;
+            }
+            if (s.sysInfoStartTimer) {
+                clearTimeout(s.sysInfoStartTimer);
+                s.sysInfoStartTimer = null;
             }
         });
         setTopbarMetricsVisible(false);

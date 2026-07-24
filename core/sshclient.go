@@ -284,12 +284,14 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 				close(stopCh)
 				return
 			}
-			if string(p) == "ping" {
+			// Keep the common keystroke path byte-oriented. Converting every
+			// input frame to string creates avoidable allocations; only resize
+			// control frames need text parsing.
+			if len(p) == 4 && p[0] == 'p' && p[1] == 'i' && p[2] == 'n' && p[3] == 'g' {
 				continue
 			}
-			msg := string(p)
-			if strings.HasPrefix(msg, "resize:") {
-				resizeSlice := strings.Split(msg, ":")
+			if len(p) >= 7 && p[0] == 'r' && p[1] == 'e' && p[2] == 's' && p[3] == 'i' && p[4] == 'z' && p[5] == 'e' && p[6] == ':' {
+				resizeSlice := strings.Split(string(p), ":")
 				if len(resizeSlice) != 3 {
 					continue
 				}

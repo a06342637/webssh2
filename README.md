@@ -368,6 +368,9 @@ AUTH_INFO="admin:请替换为强密码"
 - SSH TCP 连接显式启用 `TCP_NODELAY`；域名双栈连接的备用地址族回退时间缩短到 100 ms。
 - 大段命令粘贴会循环写完全部数据，避免底层发生短写时命令被截断。
 - WebSocket 使用共享的 32 KiB 写缓冲池，提高连续命令输出吞吐，同时不启用可能增加交互延迟的 WebSocket 压缩。
+- 配置终端直连地址后，首页会提前发送 DNS prefetch / preconnect 提示，尽早预热 WSS 的 DNS、TCP 和 TLS 连接，减少首次登录等待。
+- 如果启用了顶部服务器状态检测，首次检测会延后到终端首屏建立后执行，避免登录初期额外 SSH 检测和终端抢占资源；后续仍按设置的间隔刷新。
+- 后端普通按键输入走字节快速路径，只对 resize 控制帧进行文本解析，减少多终端同时输入时的无效字符串分配。
 
 xterm.js、FitAddon、WebLinksAddon、Noto Sans SC、JetBrains Mono、应用 JavaScript 和 CSS 均嵌入 Go 程序并随 Docker 镜像本地部署。页脚链接、推荐脚本中的下载地址以及用户主动填写的远程下载/背景地址不会在页面启动时加载。
 

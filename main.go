@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -127,7 +128,31 @@ func renderIndexHTML(indexHTML []byte) []byte {
 	rendered := strings.ReplaceAll(string(indexHTML), "__APP_VERSION__", version)
 	encodedURL, _ := json.Marshal(terminalWebSocketURL)
 	rendered = strings.ReplaceAll(rendered, "__TERMINAL_WEBSOCKET_URL__", string(encodedURL))
+	rendered = strings.ReplaceAll(rendered, "__TERMINAL_PRECONNECT__", terminalPreconnectHTML())
 	return []byte(rendered)
+}
+
+// terminalPreconnectHTML emits an early connection hint for the optional
+// direct terminal endpoint. It only warms the browser connection; the actual
+// WebSocket is still opened by app.js after the user starts a session.
+func terminalPreconnectHTML() string {
+	if terminalWebSocketURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(terminalWebSocketURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	scheme := "https"
+	if parsed.Scheme == "ws" {
+		scheme = "http"
+	}
+	origin := (&url.URL{Scheme: scheme, Host: parsed.Host}).String()
+	return fmt.Sprintf(
+		`<link rel="dns-prefetch" href="//%s"><link rel="preconnect" href="%s" crossorigin>`,
+		html.EscapeString(parsed.Host),
+		html.EscapeString(origin),
+	)
 }
 
 func main() {
