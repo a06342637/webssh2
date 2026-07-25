@@ -22,6 +22,7 @@ var serverInfoNetUnit = (function () {
     try { return safeStorageGet(NET_UNIT_KEY) === 'bits' ? 'bits' : 'bytes'; } catch (e) { return 'bytes'; }
 })();
 var serverInfoGuideTimer = null;
+var TERMINAL_CONTROL_PREFIX = '__WEBSSH_CONTROL__:';
 
 // ==================== Particles ====================
 (function () {
@@ -178,6 +179,8 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
         if (sshAuthRetryModal && sshAuthRetryModal.classList.contains('show')) { hideSSHAuthRetryModal(true); return; }
+        var hostKeyMismatchModal = document.getElementById('hostKeyMismatchModal');
+        if (hostKeyMismatchModal && hostKeyMismatchModal.classList.contains('show')) { hideHostKeyMismatchModal(true); return; }
         var scriptDeleteModal = document.getElementById('scriptDeleteModal');
         if (scriptDeleteModal && scriptDeleteModal.classList.contains('show')) { hideScriptDeleteModal(); return; }
         var categoryDeleteModal = document.getElementById('categoryDeleteModal');
@@ -408,6 +411,8 @@ function createSession(hostname, port, username, sshInfo, opts) {
         heartbeat: null, sysInfoTimer: null, sysInfoStartTimer: null, resizeObs: null,
         authType: opts.authType || 'password',
         authRetry: null,
+        hostKeyMismatch: null,
+        hostKeyDecision: '',
         _connected: false,
         _connectGeneration: 0,
         _dataDisposable: null
@@ -436,6 +441,8 @@ function switchTab(idx, userActivated) {
     updateFontSizeLabel();
     if ((prevIdx !== idx || userActivated) && s.authRetry) s.authRetry.dismissed = false;
     updateSSHAuthRetryModalForActive();
+    if ((prevIdx !== idx || userActivated) && s.hostKeyMismatch) s.hostKeyMismatch.dismissed = false;
+    updateHostKeyMismatchModalForActive();
 }
 
 function renderTabs() {
@@ -540,6 +547,123 @@ function updateMetricsForActive() {
 }
 
 // ==================== Connect ====================
+function decodeSSHInfoPayload(sshInfo) {
+    return JSON.parse(decodeURIComponent(escape(atob(sshInfo))));
+}
+
+function encodeSSHInfoPayload(info) {
+    return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
+}
+
+function setHostKeyDecision(session, action, fingerprint) {
+    try {
+        var info = decodeSSHInfoPayload(session.sshInfo);
+        info.hostKeyAction = action;
+        info.hostKeyFingerprint = fingerprint;
+        session.sshInfo = encodeSSHInfoPayload(info);
+        session.hostKeyDecision = action;
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function clearHostKeyDecision(session) {
+    if (!session || !session.sshInfo) return;
+    try {
+        var info = decodeSSHInfoPayload(session.sshInfo);
+        delete info.hostKeyAction;
+        delete info.hostKeyFingerprint;
+        session.sshInfo = encodeSSHInfoPayload(info);
+    } catch (e) { }
+    session.hostKeyDecision = '';
+}
+
+function getActiveHostKeyMismatchSession() {
+    return activeIdx >= 0 && sessions[activeIdx] ? sessions[activeIdx] : null;
+}
+
+function formatHostKeyInfo(info) {
+    info = info || {};
+    return (info.algorithm || 'unknown') + ' · ' + (info.fingerprint || 'unknown');
+}
+
+function showHostKeyMismatchModal(session) {
+    if (!session || !session.hostKeyMismatch) return;
+    var modal = document.getElementById('hostKeyMismatchModal');
+    if (!modal) return;
+    var data = session.hostKeyMismatch.data || {};
+    var host = data.host || session.hostname || '';
+    var port = data.port || session.port || 22;
+    var target = document.getElementById('hostKeyTarget');
+    var presented = document.getElementById('hostKeyPresented');
+    var expected = document.getElementById('hostKeyExpected');
+    var reason = document.getElementById('hostKeyMismatchReason');
+    if (target) target.textContent = formatHostPort(host, port);
+    if (presented) presented.textContent = formatHostKeyInfo(data.presented);
+    if (expected) {
+        var keys = Array.isArray(data.expected) ? data.expected : [];
+        expected.innerHTML = keys.length
+            ? keys.map(function (item) { return '<li>' + esc(formatHostKeyInfo(item)) + '</li>'; }).join('')
+            : '<li>没有可用的旧指纹</li>';
+    }
+    if (reason) reason.textContent = data.reason || '服务器可能重装过，也可能存在中间人攻击。请先通过可信渠道核对新指纹。';
+    modal.classList.add('show');
+}
+
+function hideHostKeyMismatchModal(dismiss) {
+    var modal = document.getElementById('hostKeyMismatchModal');
+    if (modal) modal.classList.remove('show');
+    if (dismiss) {
+        var session = getActiveHostKeyMismatchSession();
+        if (session && session.hostKeyMismatch) session.hostKeyMismatch.dismissed = true;
+    }
+}
+
+function updateHostKeyMismatchModalForActive() {
+    var session = getActiveHostKeyMismatchSession();
+    if (session && session.hostKeyMismatch && !session.hostKeyMismatch.dismissed) {
+        showHostKeyMismatchModal(session);
+        return;
+    }
+    hideHostKeyMismatchModal(false);
+}
+
+function handleHostKeyMismatch(session, message) {
+    session.hostKeyMismatch = { data: message, dismissed: false, ts: Date.now() };
+    showToast(session.hostname + ' 主机指纹已变化，请确认', 'error');
+    if (sessions[activeIdx] === session) updateHostKeyMismatchModalForActive();
+}
+
+function submitHostKeyDecision(action) {
+    var session = getActiveHostKeyMismatchSession();
+    if (!session || !session.hostKeyMismatch || !session.hostKeyMismatch.data) return;
+    var data = session.hostKeyMismatch.data;
+    var fingerprint = data.presented && data.presented.fingerprint;
+    if (!fingerprint || !setHostKeyDecision(session, action, fingerprint)) {
+        showToast('无法准备主机指纹确认，请重新连接', 'error');
+        return;
+    }
+    session.hostKeyMismatch = null;
+    invalidateSessionConnection(session);
+    if (session.ws && (session.ws.readyState === 0 || session.ws.readyState === 1)) {
+        try { session.ws.close(); } catch (e) { }
+    }
+    session._connected = false;
+    hideHostKeyMismatchModal(false);
+    showToast(action === 'replace' ? '正在更新指纹并重新连接...' : '正在仅信任本次连接...', 'info');
+    startSessionConnection(session);
+}
+
+function parseTerminalControlMessage(data) {
+    if (typeof data !== 'string' || data.indexOf(TERMINAL_CONTROL_PREFIX) !== 0) return null;
+    try {
+        return JSON.parse(data.slice(TERMINAL_CONTROL_PREFIX.length));
+    } catch (e) {
+        return null;
+    }
+}
+
 function getActiveSSHAuthRetrySession() {
     return activeIdx >= 0 && sessions[activeIdx] ? sessions[activeIdx] : null;
 }
@@ -622,6 +746,8 @@ function submitSSHAuthRetry() {
     s.authType = 'password';
     s.sshInfo = buildSSHInfoDirect(host, port, user, pass);
     s.authRetry = null;
+    s.hostKeyMismatch = null;
+    s.hostKeyDecision = '';
     s._connected = false;
     hideSSHAuthRetryModal(false);
     renderTabs();
@@ -746,6 +872,12 @@ function connectSession(session) {
         ws.onmessage = function (e) {
             if (!isCurrentConnection() || session.ws !== ws) return;
             var isText = typeof e.data === 'string';
+            var controlMessage = isText ? parseTerminalControlMessage(e.data) : null;
+            if (controlMessage && controlMessage.type === 'host-key-mismatch') {
+                failedBeforeConnect = true;
+                handleHostKeyMismatch(session, controlMessage);
+                return;
+            }
             var terminalData = isText ? e.data : new Uint8Array(e.data);
             if (!session._connected) {
                 if (isText && isPasswordAuthFailure(e.data, session)) {
@@ -761,8 +893,11 @@ function connectSession(session) {
                     return;
                 }
                 session._connected = true;
+                if (session.hostKeyDecision === 'replace') clearHostKeyDecision(session);
+                session.hostKeyMismatch = null;
                 session.authRetry = null;
                 updateSSHAuthRetryModalForActive();
+                updateHostKeyMismatchModalForActive();
                 showToast(session.hostname + ' 连接成功', 'success');
                 setupAutoCopy(session);
                 maybeShowFirstServerInfoGuide(session);

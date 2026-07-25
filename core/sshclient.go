@@ -174,7 +174,7 @@ func (sclient *SSHClient) GenerateClient() error {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("WEBSSH_ALLOW_LEGACY_CIPHERS")), "true") {
 		config.Ciphers = append(config.Ciphers, "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc")
 	}
-	hostKeyCheck, err = hostKeyCallback()
+	hostKeyCheck, err = hostKeyCallbackWithDecision(sclient.HostKeyAction, sclient.HostKeyFingerprint)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func (sclient *SSHClient) GenerateClient() error {
 		}
 		client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
 		if err != nil {
-			return fmt.Errorf("failed to ssh handshake via proxy: %v", err)
+			return fmt.Errorf("failed to ssh handshake via proxy: %w", err)
 		}
 		sclient.Client = client
 		return nil
@@ -229,7 +229,7 @@ func (sclient *SSHClient) GenerateClient() error {
 	}
 	client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
 	if err != nil {
-		return fmt.Errorf("failed to ssh handshake: %v", err)
+		return fmt.Errorf("failed to ssh handshake: %w", err)
 	}
 	sclient.Client = client
 	return nil

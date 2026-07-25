@@ -257,7 +257,7 @@ WEBSSH_ALLOW_REGISTRATION=true
 WEBSSH_HOST_KEY_POLICY=tofu
 ```
 
-首次连接会将目标主机密钥写入 `${WEBSSH_DATA_DIR}/known_hosts`（Docker 内为 `/app/data/known_hosts`）；以后同一地址密钥变化会拒绝连接，防止静默中间人攻击。
+首次连接会将目标主机密钥写入 `${WEBSSH_DATA_DIR}/known_hosts`（Docker 内为 `/app/data/known_hosts`）。以后同一地址密钥变化时，页面会显示旧指纹和新指纹，并要求用户明确选择：取消、仅本次信任，或更新该目标的指纹后连接。不会自动覆盖旧指纹，避免把中间人攻击静默放行。
 
 可选策略：
 
@@ -267,7 +267,9 @@ WEBSSH_HOST_KEY_POLICY=tofu
 | `strict` | 只允许已有 `known_hosts` 中的密钥；文件不存在即启动连接失败 |
 | `insecure` | 不校验主机密钥，仅为兼容旧部署，不推荐 |
 
-目标服务器重装导致密钥合法变化时，应先在可信渠道核对新指纹，再编辑或重建 `known_hosts`。清空全部记录的命令如下，下一次连接会重新进入 TOFU：
+目标服务器重装导致密钥合法变化时，应先通过云厂商控制台或服务器本机可信渠道核对新指纹，再在页面点击“更新指纹并连接”。更新只替换当前 `主机:端口` 的记录，不会影响其他服务器；也可以选择“仅本次信任”而不写入 `known_hosts`。
+
+如果无法使用页面确认，也可以手动清空全部记录，下一次连接会重新进入 TOFU（这会影响所有已保存的目标）：
 
 ```bash
 docker compose exec webssh sh -c 'rm -f /app/data/known_hosts'

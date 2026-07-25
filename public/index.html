@@ -595,6 +595,33 @@
         </div>
     </div>
 
+    <!-- SSH Host Key Mismatch Dialog -->
+    <div class="modal-overlay" id="hostKeyMismatchModal">
+        <div class="glass-card modal-card host-key-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 3l9 4v5c0 5.2-3.8 8.3-9 9-5.2-.7-9-3.8-9-9V7l9-4z"/><path d="M12 8v4"/><circle cx="12" cy="16" r=".7" fill="currentColor"/></svg> SSH 主机身份已变化</span>
+                <button class="settings-close" type="button" onclick="hideHostKeyMismatchModal(true)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body host-key-body">
+                <div class="host-key-warning" id="hostKeyMismatchReason">服务器可能重装过，也可能存在中间人攻击。请先通过可信渠道核对新指纹。</div>
+                <div class="host-key-target-row"><span>目标</span><code id="hostKeyTarget">-</code></div>
+                <div class="host-key-section">
+                    <label>当前服务器提供的新指纹</label>
+                    <code class="host-key-fingerprint" id="hostKeyPresented">-</code>
+                </div>
+                <div class="host-key-section">
+                    <label>WebSSH 已保存的旧指纹</label>
+                    <ul class="host-key-fingerprint-list" id="hostKeyExpected"><li>-</li></ul>
+                </div>
+                <div class="host-key-actions">
+                    <button class="drawer-add host-key-replace" type="button" onclick="submitHostKeyDecision('replace')">更新指纹并连接</button>
+                    <button class="drawer-add" type="button" onclick="submitHostKeyDecision('once')">仅本次信任</button>
+                    <button class="drawer-add host-key-cancel" type="button" onclick="hideHostKeyMismatchModal(true)">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Add / Edit Script Dialog -->
     <div class="modal-overlay" id="editScriptModal">
         <div class="glass-card modal-card script-edit-card">

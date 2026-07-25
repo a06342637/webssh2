@@ -44,22 +44,24 @@ func (w *wsOutput) Write(p []byte) (int, error) {
 }
 
 type SSHClient struct {
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	Hostname   string `json:"hostname"`
-	Port       int    `json:"port"`
-	LoginType  int    `json:"logintype"`
-	PrivateKey string `json:"privateKey"`
-	Passphrase string `json:"passphrase"`
-	ProxyHost  string `json:"proxyHost"`
-	ProxyPort  int    `json:"proxyPort"`
-	ProxyUser  string `json:"proxyUser"`
-	ProxyPass  string `json:"proxyPass"`
-	Client     *ssh.Client
-	Sftp       *sftp.Client
-	StdinPipe  io.WriteCloser
-	Session    *ssh.Session
-	wsWriteMu  *sync.Mutex
+	Username           string `json:"username"`
+	Password           string `json:"password"`
+	Hostname           string `json:"hostname"`
+	Port               int    `json:"port"`
+	LoginType          int    `json:"logintype"`
+	PrivateKey         string `json:"privateKey"`
+	Passphrase         string `json:"passphrase"`
+	ProxyHost          string `json:"proxyHost"`
+	ProxyPort          int    `json:"proxyPort"`
+	ProxyUser          string `json:"proxyUser"`
+	ProxyPass          string `json:"proxyPass"`
+	HostKeyAction      string `json:"hostKeyAction,omitempty"`
+	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
+	Client             *ssh.Client
+	Sftp               *sftp.Client
+	StdinPipe          io.WriteCloser
+	Session            *ssh.Session
+	wsWriteMu          *sync.Mutex
 }
 
 func NewSSHClient() SSHClient {

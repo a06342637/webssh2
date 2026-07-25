@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -8,6 +10,34 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+const terminalControlPrefix = "__WEBSSH_CONTROL__:"
+
+type terminalHostKeyMismatchMessage struct {
+	Type      string             `json:"type"`
+	Host      string             `json:"host"`
+	Port      int                `json:"port"`
+	Presented core.HostKeyInfo   `json:"presented"`
+	Expected  []core.HostKeyInfo `json:"expected"`
+	Reason    string             `json:"reason,omitempty"`
+}
+
+func writeHostKeyMismatchMessage(wsConn interface {
+	WriteMessage(messageType int, data []byte) error
+}, sshClient core.SSHClient, mismatch *core.HostKeyMismatchError) error {
+	payload, err := json.Marshal(terminalHostKeyMismatchMessage{
+		Type:      "host-key-mismatch",
+		Host:      sshClient.Hostname,
+		Port:      sshClient.Port,
+		Presented: mismatch.Presented,
+		Expected:  mismatch.Expected,
+		Reason:    mismatch.Reason,
+	})
+	if err != nil {
+		return err
+	}
+	return wsConn.WriteMessage(1, append([]byte(terminalControlPrefix), payload...))
+}
 
 func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
@@ -46,10 +76,14 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-
 	err = sshClient.GenerateClient()
 	if err != nil {
-		wsConn.WriteMessage(1, []byte("\033[31m"+err.Error()+"\033[0m"))
+		var mismatch *core.HostKeyMismatchError
+		if errors.As(err, &mismatch) {
+			_ = writeHostKeyMismatchMessage(wsConn, sshClient, mismatch)
+		} else {
+			wsConn.WriteMessage(1, []byte("\033[31m"+err.Error()+"\033[0m"))
+		}
 		wsConn.Close()
 		fmt.Println("ssh connect error:", err)
 		responseBody.Msg = err.Error()
