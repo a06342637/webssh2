@@ -382,6 +382,47 @@ function isSSHPreConnectFailure(msg) {
         t.indexOf('connect:') >= 0;
 }
 
+// ==================== Terminal Size Sync ====================
+// 终端尺寸必须同时更新前端 xterm 和远端 pty。只调 fit() 而不通知远端，
+// readline 会按旧宽度计算换行和光标回退，长命令的回显就会互相覆盖、叠在同一行。
+var _termFontReady = null;
+
+function whenTerminalFontReady(cb) {
+    if (!document.fonts || typeof document.fonts.load !== 'function') { cb(); return; }
+    if (!_termFontReady) {
+        var loading = Promise.all([
+            document.fonts.load('400 15px "WebSSH JetBrains Mono"'),
+            document.fonts.load('700 15px "WebSSH JetBrains Mono"'),
+            document.fonts.ready
+        ]).catch(function () { });
+        // 字体请求异常时不能一直等，超时后按当前可用字体继续。
+        _termFontReady = Promise.race([loading, new Promise(function (r) { setTimeout(r, 1500); })]);
+    }
+    _termFontReady.then(cb, cb);
+}
+
+function syncTermSize(session, force) {
+    if (!session || !session.term || !session.fitAddon) return;
+    try { session.fitAddon.fit(); } catch (e) { return; }
+    var rows = session.term.rows, cols = session.term.cols;
+    if (!(rows > 0) || !(cols > 0)) return;
+    var ws = session.ws;
+    if (!ws || ws.readyState !== 1) return;
+    var size = rows + ':' + cols;
+    if (!force && session._lastSentSize === size) return;
+    session._lastSentSize = size;
+    try { ws.send('resize:' + size); } catch (e) { session._lastSentSize = null; }
+}
+
+function scheduleTermSizeSync(session, delay) {
+    if (!session) return;
+    if (session._sizeSyncTimer) clearTimeout(session._sizeSyncTimer);
+    session._sizeSyncTimer = setTimeout(function () {
+        session._sizeSyncTimer = null;
+        syncTermSize(session);
+    }, typeof delay === 'number' ? delay : 60);
+}
+
 // ==================== Multi-Tab Session Management ====================
 function createSession(hostname, port, username, sshInfo, opts) {
     opts = opts || {};
@@ -415,13 +456,23 @@ function createSession(hostname, port, username, sshInfo, opts) {
         hostKeyDecision: '',
         _connected: false,
         _connectGeneration: 0,
-        _dataDisposable: null
+        _dataDisposable: null,
+        _lastSentSize: null,
+        _sizeSyncTimer: null
     };
 
-    session.resizeObs = new ResizeObserver(function () { try { fa.fit(); } catch (e) { } });
+    session.resizeObs = new ResizeObserver(function () { scheduleTermSizeSync(session); });
     session.resizeObs.observe(termDiv);
 
     sessions.push(session);
+
+    // 字体是 font-display:swap 异步加载的，换上后字符宽度会变，
+    // 但容器尺寸不变、ResizeObserver 不会触发，必须主动重算一次列数。
+    whenTerminalFontReady(function () {
+        if (sessions.indexOf(session) === -1) return;
+        syncTermSize(session, true);
+    });
+
     return session;
 }
 
@@ -435,7 +486,7 @@ function switchTab(idx, userActivated) {
     });
     renderTabs();
     var s = sessions[idx];
-    setTimeout(function () { try { s.fitAddon.fit(); s.term.focus(); } catch (e) { } }, 100);
+    setTimeout(function () { syncTermSize(s); try { s.term.focus(); } catch (e) { } }, 100);
     updateMetricsForActive();
     if (s._connected && (prevIdx !== idx || (!s.sysInfoTimer && !s.sysInfoStartTimer))) startTopbarMetricsPolling(s);
     updateFontSizeLabel();
@@ -758,11 +809,16 @@ function submitSSHAuthRetry() {
 function startSessionConnection(session, afterStart) {
     var start = function () {
         try { session.fitAddon.fit(); } catch (e) { }
+        session._lastSentSize = null;
         connectSession(session);
         if (typeof afterStart === 'function') afterStart();
     };
-    if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
-    else setTimeout(start, 0);
+    // 必须等字体就绪再量宽度，否则用兜底字体算出的列数和实际显示对不上，
+    // 远端 pty 会拿到错误的初始列数。
+    whenTerminalFontReady(function () {
+        if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
+        else setTimeout(start, 0);
+    });
 }
 
 function buildTerminalWebSocketURL(cols, rows, sameOriginOnly) {
@@ -824,11 +880,16 @@ function connectSession(session) {
         removeEventListener('resize', session._resizeHandler);
         session._resizeHandler = null;
     }
+    if (session._sizeSyncTimer) { clearTimeout(session._sizeSyncTimer); session._sizeSyncTimer = null; }
+    session._lastSentSize = null;
     if (session._dataDisposable && typeof session._dataDisposable.dispose === 'function') {
         try { session._dataDisposable.dispose(); } catch (e) { }
         session._dataDisposable = null;
     }
-    var cols = session.term.cols, rows = session.term.rows;
+    // 容器还没布局完时 fit() 可能量不出尺寸，兜底成和后端一致的默认值，
+    // 避免把 0 或 NaN 当作列数带进 pty。
+    var cols = session.term.cols > 0 ? session.term.cols : 150;
+    var rows = session.term.rows > 0 ? session.term.rows : 35;
     var directWsUrl = buildTerminalWebSocketURL(cols, rows, false);
     var fallbackWsUrl = buildTerminalWebSocketURL(cols, rows, true);
     var canFallback = directWsUrl !== fallbackWsUrl;
@@ -903,6 +964,9 @@ function connectSession(session) {
                 maybeShowFirstServerInfoGuide(session);
                 session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
                 startTopbarMetricsPolling(session);
+                // pty 已就绪，把当前真实尺寸再对齐一次：建连时用的列数是
+                // 握手前量的，期间字体加载或布局变化都可能让它过期。
+                syncTermSize(session, true);
             }
             session.term.write(terminalData);
         };
@@ -931,11 +995,7 @@ function connectSession(session) {
         if (ws && ws.readyState === 1) ws.send(data);
     });
 
-    var resizeHandler = function () {
-        try { session.fitAddon.fit(); } catch (e) { }
-        var ws = session.ws;
-        if (ws && ws.readyState === 1 && session.term) ws.send('resize:' + session.term.rows + ':' + session.term.cols);
-    };
+    var resizeHandler = function () { scheduleTermSizeSync(session); };
     addEventListener('resize', resizeHandler);
     session._resizeHandler = resizeHandler;
 }
@@ -1018,6 +1078,7 @@ function closeTab(idx) {
     stopTopbarMetricsPolling(s);
     if (s.resizeObs) s.resizeObs.disconnect();
     if (s._resizeHandler) removeEventListener('resize', s._resizeHandler);
+    if (s._sizeSyncTimer) { clearTimeout(s._sizeSyncTimer); s._sizeSyncTimer = null; }
     if (s._dataDisposable && typeof s._dataDisposable.dispose === 'function') { try { s._dataDisposable.dispose(); } catch (e) { } }
     if (s.term) s.term.dispose();
     if (s.termDiv) s.termDiv.remove();
@@ -1981,14 +2042,14 @@ function renderServerInfo(d, session) {
 function toggleConnDrawer() { document.getElementById('connDrawer').classList.toggle('open'); }
 function toggleScriptDrawer() {
     document.getElementById('scriptDrawer').classList.toggle('open');
-    setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (e) { } }, 350);
+    setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 function toggleSftp() {
     var p = document.getElementById('sftpPanel');
     var wasOpen = p.classList.contains('open');
     p.classList.toggle('open');
     if (!wasOpen && activeIdx >= 0) sftpLoad(document.getElementById('sftpPath').value || '/');
-    setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (e) { } }, 350);
+    setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 
 // ==================== Connection Bookmarks ====================
@@ -4019,8 +4080,7 @@ function changeFontSize(delta) {
     s.term.options.fontSize = nv;
     safeStorageSet(FONT_KEY, nv);
     document.getElementById('fontSizeLabel').textContent = nv;
-    try { s.fitAddon.fit(); } catch (e) { }
-    if (s.ws && s.ws.readyState === 1) s.ws.send('resize:' + s.term.rows + ':' + s.term.cols);
+    syncTermSize(s, true);
 }
 
 function updateFontSizeLabel() {
@@ -4191,7 +4251,7 @@ document.addEventListener('click', function (e) {
     if (scriptDrawer && scriptDrawer.classList.contains('open')) {
         if (!startedInsideScriptDrawer && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
             scriptDrawer.classList.remove('open');
-            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
+            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
         }
     }
     // Close SFTP panel
@@ -4199,7 +4259,7 @@ document.addEventListener('click', function (e) {
     if (sftpPanel && sftpPanel.classList.contains('open')) {
         if (!sftpPanel.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && e.target.closest('.term-body')) {
             sftpPanel.classList.remove('open');
-            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) try { sessions[activeIdx].fitAddon.fit(); } catch (ex) { } }, 350);
+            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
         }
     }
 });

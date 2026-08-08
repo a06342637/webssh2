@@ -1,3 +1,3 @@
 package controller
 
-const AppVersion = "0.5.53"
+const AppVersion = "0.5.54"

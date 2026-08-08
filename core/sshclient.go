@@ -297,7 +297,7 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 				}
 				rows, _ := strconv.Atoi(resizeSlice[1])
 				cols, _ := strconv.Atoi(resizeSlice[2])
-				if rows <= 0 || cols <= 0 {
+				if rows <= 0 || cols <= 0 || rows > 1000 || cols > 1000 {
 					continue
 				}
 				err := sclient.Session.WindowChange(rows, cols)

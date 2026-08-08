@@ -13,6 +13,15 @@ import (
 
 const terminalControlPrefix = "__WEBSSH_CONTROL__:"
 
+// clampTermSize 把查询参数里的终端行列数转成合法值，非法或越界时用 fallback。
+func clampTermSize(raw string, fallback int) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > 1000 {
+		return fallback
+	}
+	return n
+}
+
 type terminalHostKeyMismatchMessage struct {
 	Type      string             `json:"type"`
 	Host      string             `json:"host"`
@@ -46,8 +55,10 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	cols := c.DefaultQuery("cols", "150")
 	rows := c.DefaultQuery("rows", "35")
 	closeTip := c.DefaultQuery("closeTip", "Connection timed out!")
-	col, _ := strconv.Atoi(cols)
-	row, _ := strconv.Atoi(rows)
+	// 解析失败或越界时回落到默认值：用 0 建 pty 会让远端按错误宽度换行，
+	// 长命令的回显会叠在同一行上。
+	col := clampTermSize(cols, 150)
+	row := clampTermSize(rows, 35)
 
 	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
