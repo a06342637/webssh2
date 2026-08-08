@@ -19,6 +19,36 @@ func (r *terminalMessageRecorder) WriteMessage(messageType int, data []byte) err
 	return nil
 }
 
+func TestClampTermSize(t *testing.T) {
+	// A zero or garbage size must not reach RequestPty: a pty opened with 0
+	// columns makes the remote shell wrap at the wrong width, which is what
+	// made long command echoes pile up on a single line.
+	cases := []struct {
+		name     string
+		raw      string
+		fallback int
+		want     int
+	}{
+		{"valid", "120", 150, 120},
+		{"empty falls back", "", 150, 150},
+		{"garbage falls back", "undefined", 150, 150},
+		{"NaN falls back", "NaN", 35, 35},
+		{"zero falls back", "0", 150, 150},
+		{"negative falls back", "-10", 35, 35},
+		{"float falls back", "80.5", 150, 150},
+		{"above ceiling falls back", "1001", 150, 150},
+		{"at ceiling kept", "1000", 150, 1000},
+		{"one kept", "1", 150, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampTermSize(tc.raw, tc.fallback); got != tc.want {
+				t.Fatalf("clampTermSize(%q, %d) = %d, want %d", tc.raw, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWriteHostKeyMismatchMessage(t *testing.T) {
 	recorder := &terminalMessageRecorder{}
 	client := core.SSHClient{Hostname: "2001:db8::20", Port: 2222}

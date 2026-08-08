@@ -279,34 +279,38 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 	stopCh := make(chan struct{})
 	go func() {
 		for {
-			_, p, err := ws.ReadMessage()
+			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				close(stopCh)
 				return
 			}
-			// Keep the common keystroke path byte-oriented. Converting every
-			// input frame to string creates avoidable allocations; only resize
-			// control frames need text parsing.
-			if len(p) == 4 && p[0] == 'p' && p[1] == 'i' && p[2] == 'n' && p[3] == 'g' {
-				continue
-			}
-			if len(p) >= 7 && p[0] == 'r' && p[1] == 'e' && p[2] == 's' && p[3] == 'i' && p[4] == 'z' && p[5] == 'e' && p[6] == ':' {
-				resizeSlice := strings.Split(string(p), ":")
-				if len(resizeSlice) != 3 {
+			// Keystrokes arrive as binary frames and are written through untouched;
+			// only text frames carry control commands. Sharing one frame type made
+			// pasted content that happens to be "ping" or start with "resize:"
+			// disappear into the control path. Text frames keep the legacy parsing
+			// so pages served before this change still work.
+			if messageType == websocket.TextMessage {
+				if len(p) == 4 && p[0] == 'p' && p[1] == 'i' && p[2] == 'n' && p[3] == 'g' {
 					continue
 				}
-				rows, _ := strconv.Atoi(resizeSlice[1])
-				cols, _ := strconv.Atoi(resizeSlice[2])
-				if rows <= 0 || cols <= 0 || rows > 1000 || cols > 1000 {
+				if len(p) >= 7 && p[0] == 'r' && p[1] == 'e' && p[2] == 's' && p[3] == 'i' && p[4] == 'z' && p[5] == 'e' && p[6] == ':' {
+					resizeSlice := strings.Split(string(p), ":")
+					if len(resizeSlice) != 3 {
+						continue
+					}
+					rows, _ := strconv.Atoi(resizeSlice[1])
+					cols, _ := strconv.Atoi(resizeSlice[2])
+					if rows <= 0 || cols <= 0 || rows > 1000 || cols > 1000 {
+						continue
+					}
+					err := sclient.Session.WindowChange(rows, cols)
+					if err != nil {
+						log.Println(err)
+						close(stopCh)
+						return
+					}
 					continue
 				}
-				err := sclient.Session.WindowChange(rows, cols)
-				if err != nil {
-					log.Println(err)
-					close(stopCh)
-					return
-				}
-				continue
 			}
 			err = writeAll(sclient.StdinPipe, p)
 			if err != nil {

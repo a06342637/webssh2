@@ -1264,6 +1264,8 @@ html[data-theme="light"]{
 .category-delete-copy b{display:block;color:var(--t1);font-size:14px;line-height:1.5}
 .category-delete-copy p{margin:6px 0 0;color:var(--t3);font-size:11px;line-height:1.65}
 .category-delete-actions{grid-column:1/-1;margin-top:4px}
+.run-script-icon{border-color:rgba(0,212,255,.22);background:rgba(0,212,255,.08)}
+.run-script-preview{grid-column:1/-1;max-height:190px;overflow:auto;margin:2px 0 0;padding:10px 12px;border:1px solid var(--brd);border-radius:var(--rx);background:rgba(0,0,0,.22);color:var(--t1);font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all;text-align:left}
 .category-delete-actions .drawer-add{margin:0}
 .category-choice-actions{grid-template-columns:1fr}
 .danger-confirm{border-style:solid!important;border-color:rgba(255,0,110,.4)!important;background:rgba(255,0,110,.08)!important;color:var(--err)!important}

@@ -729,6 +729,28 @@
         </div>
     </div>
 
+    <!-- Multi-line Script Run Confirmation -->
+    <div class="modal-overlay category-delete-overlay" id="runScriptConfirmModal">
+        <div class="glass-card modal-card category-delete-card" role="dialog" aria-modal="true" aria-labelledby="runScriptConfirmTitle">
+            <div class="drawer-hd auth-hd">
+                <span>运行脚本</span>
+                <button class="settings-close" type="button" onclick="hideRunScriptConfirmModal()" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body category-delete-body">
+                <div class="category-delete-icon run-script-icon">▶</div>
+                <div class="category-delete-copy">
+                    <b id="runScriptConfirmTitle">确定运行这个脚本吗？</b>
+                    <p id="runScriptConfirmDescription">确认后会在当前会话中依次执行。</p>
+                </div>
+                <pre class="run-script-preview" id="runScriptConfirmCommand"></pre>
+                <div class="edit-actions category-delete-actions">
+                    <button class="drawer-add" type="button" onclick="hideRunScriptConfirmModal()">取消</button>
+                    <button class="drawer-add danger-confirm" type="button" onclick="confirmRunScript()">确认运行</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Category Delete Confirmation -->
     <div class="modal-overlay category-delete-overlay" id="categoryDeleteModal">
         <div class="glass-card modal-card category-delete-card">

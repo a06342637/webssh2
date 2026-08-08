@@ -24,6 +24,12 @@ import (
 //go:embed public/*
 var f embed.FS
 
+// 根目录的 VERSION 是版本号的唯一来源，编译期嵌入。
+// 文件缺失会直接编译失败，所以运行时这里一定有值。
+//
+//go:embed VERSION
+var versionFile string
+
 var (
 	port                 = flag.Int("p", 8008, "服务运行端口")
 	v                    = flag.Bool("v", false, "显示版本号")
@@ -31,11 +37,22 @@ var (
 	timeout              int
 	savePass             bool
 	showFooter           bool
-	version              = controller.AppVersion
+	version              = resolveAppVersion()
 	username             string
 	password             string
 	terminalWebSocketURL string
 )
+
+// resolveAppVersion 把嵌入的版本号同步给 controller 包，
+// 让页面展示、静态资源版本参数和更新检查用的始终是同一个值。
+func resolveAppVersion() string {
+	parsed := strings.TrimSpace(versionFile)
+	if parsed == "" {
+		return controller.AppVersion
+	}
+	controller.AppVersion = parsed
+	return parsed
+}
 
 func init() {
 	flag.IntVar(&timeout, "t", 120, "ssh连接超时时间(min)")

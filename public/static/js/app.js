@@ -181,6 +181,8 @@ document.addEventListener('keydown', function (e) {
         if (sshAuthRetryModal && sshAuthRetryModal.classList.contains('show')) { hideSSHAuthRetryModal(true); return; }
         var hostKeyMismatchModal = document.getElementById('hostKeyMismatchModal');
         if (hostKeyMismatchModal && hostKeyMismatchModal.classList.contains('show')) { hideHostKeyMismatchModal(true); return; }
+        var runScriptConfirmModal = document.getElementById('runScriptConfirmModal');
+        if (runScriptConfirmModal && runScriptConfirmModal.classList.contains('show')) { hideRunScriptConfirmModal(); return; }
         var scriptDeleteModal = document.getElementById('scriptDeleteModal');
         if (scriptDeleteModal && scriptDeleteModal.classList.contains('show')) { hideScriptDeleteModal(); return; }
         var categoryDeleteModal = document.getElementById('categoryDeleteModal');
@@ -206,6 +208,10 @@ document.addEventListener('click', function (e) {
     var serverInfoDetailModal = document.getElementById('serverInfoDetailModal');
     if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show') && e.target === serverInfoDetailModal) {
         hideServerInfoDetailModal();
+    }
+    var runScriptConfirmModal = document.getElementById('runScriptConfirmModal');
+    if (runScriptConfirmModal && runScriptConfirmModal.classList.contains('show') && e.target === runScriptConfirmModal) {
+        hideRunScriptConfirmModal();
     }
     var scriptDeleteModal = document.getElementById('scriptDeleteModal');
     if (scriptDeleteModal && scriptDeleteModal.classList.contains('show') && e.target === scriptDeleteModal) {
@@ -424,6 +430,39 @@ function scheduleTermSizeSync(session, delay) {
 }
 
 // ==================== Multi-Tab Session Management ====================
+// ==================== Terminal IO ====================
+// 键盘输入走二进制帧，控制指令（ping / resize:）走文本帧。两者都塞进文本帧时，
+// 只要发出去的内容正好是 "ping" 或以 "resize:" 开头，就会被后端当成控制指令吞掉。
+var _termEncoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+
+function sendTerminalInput(session, data) {
+    var ws = session && session.ws;
+    if (!ws || ws.readyState !== 1 || !data) return false;
+    try {
+        ws.send(_termEncoder ? _termEncoder.encode(data) : data);
+        return true;
+    } catch (e) { return false; }
+}
+
+// 把一条命令交给远端 shell 执行。多行命令必须用 bracketed paste 包住：
+// 否则每个换行都会被 readline 立刻当成一条命令送去执行，中间任意一行启动了
+// 交互式程序（vim、top、ssh…），后面的行就会变成那个程序的输入。
+function sendCommandToSession(session, cmd) {
+    if (!session || typeof cmd !== 'string') return false;
+    var normalized = cmd.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+    if (!normalized) return false;
+    if (normalized.indexOf('\n') < 0) return sendTerminalInput(session, normalized + '\n');
+    var bracketed = !!(session.term && session.term.modes && session.term.modes.bracketedPasteMode);
+    if (bracketed) return sendTerminalInput(session, '\x1b[200~' + normalized + '\x1b[201~\r');
+    return sendTerminalInput(session, normalized + '\n');
+}
+
+function commandLineCount(cmd) {
+    if (typeof cmd !== 'string') return 0;
+    var normalized = cmd.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+    return normalized ? normalized.split('\n').length : 0;
+}
+
 function createSession(hostname, port, username, sshInfo, opts) {
     opts = opts || {};
     var id = Date.now() + '_' + Math.random().toString(36).substr(2, 5);
@@ -813,12 +852,10 @@ function startSessionConnection(session, afterStart) {
         connectSession(session);
         if (typeof afterStart === 'function') afterStart();
     };
-    // 必须等字体就绪再量宽度，否则用兜底字体算出的列数和实际显示对不上，
-    // 远端 pty 会拿到错误的初始列数。
-    whenTerminalFontReady(function () {
-        if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
-        else setTimeout(start, 0);
-    });
+    // 不等字体加载完就建连：字体换上后 createSession 里的回调会补一次 resize，
+    // 连接成功时还会强制同步一次，没必要为了量宽度推迟连接、让按钮一直转圈。
+    if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
+    else setTimeout(start, 0);
 }
 
 function buildTerminalWebSocketURL(cols, rows, sameOriginOnly) {
@@ -991,8 +1028,7 @@ function connectSession(session) {
     openSocket(directWsUrl, false);
 
     session._dataDisposable = session.term.onData(function (data) {
-        var ws = session.ws;
-        if (ws && ws.readyState === 1) ws.send(data);
+        sendTerminalInput(session, data);
     });
 
     var resizeHandler = function () { scheduleTermSizeSync(session); };
@@ -3249,9 +3285,12 @@ function runPresetScript(i) {
     var preset = PRESET_SCRIPTS[i];
     if (!preset) return;
     if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].ws || sessions[activeIdx].ws.readyState !== 1) { showToast('无活动连接', 'error'); return; }
-    sessions[activeIdx].ws.send(preset.cmd + '\n');
-    showToast('已执行: ' + preset.name, 'success');
-    sessions[activeIdx].term.focus();
+    confirmRunCommand(preset.name, preset.cmd, function () {
+        if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
+        if (!sendCommandToSession(sessions[activeIdx], preset.cmd)) { showToast('无活动连接', 'error'); return; }
+        showToast('已执行: ' + preset.name, 'success');
+        sessions[activeIdx].term.focus();
+    });
 }
 
 function renderEditScriptCategoryOptions(selected) {
@@ -3338,19 +3377,56 @@ function saveScriptBookmark() {
     openAddScriptModal();
 }
 
+var pendingRunCommand = null;
+
+// 多行脚本一旦发出就会被逐行执行，没有中途反悔的机会，所以先把完整内容摊开让用户确认。
+// 单行命令仍然点一下就跑，不打断日常操作。
+function confirmRunCommand(name, cmd, onConfirm) {
+    if (commandLineCount(cmd) <= 1) { onConfirm(); return; }
+    var modal = document.getElementById('runScriptConfirmModal');
+    if (!modal) { onConfirm(); return; }
+    pendingRunCommand = onConfirm;
+    var title = document.getElementById('runScriptConfirmTitle');
+    var desc = document.getElementById('runScriptConfirmDescription');
+    var preview = document.getElementById('runScriptConfirmCommand');
+    if (title) title.textContent = '确定运行脚本“' + (name || '未命名脚本') + '”吗？';
+    if (desc) desc.textContent = '这个脚本共 ' + commandLineCount(cmd) + ' 行，确认后会在当前会话中依次执行。';
+    if (preview) preview.textContent = cmd.replace(/\r\n?/g, '\n');
+    modal.classList.add('show');
+}
+
+function hideRunScriptConfirmModal() {
+    var modal = document.getElementById('runScriptConfirmModal');
+    if (modal) modal.classList.remove('show');
+    pendingRunCommand = null;
+}
+
+function confirmRunScript() {
+    var run = pendingRunCommand;
+    hideRunScriptConfirmModal();
+    if (typeof run === 'function') run();
+}
+
 function runScript(i) {
     var bms = loadSortedScriptBookmarks();
     var b = bms[i]; if (!b) return;
     if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].ws || sessions[activeIdx].ws.readyState !== 1) { showToast('无活动连接', 'error'); return; }
-    sessions[activeIdx].ws.send(b.cmd + '\n');
-    b = Object.assign({}, b, { useCount: parseScriptUseCount(b) + 1, lastUsed: Date.now() });
-    bms.splice(i, 1);
-    bms.unshift(b);
-    saveBM(SBK, bms);
-    renderScriptBookmarks();
-    syncLocalScriptsIfLogged();
-    showToast('已执行: ' + b.name, 'success');
-    sessions[activeIdx].term.focus();
+    var name = b.name, cmd = b.cmd;
+    confirmRunCommand(name, cmd, function () {
+        if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
+        if (!sendCommandToSession(sessions[activeIdx], cmd)) { showToast('无活动连接', 'error'); return; }
+        showToast('已执行: ' + name, 'success');
+        sessions[activeIdx].term.focus();
+        // 确认框是异步的，期间列表可能已被改动，索引对不上就不再改动排序数据。
+        var list = loadSortedScriptBookmarks();
+        var target = list[i];
+        if (!target || target.cmd !== cmd) return;
+        list.splice(i, 1);
+        list.unshift(Object.assign({}, target, { useCount: parseScriptUseCount(target) + 1, lastUsed: Date.now() }));
+        saveBM(SBK, list);
+        renderScriptBookmarks();
+        syncLocalScriptsIfLogged();
+    });
 }
 
 function delScript(i) {
@@ -3841,10 +3917,12 @@ function termCopy() {
 function termPaste() {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
     navigator.clipboard.readText().then(function (text) {
-        if (text && sessions[activeIdx].ws && sessions[activeIdx].ws.readyState === 1) {
-            sessions[activeIdx].ws.send(text);
-            sessions[activeIdx].term.focus();
-        }
+        var s = activeIdx >= 0 ? sessions[activeIdx] : null;
+        if (!text || !s || !s.ws || s.ws.readyState !== 1) return;
+        // 交给 xterm 处理：它会按远端的 bracketed paste 状态正确包裹多行内容，
+        // 最终仍走 onData → sendTerminalInput，不会被误当成控制指令。
+        s.term.paste(text);
+        s.term.focus();
     }).catch(function () {
         showToast('无法读取剪贴板，请使用 Ctrl+Shift+V', 'info');
     });
@@ -3925,7 +4003,10 @@ function sendCmdInput() {
         showToast('无活动连接', 'error');
         return;
     }
-    sessions[activeIdx].ws.send(text + '\n');
+    if (!sendCommandToSession(sessions[activeIdx], text)) {
+        showToast('无活动连接', 'error');
+        return;
+    }
     input.value = '';
     input.style.height = 'auto';
     sessions[activeIdx].term.focus();
