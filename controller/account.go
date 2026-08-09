@@ -41,6 +41,10 @@ var (
 	dummyPasswordHash = []byte("$2a$10$n/xeHI5pTVU2jCXvFHTKEO079VngBOppyqH06LHfVOsKK4YD81JmO")
 )
 
+// updaterComposeProject 把更新助手容器挂到一个独立的 compose 项目名下，
+// 避免它被本项目的 docker compose up 当成自家服务实例回收掉。
+const updaterComposeProject = "webssh-updater"
+
 type StoredUser struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"passwordHash"`
@@ -1359,6 +1363,32 @@ func currentDockerImage(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("读取当前 Docker 镜像失败: %s", last)
 }
 
+// updaterRunArgs 拼出启动更新助手容器的 docker run 参数。
+//
+// 助手用的是 compose 构建出来的镜像，而 compose 会把 com.docker.compose.* 标签打在
+// 镜像上，docker run 建出来的容器会原样继承。带着这些标签，助手在 compose 眼里就是
+// 本项目的一个服务实例，于是它自己执行的 docker compose up 会连它一起 recreate——
+// 助手被 SIGKILL，更新正好断在"旧容器已删、新容器还没起"，服务直接下线。
+// 显式改写这几个标签，把助手从项目里摘出去。
+func updaterRunArgs(updaterName, hostDir, srcDir, image, script string) []string {
+	return []string{
+		"run", "-d",
+		"--name", updaterName,
+		"--label", "webssh.updater=true",
+		"--label", "com.docker.compose.project=" + updaterComposeProject,
+		"--label", "com.docker.compose.service=updater",
+		"--label", "com.docker.compose.oneoff=True",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", hostDir + ":" + hostDir,
+		"-w", hostDir,
+		"-e", "WEBSSH_HOST_PROJECT_DIR=" + hostDir,
+		"-e", "WEBSSH_SOURCE_DIR=" + srcDir,
+		"--entrypoint", "sh",
+		image,
+		"-lc", script,
+	}
+}
+
 func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	updateMu.Lock()
 	defer updateMu.Unlock()
@@ -1427,21 +1457,14 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 		"docker compose version",
 		"log 'docker compose build/up'",
 		composeCmd,
+		// compose 先删旧容器再建新的，中途出岔子就会停在"服务没了"的状态。
+		// 明确校验一次，让失败在更新状态里可见，而不是等用户发现页面打不开。
+		"log 'verify webssh container is running'",
+		"CID=\"$(docker compose ps -q webssh || true)\"",
+		"if [ -z \"$CID\" ] || [ \"$(docker inspect -f '{{.State.Running}}' \"$CID\" 2>/dev/null)\" != true ]; then log 'ERROR: webssh container is not running after compose up'; exit 1; fi",
 		"log 'WebSSH update finished'",
 	}, "\n")
-	out, err := dockerOutput(ctx,
-		"run", "-d",
-		"--name", updaterName,
-		"--label", "webssh.updater=true",
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
-		"-v", hostDir+":"+hostDir,
-		"-w", hostDir,
-		"-e", "WEBSSH_HOST_PROJECT_DIR="+hostDir,
-		"-e", "WEBSSH_SOURCE_DIR="+dir,
-		"--entrypoint", "sh",
-		image,
-		"-lc", script,
-	)
+	out, err := dockerOutput(ctx, updaterRunArgs(updaterName, hostDir, dir, image, script)...)
 	if err != nil {
 		return nil, fmt.Errorf("启动更新助手失败: %s", out)
 	}
