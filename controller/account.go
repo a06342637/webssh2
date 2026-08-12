@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,10 +25,12 @@ import (
 
 const (
 	sessionCookieName   = "webssh_session"
+	basicAuthContextKey = "webssh.basic_auth"
 	minPasswordLen      = 7
 	maxPasswordBytes    = 72
 	maxScriptBookmarks  = 500
 	maxScriptCategories = 100
+	maxScriptDataBytes  = 8 << 20
 )
 
 var (
@@ -58,6 +61,7 @@ type StoredSession struct {
 }
 
 type ScriptBookmark struct {
+	ID         string `json:"id,omitempty"`
 	Name       string `json:"name"`
 	Cmd        string `json:"cmd"`
 	CategoryID string `json:"categoryId,omitempty"`
@@ -76,6 +80,7 @@ type StoredScripts struct {
 	Items      []ScriptBookmark `json:"items"`
 	Categories []ScriptCategory `json:"categories,omitempty"`
 	UpdatedAt  int64            `json:"updatedAt"`
+	Revision   int64            `json:"revision"`
 }
 
 type accountSummary struct {
@@ -122,6 +127,7 @@ func InitAccountStore(dataDir string) error {
 	}
 	store.mu.Lock()
 	store.cleanupExpiredSessionsLocked(time.Now().Unix())
+	store.migrateScriptRevisionsLocked()
 	if err := store.ensureDefaultAdminLocked(); err != nil {
 		store.mu.Unlock()
 		return err
@@ -133,6 +139,18 @@ func InitAccountStore(dataDir string) error {
 	store.mu.Unlock()
 	accountStore = store
 	return nil
+}
+
+func (s *AccountStore) migrateScriptRevisionsLocked() {
+	for username, scripts := range s.db.Scripts {
+		if scripts.Revision < 0 {
+			scripts.Revision = 0
+		}
+		if scripts.Revision == 0 && (scripts.UpdatedAt > 0 || len(scripts.Items) > 0 || len(scripts.Categories) > 0) {
+			scripts.Revision = 1
+		}
+		s.db.Scripts[username] = scripts
+	}
 }
 
 func (s *AccountStore) ensureMaps() {
@@ -563,6 +581,53 @@ func requireAccount(c *gin.Context) (string, bool) {
 	return username, true
 }
 
+// AuthenticatedAccount exposes the validated bookmark-account identity to
+// route middleware without exposing the session-store implementation.
+func AuthenticatedAccount(c *gin.Context) (string, bool) {
+	return currentAccount(c)
+}
+
+// MarkBasicAuthAuthenticated is called by the outer HTTP Basic Auth middleware
+// after credentials have been verified. It lets gateway routes accept either
+// the bookmark account session or the independently configured Basic Auth.
+func MarkBasicAuthAuthenticated(c *gin.Context) {
+	c.Set(basicAuthContextKey, true)
+}
+
+// RequireAccount reports whether outbound SSH/SFTP gateway operations require
+// either a bookmark-account session or the optional outer Basic Auth. The
+// safer policy is the default; legacy anonymous gateway access is opt-in.
+func RequireAccount() bool {
+	raw, exists := os.LookupEnv("WEBSSH_REQUIRE_ACCOUNT")
+	if !exists {
+		return true
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return true
+	}
+	return parsed
+}
+
+// GatewayAuth protects operations that can open an outbound SSH/SFTP channel.
+// Account authentication is enabled by default; deployments that deliberately
+// need the legacy anonymous gateway can opt out explicitly.
+func GatewayAuth() func(*gin.Context) bool {
+	return func(c *gin.Context) bool {
+		if !RequireAccount() {
+			return true
+		}
+		if value, ok := c.Get(basicAuthContextKey); ok && value == true {
+			return true
+		}
+		if _, ok := currentAccount(c); ok {
+			return true
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录书签账号"})
+		return false
+	}
+}
+
 func requireAdmin(c *gin.Context) (string, bool) {
 	username, ok := requireAccount(c)
 	if !ok {
@@ -623,7 +688,7 @@ func AuthRegister(c *gin.Context) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
@@ -681,7 +746,7 @@ func AuthLogin(c *gin.Context) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
@@ -739,7 +804,7 @@ func AuthChangePassword(c *gin.Context) {
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
@@ -860,7 +925,7 @@ func AdminCreateAccount(c *gin.Context) {
 		Password string `json:"password"`
 		IsAdmin  bool   `json:"isAdmin"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
@@ -915,7 +980,7 @@ func AdminUpdateAccount(c *gin.Context) {
 		Password string `json:"password"`
 		IsAdmin  *bool  `json:"isAdmin"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
@@ -1019,6 +1084,7 @@ func AdminDeleteAccount(c *gin.Context) {
 
 func sanitizeScriptBookmarks(items []ScriptBookmark) []ScriptBookmark {
 	out := make([]ScriptBookmark, 0, len(items))
+	seenIDs := make(map[string]int)
 	for _, item := range items {
 		name := strings.TrimSpace(item.Name)
 		cmd := strings.TrimSpace(item.Cmd)
@@ -1043,12 +1109,52 @@ func sanitizeScriptBookmarks(items []ScriptBookmark) []ScriptBookmark {
 		if lastUsed < 0 {
 			lastUsed = 0
 		}
-		out = append(out, ScriptBookmark{Name: name, Cmd: cmd, CategoryID: categoryID, UseCount: useCount, LastUsed: lastUsed})
+		id := strings.TrimSpace(item.ID)
+		if len([]rune(id)) > 80 {
+			id = string([]rune(id)[:80])
+		}
+		if id == "" {
+			id = stableScriptBookmarkID(name, cmd)
+		}
+		baseID := id
+		if _, exists := seenIDs[baseID]; exists {
+			for suffix := 2; ; suffix++ {
+				candidate := scriptBookmarkIDWithSuffix(baseID, suffix)
+				if _, exists := seenIDs[candidate]; !exists {
+					id = candidate
+					break
+				}
+			}
+		}
+		seenIDs[id] = 1
+		out = append(out, ScriptBookmark{ID: id, Name: name, Cmd: cmd, CategoryID: categoryID, UseCount: useCount, LastUsed: lastUsed})
 		if len(out) >= maxScriptBookmarks {
 			break
 		}
 	}
 	return out
+}
+
+func scriptBookmarkIDWithSuffix(base string, suffix int) string {
+	suffixText := "_" + strconv.Itoa(suffix)
+	baseRunes := []rune(base)
+	maxBaseRunes := 80 - len([]rune(suffixText))
+	if maxBaseRunes < 1 {
+		maxBaseRunes = 1
+	}
+	if len(baseRunes) > maxBaseRunes {
+		baseRunes = baseRunes[:maxBaseRunes]
+	}
+	return string(baseRunes) + suffixText
+}
+
+func stableScriptBookmarkID(name, cmd string) string {
+	var hash uint32 = 2166136261
+	for _, r := range name + "\x00" + cmd {
+		hash ^= uint32(r)
+		hash *= 16777619
+	}
+	return fmt.Sprintf("scr_legacy_%08x", hash)
 }
 
 func sanitizeScriptCategories(items []ScriptCategory) []ScriptCategory {
@@ -1110,12 +1216,19 @@ func sanitizeScriptUpdatedAt(updatedAt, now int64) int64 {
 	return updatedAt
 }
 
+func sanitizeScriptRevision(revision int64) int64 {
+	if revision < 0 {
+		return 0
+	}
+	return revision
+}
+
 func scriptsEqual(a, b []ScriptBookmark) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Cmd != b[i].Cmd || a[i].CategoryID != b[i].CategoryID || a[i].UseCount != b[i].UseCount || a[i].LastUsed != b[i].LastUsed {
+		if a[i].ID != b[i].ID || a[i].Name != b[i].Name || a[i].Cmd != b[i].Cmd || a[i].CategoryID != b[i].CategoryID || a[i].UseCount != b[i].UseCount || a[i].LastUsed != b[i].LastUsed {
 			return false
 		}
 	}
@@ -1134,6 +1247,17 @@ func scriptCategoriesEqual(a, b []ScriptCategory) bool {
 	return true
 }
 
+func scriptWorkspaceSize(items []ScriptBookmark, categories []ScriptCategory) int {
+	payload, err := json.Marshal(struct {
+		Items      []ScriptBookmark `json:"items"`
+		Categories []ScriptCategory `json:"categories"`
+	}{Items: items, Categories: categories})
+	if err != nil {
+		return maxScriptDataBytes + 1
+	}
+	return len(payload)
+}
+
 func GetScriptBookmarks(c *gin.Context) {
 	username, ok := requireAccount(c)
 	if !ok {
@@ -1141,17 +1265,26 @@ func GetScriptBookmarks(c *gin.Context) {
 	}
 	accountStore.mu.Lock()
 	scripts := accountStore.db.Scripts[username]
+	scripts.Items = append([]ScriptBookmark(nil), scripts.Items...)
+	scripts.Categories = append([]ScriptCategory(nil), scripts.Categories...)
 	accountStore.mu.Unlock()
 	scripts.Categories = sanitizeScriptCategories(scripts.Categories)
 	scripts.Items = sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(scripts.Items), scripts.Categories)
 	scripts.UpdatedAt = sanitizeScriptUpdatedAt(scripts.UpdatedAt, time.Now().UnixMilli())
+	scripts.Revision = sanitizeScriptRevision(scripts.Revision)
 	if scripts.Items == nil {
 		scripts.Items = []ScriptBookmark{}
 	}
 	if scripts.Categories == nil {
 		scripts.Categories = []ScriptCategory{}
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"scripts": scripts.Items, "categories": scripts.Categories, "updatedAt": scripts.UpdatedAt}})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{
+		"username":   username,
+		"scripts":    scripts.Items,
+		"categories": scripts.Categories,
+		"updatedAt":  scripts.UpdatedAt,
+		"revision":   scripts.Revision,
+	}})
 }
 
 func SyncScriptBookmarks(c *gin.Context) {
@@ -1160,13 +1293,24 @@ func SyncScriptBookmarks(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Scripts    []ScriptBookmark `json:"scripts"`
-		Categories []ScriptCategory `json:"categories"`
-		UpdatedAt  int64            `json:"updatedAt"`
-		Mode       string           `json:"mode"`
+		Scripts      []ScriptBookmark `json:"scripts"`
+		Categories   []ScriptCategory `json:"categories"`
+		UpdatedAt    int64            `json:"updatedAt"`
+		BaseRevision int64            `json:"baseRevision"`
+		Account      string           `json:"account"`
+		Mode         string           `json:"mode"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindStrictJSON(c, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(req.Account)) != username {
+		c.JSON(http.StatusConflict, gin.H{
+			"ok":   false,
+			"code": "account_changed",
+			"msg":  "the authenticated account changed; refresh and retry",
+			"data": gin.H{"username": username},
+		})
 		return
 	}
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))
@@ -1179,75 +1323,82 @@ func SyncScriptBookmarks(c *gin.Context) {
 	}
 	localCategories := sanitizeScriptCategories(req.Categories)
 	localItems := sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(req.Scripts), localCategories)
-	serverNow := time.Now().UnixMilli()
-	localUpdatedAt := sanitizeScriptUpdatedAt(req.UpdatedAt, serverNow)
+	if scriptWorkspaceSize(localItems, localCategories) > maxScriptDataBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"ok": false, "msg": "脚本书签数据超过 8 MiB 上限"})
+		return
+	}
+	baseRevision := sanitizeScriptRevision(req.BaseRevision)
 
 	accountStore.mu.Lock()
 	defer accountStore.mu.Unlock()
 
+	serverNow := time.Now().UnixMilli()
 	cloud := accountStore.db.Scripts[username]
 	cloud.Categories = sanitizeScriptCategories(cloud.Categories)
 	cloud.Items = sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(cloud.Items), cloud.Categories)
 	cloud.UpdatedAt = sanitizeScriptUpdatedAt(cloud.UpdatedAt, serverNow)
+	cloud.Revision = sanitizeScriptRevision(cloud.Revision)
 	if cloud.Items == nil {
 		cloud.Items = []ScriptBookmark{}
 	}
 	if cloud.Categories == nil {
 		cloud.Categories = []ScriptCategory{}
 	}
-	resultMode := "same"
-	result := cloud
+	writeResult := func(status int, ok bool, code, msg, resultMode string, result StoredScripts) {
+		c.JSON(status, gin.H{
+			"ok":   ok,
+			"code": code,
+			"msg":  msg,
+			"data": gin.H{
+				"username":   username,
+				"mode":       resultMode,
+				"scripts":    result.Items,
+				"categories": result.Categories,
+				"updatedAt":  result.UpdatedAt,
+				"revision":   result.Revision,
+				"count":      len(result.Items),
+			},
+		})
+	}
 
-	shouldPush := mode == "push" ||
-		(mode == "auto" && (localUpdatedAt > cloud.UpdatedAt || (cloud.UpdatedAt == 0 && (len(localItems) > 0 || len(localCategories) > 0))))
-	shouldPull := mode == "pull" || (mode == "auto" && cloud.UpdatedAt > localUpdatedAt)
+	if mode == "pull" {
+		writeResult(http.StatusOK, true, "", "同步完成", "pull", cloud)
+		return
+	}
 
-	if shouldPush {
-		now := serverNow
-		if localUpdatedAt > now {
-			now = localUpdatedAt
-		}
-		result = StoredScripts{Items: localItems, Categories: localCategories, UpdatedAt: now}
-		before := accountStore.snapshotLocked()
-		accountStore.db.Scripts[username] = result
-		if err := accountStore.saveLocked(); err != nil {
-			accountStore.restoreLocked(before)
-			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "云端书签保存失败"})
+	if baseRevision != cloud.Revision {
+		// A brand-new local workspace can safely adopt the existing cloud copy.
+		if baseRevision == 0 && len(localItems) == 0 && len(localCategories) == 0 && req.UpdatedAt == 0 {
+			writeResult(http.StatusOK, true, "", "同步完成", "pull", cloud)
 			return
 		}
-		resultMode = "push"
-	} else if shouldPull {
-		resultMode = "pull"
-	} else if mode == "auto" && (!scriptsEqual(localItems, cloud.Items) || !scriptCategoriesEqual(localCategories, cloud.Categories)) && localUpdatedAt == cloud.UpdatedAt {
-		now := time.Now().UnixMilli()
-		result = StoredScripts{Items: localItems, Categories: localCategories, UpdatedAt: now}
-		before := accountStore.snapshotLocked()
-		accountStore.db.Scripts[username] = result
-		if err := accountStore.saveLocked(); err != nil {
-			accountStore.restoreLocked(before)
-			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "云端书签保存失败"})
-			return
-		}
-		resultMode = "push"
+		writeResult(http.StatusConflict, false, "revision_conflict", "云端书签已被其他标签页或设备更新", "conflict", cloud)
+		return
 	}
 
-	if result.Items == nil {
-		result.Items = []ScriptBookmark{}
+	if scriptsEqual(localItems, cloud.Items) && scriptCategoriesEqual(localCategories, cloud.Categories) {
+		writeResult(http.StatusOK, true, "", "同步完成", "same", cloud)
+		return
 	}
-	if result.Categories == nil {
-		result.Categories = []ScriptCategory{}
+
+	now := serverNow
+	if now <= cloud.UpdatedAt {
+		now = cloud.UpdatedAt + 1
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"ok":  true,
-		"msg": "同步完成",
-		"data": gin.H{
-			"mode":       resultMode,
-			"scripts":    result.Items,
-			"categories": result.Categories,
-			"updatedAt":  result.UpdatedAt,
-			"count":      len(result.Items),
-		},
-	})
+	result := StoredScripts{
+		Items:      localItems,
+		Categories: localCategories,
+		UpdatedAt:  now,
+		Revision:   cloud.Revision + 1,
+	}
+	before := accountStore.snapshotLocked()
+	accountStore.db.Scripts[username] = result
+	if err := accountStore.saveLocked(); err != nil {
+		accountStore.restoreLocked(before)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "云端书签保存失败"})
+		return
+	}
+	writeResult(http.StatusOK, true, "", "同步完成", "push", result)
 }
 
 func sourceDir() string {
@@ -1375,6 +1526,7 @@ func updaterRunArgs(updaterName, hostDir, srcDir, image, script string) []string
 		"run", "-d",
 		"--name", updaterName,
 		"--label", "webssh.updater=true",
+		"--label", "webssh.updater.created=" + strconv.FormatInt(time.Now().Unix(), 10),
 		"--label", "com.docker.compose.project=" + updaterComposeProject,
 		"--label", "com.docker.compose.service=updater",
 		"--label", "com.docker.compose.oneoff=True",
@@ -1392,6 +1544,7 @@ func updaterRunArgs(updaterName, hostDir, srcDir, image, script string) []string
 func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	updateMu.Lock()
 	defer updateMu.Unlock()
+	cleanupStaleCreatedUpdateHelpers(ctx)
 	if running, err := runningUpdateHelper(ctx); err != nil {
 		return nil, err
 	} else if running != "" {
@@ -1445,6 +1598,9 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 		"if [ -f .env ]; then cp -a .env \"$BACKUP_DIR/.env.backup\"; chmod 600 \"$BACKUP_DIR/.env.backup\"; fi",
 		"find \"$BACKUP_DIR\" -type f -exec chmod 600 {} +",
 		"log \"backup saved to $BACKUP_DIR\"",
+		"find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +",
+		"BACKUP_COUNT=\"$(find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')\"",
+		"while [ \"$BACKUP_COUNT\" -gt 20 ]; do OLDEST=\"$(find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)\"; [ -n \"$OLDEST\" ] || break; rm -rf \"$OLDEST\"; BACKUP_COUNT=$((BACKUP_COUNT - 1)); done",
 		"log 'checking git repository'",
 		"git status --short || true",
 		"log 'fetch origin'",
@@ -1488,6 +1644,33 @@ func runningUpdateHelper(ctx context.Context) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func cleanupStaleCreatedUpdateHelpers(ctx context.Context) {
+	out, err := dockerOutput(ctx, "ps", "-a", "--filter", "label=webssh.updater=true", "--filter", "status=created", "--format", "{{.Names}}")
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for _, name := range strings.Fields(out) {
+		if !updaterRule.MatchString(name) {
+			continue
+		}
+		createdAt := time.Time{}
+		if raw, inspectErr := dockerOutput(ctx, "inspect", "-f", "{{ index .Config.Labels \"webssh.updater.created\" }}", name); inspectErr == nil {
+			if unixTime, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); parseErr == nil {
+				createdAt = time.Unix(unixTime, 0)
+			}
+		}
+		if createdAt.IsZero() {
+			if raw, inspectErr := dockerOutput(ctx, "inspect", "-f", "{{.Created}}", name); inspectErr == nil {
+				createdAt, _ = time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
+			}
+		}
+		if !createdAt.IsZero() && createdAt.Before(cutoff) {
+			_, _ = dockerOutput(ctx, "rm", name)
+		}
+	}
 }
 
 func cleanupFinishedUpdateHelpers(ctx context.Context) {
@@ -1649,10 +1832,13 @@ func AdminUpdate(c *gin.Context) {
 	if _, ok := requireAdmin(c); !ok {
 		return
 	}
-	var req struct {
+	var req *struct {
 		Force bool `json:"force"`
 	}
-	_ = c.ShouldBindJSON(&req)
+	if err := bindStrictJSON(c, &req); err != nil || req == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
+		return
+	}
 	info, err := readVersionInfo()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": err.Error()})

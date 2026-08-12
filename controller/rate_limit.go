@@ -40,12 +40,87 @@ func AllowRegistration() bool {
 func maxAccountCount() int   { return envPositiveInt("WEBSSH_MAX_ACCOUNTS", 200) }
 func maxActiveSessions() int { return envPositiveInt("WEBSSH_MAX_SESSIONS_PER_USER", 20) }
 
-func requestIP(c *gin.Context) string {
-	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-	if err == nil {
-		return host
+func parseRequestIP(raw string) net.IP {
+	raw = strings.TrimSpace(strings.Trim(raw, `"`))
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
 	}
-	return c.Request.RemoteAddr
+	raw = strings.Trim(raw, "[]")
+	return net.ParseIP(raw)
+}
+
+func trustedProxyNetworks() []*net.IPNet {
+	var networks []*net.IPNet
+	for _, raw := range strings.Split(os.Getenv("WEBSSH_TRUSTED_PROXIES"), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(raw); err == nil {
+			networks = append(networks, network)
+			continue
+		}
+		if ip := net.ParseIP(raw); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				ip = ip.To4()
+				bits = 32
+			}
+			networks = append(networks, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+		}
+	}
+	return networks
+}
+
+func trustedProxyIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, network := range trustedProxyNetworks() {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardedIPs(raw string) ([]net.IP, bool) {
+	parts := strings.Split(raw, ",")
+	ips := make([]net.IP, 0, len(parts))
+	for _, part := range parts {
+		ip := parseRequestIP(part)
+		if ip == nil {
+			return nil, false
+		}
+		ips = append(ips, ip)
+	}
+	return ips, len(ips) > 0
+}
+
+func requestIP(c *gin.Context) string {
+	peer := parseRequestIP(c.Request.RemoteAddr)
+	if peer == nil {
+		return strings.TrimSpace(c.Request.RemoteAddr)
+	}
+	if !trustedProxyIP(peer) {
+		return peer.String()
+	}
+
+	if rawForwarded := strings.TrimSpace(c.GetHeader("X-Forwarded-For")); rawForwarded != "" {
+		if chain, ok := forwardedIPs(rawForwarded); ok {
+			client := peer
+			for i := len(chain) - 1; i >= 0 && trustedProxyIP(client); i-- {
+				client = chain[i]
+			}
+			return client.String()
+		}
+		// A malformed chain is not partially trusted.
+		return peer.String()
+	}
+	if realIP := parseRequestIP(c.GetHeader("X-Real-IP")); realIP != nil {
+		return realIP.String()
+	}
+	return peer.String()
 }
 
 func allowAuthAttempt(c *gin.Context, kind string, limit int, window time.Duration) bool {
@@ -83,4 +158,12 @@ func allowAuthAttempt(c *gin.Context, kind string, limit int, window time.Durati
 		return false
 	}
 	return true
+}
+
+func AllowBasicAuthAttempt(c *gin.Context) bool {
+	if allowAuthAttempt(c, "basic-auth", 30, 5*time.Minute) {
+		return true
+	}
+	c.Abort()
+	return false
 }

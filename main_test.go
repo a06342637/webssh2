@@ -126,3 +126,41 @@ func TestTerminalPreconnectHTML(t *testing.T) {
 		t.Fatalf("disabled direct endpoint produced a preconnect hint: %s", got)
 	}
 }
+
+func TestRuntimeConfigIncludesPasswordPersistencePolicy(t *testing.T) {
+	originalSavePass, originalShowFooter := savePass, showFooter
+	t.Cleanup(func() {
+		savePass, showFooter = originalSavePass, originalShowFooter
+	})
+	savePass = false
+	showFooter = true
+	t.Setenv("WEBSSH_ALLOW_REGISTRATION", "false")
+	t.Setenv("WEBSSH_ALLOW_LEGACY_PATH_LOGIN", "true")
+	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "false")
+
+	config := runtimeConfig()
+	if got, ok := config["savePass"].(bool); !ok || got {
+		t.Fatalf("runtime config savePass = %#v, want false", config["savePass"])
+	}
+	if got, ok := config["showFooter"].(bool); !ok || !got {
+		t.Fatalf("runtime config showFooter = %#v, want true", config["showFooter"])
+	}
+	if got, ok := config["allowLegacyPathLogin"].(bool); !ok || !got {
+		t.Fatalf("runtime config allowLegacyPathLogin = %#v, want true", config["allowLegacyPathLogin"])
+	}
+	if got, ok := config["requireAccount"].(bool); !ok || got {
+		t.Fatalf("runtime config requireAccount = %#v, want false", config["requireAccount"])
+	}
+}
+
+func TestNoStoreResponsesMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(noStoreResponses())
+	router.GET("/api/test", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/test", nil))
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}

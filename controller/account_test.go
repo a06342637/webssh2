@@ -41,6 +41,23 @@ func installTestAccountStore(t *testing.T) string {
 
 func performAccountJSON(t *testing.T, handler gin.HandlerFunc, method, target string, body any, token string) *httptest.ResponseRecorder {
 	t.Helper()
+	if target == "/api/scripts/sync" {
+		if values, ok := body.(map[string]any); ok {
+			cloned := make(map[string]any, len(values)+2)
+			for key, value := range values {
+				cloned[key] = value
+			}
+			if _, exists := cloned["account"]; !exists && accountStore != nil {
+				if session, found := accountStore.db.Sessions[token]; found {
+					cloned["account"] = session.Username
+					if _, hasRevision := cloned["baseRevision"]; !hasRevision {
+						cloned["baseRevision"] = accountStore.db.Scripts[session.Username].Revision
+					}
+				}
+			}
+			body = cloned
+		}
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +123,85 @@ func TestSyncScriptBookmarksRejectsInvalidMode(t *testing.T) {
 	}
 }
 
+func TestAdminUpdateRejectsMalformedJSONAndCrossOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token := installTestAccountStore(t)
+	router := gin.New()
+	router.POST("/api/admin/update", SameOriginOnly(), AdminUpdate)
+
+	request := func(body, origin string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://webssh.example/api/admin/update", strings.NewReader(body))
+		req.Host = "webssh.example"
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	if recorder := request(`{"force":`, "http://webssh.example"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("malformed JSON returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := request(`null`, "http://webssh.example"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("null JSON returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := request(`{"force":false} {}`, "http://webssh.example"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := request(`{"force":true}`, "https://evil.example"); recorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin update returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLoginRejectsCrossOriginAndNonJSONRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	installTestAccountStore(t)
+	router := gin.New()
+	router.POST("/api/auth/login", SameOriginOnly(), AuthLogin)
+
+	request := func(contentType, origin string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "https://webssh.example/api/auth/login", strings.NewReader(`{"username":"admin","password":"password"}`))
+		req.Host = "webssh.example"
+		req.Header.Set("Content-Type", contentType)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	if recorder := request("application/json", "https://evil.example"); recorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin login returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := request("text/plain", "https://webssh.example"); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("text/plain login returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSyncScriptBookmarksRejectsOversizedWorkspace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token := installTestAccountStore(t)
+	command := strings.Repeat("x", 20000)
+	items := make([]ScriptBookmark, maxScriptBookmarks)
+	for i := range items {
+		items[i] = ScriptBookmark{Name: "large", Cmd: command}
+	}
+	recorder := performAccountJSON(t, SyncScriptBookmarks, http.MethodPost, "/api/scripts/sync", map[string]any{
+		"mode":    "push",
+		"scripts": items,
+	}, token)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized script workspace returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, exists := accountStore.db.Scripts["admin"]; exists {
+		t.Fatal("oversized script workspace mutated storage")
+	}
+}
+
 func TestSyncScriptBookmarksCleansOrphansAndFutureClock(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	token := installTestAccountStore(t)
@@ -132,6 +228,75 @@ func TestSyncScriptBookmarksCleansOrphansAndFutureClock(t *testing.T) {
 	}
 	if stored.UpdatedAt > time.Now().Add(time.Second).UnixMilli() {
 		t.Fatalf("future timestamp remained in storage: %d", stored.UpdatedAt)
+	}
+}
+
+func TestGatewayAuthPolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token := installTestAccountStore(t)
+
+	request := func(withSession, withBasic bool) (*httptest.ResponseRecorder, bool) {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, "/term", nil)
+		if withSession {
+			context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		}
+		if withBasic {
+			MarkBasicAuthAuthenticated(context)
+		}
+		allowed := GatewayAuth()(context)
+		return recorder, allowed
+	}
+
+	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "true")
+	if recorder, allowed := request(false, false); allowed || recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous gateway request returned %d", recorder.Code)
+	}
+	if _, allowed := request(true, false); !allowed {
+		t.Fatal("account session gateway request was rejected")
+	}
+	if _, allowed := request(false, true); !allowed {
+		t.Fatal("Basic Auth gateway request was rejected")
+	}
+
+	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "false")
+	if _, allowed := request(false, false); !allowed {
+		t.Fatal("explicit anonymous gateway request was rejected")
+	}
+
+	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "invalid")
+	if !RequireAccount() {
+		t.Fatal("invalid account policy weakened the secure default")
+	}
+}
+
+func TestStableScriptBookmarkIDMatchesLegacyShape(t *testing.T) {
+	first := stableScriptBookmarkID("重启", "systemctl reboot")
+	second := stableScriptBookmarkID("重启", "systemctl reboot")
+	if first != second || !strings.HasPrefix(first, "scr_legacy_") || len(first) != len("scr_legacy_")+8 {
+		t.Fatalf("unexpected stable script id: %q / %q", first, second)
+	}
+	if first == stableScriptBookmarkID("重启", "systemctl poweroff") {
+		t.Fatal("different commands produced the same deterministic test id")
+	}
+}
+
+func TestSanitizeScriptBookmarksMakesDuplicateIDsUnique(t *testing.T) {
+	items := sanitizeScriptBookmarks([]ScriptBookmark{
+		{ID: "same", Name: "one", Cmd: "true"},
+		{ID: "same", Name: "two", Cmd: "false"},
+		{ID: "same_2", Name: "three", Cmd: "whoami"},
+	})
+	seen := map[string]bool{}
+	for _, item := range items {
+		if seen[item.ID] {
+			t.Fatalf("duplicate script ID remained: %#v", items)
+		}
+		seen[item.ID] = true
+	}
+	if len(items) != 3 || items[0].ID != "same" {
+		t.Fatalf("duplicate script IDs were not repaired: %#v", items)
 	}
 }
 

@@ -11,3 +11,9 @@ services:
         value: "admin"
       - key: WEBSSH_ADMIN_PASSWORD
         sync: false
+      - key: WEBSSH_REQUIRE_ACCOUNT
+        value: "true"
+    disk:
+      name: webssh-data
+      mountPath: /app/data
+      sizeGB: 1

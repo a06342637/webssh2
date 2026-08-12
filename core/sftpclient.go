@@ -1,9 +1,14 @@
 package core
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
+	pathpkg "path"
 
 	"github.com/pkg/sftp"
 )
@@ -33,30 +38,77 @@ func (sclient *SSHClient) Download(srcPath string) (*sftp.File, error) {
 	return sclient.Sftp.Open(srcPath)
 }
 
-func (sclient *SSHClient) Upload(file multipart.File, id, dstPath string) error {
-	dstFile, err := sclient.Sftp.Create(dstPath)
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.r.Read(p)
+	}
+}
+
+func (sclient *SSHClient) Upload(ctx context.Context, file multipart.File, id, dstPath string) error {
+	dir := pathpkg.Dir(dstPath)
+	randomBytes := make([]byte, 12)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return fmt.Errorf("create upload temp name: %w", err)
+	}
+	tmpPath := pathpkg.Join(dir, ".webssh-upload-"+hex.EncodeToString(randomBytes)+".tmp")
+	dstFile, err := sclient.Sftp.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
-	wc := &WriteCounter{Id: id}
-	WcMu.Lock()
-	WcList = append(WcList, wc)
-	WcMu.Unlock()
+	committed := false
 	defer func() {
-		WcMu.Lock()
-		defer WcMu.Unlock()
-		if len(WcList) < 2 {
-			WcList = nil
-		} else {
-			for i := 0; i < len(WcList); i++ {
-				if WcList[i].Id == id {
-					WcList = append(WcList[:i], WcList[i+1:]...)
-					break
-				}
-			}
+		_ = dstFile.Close()
+		if !committed {
+			_ = sclient.Sftp.Remove(tmpPath)
 		}
 	}()
-	_, err = io.Copy(dstFile, io.TeeReader(file, wc))
-	return err
+	wc := &WriteCounter{Id: id}
+	tracked := id != "" && len(id) <= 128
+	if tracked {
+		WcMu.Lock()
+		if _, exists := WcMap[id]; exists {
+			tracked = false
+		} else {
+			WcMap[id] = wc
+		}
+		WcMu.Unlock()
+	}
+	if tracked {
+		defer func() {
+			WcMu.Lock()
+			if WcMap[id] == wc {
+				delete(WcMap, id)
+			}
+			WcMu.Unlock()
+		}()
+	}
+	if _, err = io.Copy(dstFile, io.TeeReader(contextReader{ctx: ctx, r: file}, wc)); err != nil {
+		return err
+	}
+	if err := dstFile.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := replaceSFTPFile(sclient.Sftp, tmpPath, dstPath); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func replaceSFTPFile(client *sftp.Client, oldPath, newPath string) error {
+	if err := client.PosixRename(oldPath, newPath); err == nil {
+		return nil
+	}
+	return client.Rename(oldPath, newPath)
 }

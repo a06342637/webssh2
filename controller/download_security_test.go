@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestRemoteIPBlocked(t *testing.T) {
@@ -32,6 +34,26 @@ func TestRemoteIPBlocked(t *testing.T) {
 				t.Fatalf("remoteIPBlocked(%s) = %v, want %v", test.ip, got, test.blocked)
 			}
 		})
+	}
+}
+
+func TestRemoteDownloadRequestInheritsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := newRemoteDownloadRequest(ctx, "https://example.com/archive.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "webssh-remote-download/1.0" {
+		t.Fatalf("unexpected User-Agent %q", got)
+	}
+	cancel()
+	select {
+	case <-req.Context().Done():
+		if !errors.Is(req.Context().Err(), context.Canceled) {
+			t.Fatalf("request context error = %v", req.Context().Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request did not observe parent cancellation")
 	}
 }
 

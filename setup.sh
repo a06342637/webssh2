@@ -66,6 +66,16 @@ while :; do
     echo "  端口必须是 1-65535 之间的整数。"
 done
 
+echo ""
+echo "  默认只监听 127.0.0.1，适合放在 Nginx/Caddy HTTPS 反向代理后。"
+printf "是否允许通过服务器 IP 直接访问？(y=监听所有网卡  [回车]=仅本机): "
+IFS= read -r PUBLIC_BIND_INPUT
+if [ "$PUBLIC_BIND_INPUT" = "y" ] || [ "$PUBLIC_BIND_INPUT" = "Y" ]; then
+    BIND_ADDRESS=0.0.0.0
+else
+    BIND_ADDRESS=127.0.0.1
+fi
+
 # ── 2. 页脚 ──────────────────────────────────────────────────────────────────
 echo ""
 printf "是否显示底部版权页脚？([回车]=显示  n=不显示): "
@@ -160,19 +170,41 @@ done
 echo ""
 echo "  [页面内更新说明] 启用后管理员可以在设置里执行 git pull + docker compose up -d --build。"
 echo "  该功能需要 Docker Compose 部署，并会挂载当前源码目录和 Docker socket。"
-printf "是否启用页面内版本更新？([回车]=启用  n=禁用): "
+printf "是否启用页面内版本更新？(y=启用  [回车]=禁用): "
 IFS= read -r UPDATE_INPUT
-if [ "$UPDATE_INPUT" = "n" ] || [ "$UPDATE_INPUT" = "N" ]; then
-    ENABLE_SELF_UPDATE=false
-else
+if [ "$UPDATE_INPUT" = "y" ] || [ "$UPDATE_INPUT" = "Y" ]; then
     ENABLE_SELF_UPDATE=true
+else
+    ENABLE_SELF_UPDATE=false
 fi
 
 HOST_PROJECT_DIR=$(pwd -P 2>/dev/null || pwd)
 
 # ── 写入 .env ─────────────────────────────────────────────────────────────────
+ENV_TMP=$(mktemp ./.env.webssh.XXXXXX)
+cleanup_env_tmp() {
+    if [ -n "${ENV_TMP:-}" ] && [ -f "$ENV_TMP" ]; then
+        rm -f "$ENV_TMP"
+    fi
+}
+trap cleanup_env_tmp 0 1 2 15
+
+ENV_BACKUP=""
+if [ -f .env ]; then
+    ENV_BACKUP=".env.backup.$(date +%Y%m%d-%H%M%S).$$"
+    cp -p .env "$ENV_BACKUP"
+    chmod 600 "$ENV_BACKUP"
+fi
+
 {
+    if [ -f .env ]; then
+        awk '
+            /^[[:space:]]*(PORT|BIND_ADDRESS|SHOW_FOOTER|WEBSSH_ADMIN_USER|WEBSSH_ADMIN_PASSWORD|WEBSSH_ENABLE_SELF_UPDATE|WEBSSH_HOST_PROJECT_DIR|COMPOSE_FILE|AUTH_INFO)[[:space:]]*=/ { next }
+            { print }
+        ' .env
+    fi
     printf 'PORT=%s\n' "$PORT_INPUT"
+    printf 'BIND_ADDRESS=%s\n' "$BIND_ADDRESS"
     printf 'SHOW_FOOTER=%s\n' "$SHOW_FOOTER"
     printf "WEBSSH_ADMIN_USER='%s'\n" "$(escape_dotenv_value "$ADMIN_USER")"
     printf "WEBSSH_ADMIN_PASSWORD='%s'\n" "$(escape_dotenv_value "$ADMIN_PASS")"
@@ -186,11 +218,17 @@ HOST_PROJECT_DIR=$(pwd -P 2>/dev/null || pwd)
     if [ -n "$AUTH_INFO" ]; then
         printf "AUTH_INFO='%s'\n" "$(escape_dotenv_value "$AUTH_INFO")"
     fi
-} > .env
-chmod 600 .env
+} > "$ENV_TMP"
+chmod 600 "$ENV_TMP"
+mv "$ENV_TMP" .env
+ENV_TMP=""
+trap - 0 1 2 15
 
 echo ""
 echo "✅ 配置已写入 .env"
+if [ -n "$ENV_BACKUP" ]; then
+    echo "🧰 原配置已备份到 ${ENV_BACKUP}，未识别的自定义键已保留。"
+fi
 if [ -z "$ADMIN_PASS" ]; then
     echo "🔐 书签管理员密码将自动生成；首次启动后运行下面命令查看："
     echo "   docker compose logs webssh | grep -A8 \"WebSSH 管理员账号\""
@@ -225,7 +263,13 @@ if [ "$HOST_IPV6_AVAILABLE" = "true" ] && ! container_has_usable_ipv6; then
 fi
 
 echo ""
-echo "🌐 启动成功！浏览器打开: http://你的服务器IP:${PORT_INPUT}"
+if [ "$BIND_ADDRESS" = "127.0.0.1" ]; then
+    echo "🌐 启动成功！服务仅监听本机: http://127.0.0.1:${PORT_INPUT}"
+    echo "   请通过 Nginx/Caddy 配置 HTTPS 反向代理后访问。"
+else
+    echo "🌐 启动成功！浏览器打开: http://你的服务器IP:${PORT_INPUT}"
+    echo "⚠️  公网使用时请尽快配置 HTTPS/WSS；HTTP 会明文传输 Web 登录和 SSH 凭据。"
+fi
 if [ -z "$ADMIN_PASS" ]; then
     echo "🔐 随机书签管理员密码查看命令: docker compose logs webssh | grep -A8 \"WebSSH 管理员账号\""
 fi

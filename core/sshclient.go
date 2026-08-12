@@ -174,7 +174,7 @@ func (sclient *SSHClient) GenerateClient() error {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("WEBSSH_ALLOW_LEGACY_CIPHERS")), "true") {
 		config.Ciphers = append(config.Ciphers, "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc")
 	}
-	hostKeyCheck, err = hostKeyCallbackWithDecision(sclient.HostKeyAction, sclient.HostKeyFingerprint)
+	hostKeyCheck, err = hostKeyCallbackForScope(sclient.TrustScope, sclient.HostKeyAction, sclient.HostKeyFingerprint)
 	if err != nil {
 		return err
 	}
@@ -235,6 +235,15 @@ func (sclient *SSHClient) GenerateClient() error {
 	return nil
 }
 
+func (sclient *SSHClient) WriteWebSocketMessage(ws *websocket.Conn, messageType int, data []byte) error {
+	if sclient.wsWriteMu == nil {
+		sclient.wsWriteMu = &sync.Mutex{}
+	}
+	sclient.wsWriteMu.Lock()
+	defer sclient.wsWriteMu.Unlock()
+	return ws.WriteMessage(messageType, data)
+}
+
 func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHClient {
 	sshSession, err := sclient.Client.NewSession()
 	if err != nil {
@@ -276,12 +285,41 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 }
 
 func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, closeTip string) {
-	stopCh := make(chan struct{})
+	session := sclient.Session
+	stdinPipe := sclient.StdinPipe
+	if session == nil || stdinPipe == nil {
+		_ = ws.Close()
+		sclient.Close()
+		return
+	}
+	writeMu := sclient.wsWriteMu
+	if writeMu == nil {
+		writeMu = &sync.Mutex{}
+		sclient.wsWriteMu = writeMu
+	}
+
+	type stopReason uint8
+	const (
+		stopWebSocket stopReason = iota + 1
+		stopSSHSession
+		stopTimeout
+	)
+	stopCh := make(chan stopReason, 1)
+	signalStop := func(reason stopReason) {
+		select {
+		case stopCh <- reason:
+		default:
+		}
+	}
+
+	var workers sync.WaitGroup
+	workers.Add(2)
 	go func() {
+		defer workers.Done()
 		for {
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
-				close(stopCh)
+				signalStop(stopWebSocket)
 				return
 			}
 			// Keystrokes arrive as binary frames and are written through untouched;
@@ -303,25 +341,38 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 					if rows <= 0 || cols <= 0 || rows > 1000 || cols > 1000 {
 						continue
 					}
-					err := sclient.Session.WindowChange(rows, cols)
+					err := session.WindowChange(rows, cols)
 					if err != nil {
 						log.Println(err)
-						close(stopCh)
+						signalStop(stopSSHSession)
 						return
 					}
 					continue
 				}
 			}
-			err = writeAll(sclient.StdinPipe, p)
+			err = writeAll(stdinPipe, p)
 			if err != nil {
-				close(stopCh)
+				signalStop(stopSSHSession)
 				return
 			}
 		}
 	}()
+	go func() {
+		defer workers.Done()
+		// Shell() starts a remote command. Wait is the only reliable signal that
+		// the remote shell exited; without it the WebSocket reader can remain
+		// blocked forever after the SSH channel has already ended.
+		_ = session.Wait()
+		signalStop(stopSSHSession)
+	}()
 
 	defer func() {
-		ws.Close()
+		_ = ws.Close()
+		_ = stdinPipe.Close()
+		_ = session.Close()
+		// Closing both transports unblocks ReadMessage, writes to stdin and
+		// Session.Wait. Join the workers before niling the SSHClient fields.
+		workers.Wait()
 		sclient.Close()
 		if err := recover(); err != nil {
 			log.Println(err)
@@ -331,18 +382,18 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 	stopTimer := time.NewTimer(timeout)
 	defer stopTimer.Stop()
 
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-stopTimer.C:
-			if sclient.wsWriteMu == nil {
-				sclient.wsWriteMu = &sync.Mutex{}
-			}
-			sclient.wsWriteMu.Lock()
+	var reason stopReason
+	select {
+	case reason = <-stopCh:
+	case <-stopTimer.C:
+		reason = stopTimeout
+	}
+	if reason == stopTimeout {
+		// The timeout path must not wait behind a stalled terminal-output write.
+		// The notice is best effort; closing the socket below is authoritative.
+		if writeMu.TryLock() {
 			_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\033[33m%s\033[0m", closeTip)))
-			sclient.wsWriteMu.Unlock()
-			return
+			writeMu.Unlock()
 		}
 	}
 }

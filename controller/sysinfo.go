@@ -2,16 +2,95 @@ package controller
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-	"webssh/core"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 )
+
+const (
+	sysInfoCommandTimeout = 12 * time.Second
+	sysInfoOutputLimit    = 1 << 20
+)
+
+var errSysInfoOutputLimit = errors.New("system information output exceeded limit")
+
+type boundedSSHOutput struct {
+	sync.Mutex
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+	limitHit chan struct{}
+	once     sync.Once
+}
+
+func newBoundedSSHOutput(limit int) *boundedSSHOutput {
+	return &boundedSSHOutput{limit: limit, limitHit: make(chan struct{})}
+}
+
+func (w *boundedSSHOutput) Write(p []byte) (int, error) {
+	w.Lock()
+	defer w.Unlock()
+	remaining := w.limit - w.buffer.Len()
+	overflow := len(p) > remaining
+	if remaining > 0 {
+		if len(p) < remaining {
+			remaining = len(p)
+		}
+		_, _ = w.buffer.Write(p[:remaining])
+	}
+	if overflow {
+		w.exceeded = true
+		w.once.Do(func() { close(w.limitHit) })
+	}
+	return len(p), nil
+}
+
+func (w *boundedSSHOutput) Bytes() []byte {
+	w.Lock()
+	defer w.Unlock()
+	return append([]byte(nil), w.buffer.Bytes()...)
+}
+
+func (w *boundedSSHOutput) Exceeded() bool {
+	w.Lock()
+	defer w.Unlock()
+	return w.exceeded
+}
+
+func runSSHCommandBounded(ctx context.Context, session *ssh.Session, command string, limit int) ([]byte, error) {
+	output := newBoundedSSHOutput(limit)
+	session.Stdout = output
+	session.Stderr = output
+	if err := session.Start(command); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Wait() }()
+
+	select {
+	case err := <-done:
+		if output.Exceeded() {
+			return nil, errSysInfoOutputLimit
+		}
+		return output.Bytes(), err
+	case <-output.limitHit:
+		_ = session.Close()
+		return nil, errSysInfoOutputLimit
+	case <-ctx.Done():
+		_ = session.Close()
+		return nil, ctx.Err()
+	}
+}
 
 func SysInfo(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
@@ -22,7 +101,13 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, sshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -85,9 +170,17 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`echo "===END==="`,
 	}, "; ")
 
-	out, err := session.CombinedOutput(cmd)
+	commandContext, cancel := context.WithTimeout(c.Request.Context(), sysInfoCommandTimeout)
+	defer cancel()
+	out, err := runSSHCommandBounded(commandContext, session, cmd, sysInfoOutputLimit)
 	if err != nil {
-		responseBody.Msg = fmt.Sprintf("command error: %v", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			responseBody.Msg = "system information command timed out"
+		} else if errors.Is(err, errSysInfoOutputLimit) {
+			responseBody.Msg = errSysInfoOutputLimit.Error()
+		} else {
+			responseBody.Msg = fmt.Sprintf("command error: %v", err)
+		}
 		return &responseBody
 	}
 
@@ -105,6 +198,12 @@ type netSnapshot struct {
 func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
 
 	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -123,7 +222,7 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	_ = wsConn.SetReadDeadline(time.Time{})
 	sshInfo := string(initMsg)
 
-	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	sshClient, err := decodeSSHClient(c, sshInfo)
 	if err != nil {
 		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
@@ -152,6 +251,8 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	}
 
 	done := make(chan struct{})
+	streamFinished := make(chan struct{})
+	defer close(streamFinished)
 	go func() {
 		defer close(done)
 		for {
@@ -168,12 +269,19 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	go func() {
+		select {
+		case <-done:
+			_ = session.Close()
+		case <-streamFinished:
+		}
+	}()
 
 	var prev *netSnapshot
 	var snap *netSnapshot
 	mode := ""
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 4096), 64*1024)
 
 	flush := func() bool {
 		if snap == nil || len(snap.counters) == 0 {

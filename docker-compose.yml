@@ -4,7 +4,7 @@ services:
     container_name: webssh
     restart: unless-stopped
     ports:
-      - "${PORT:-8008}:${PORT:-8008}"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8008}:${PORT:-8008}"
     environment:
       - port=${PORT:-8008}
       - savePass=${SAVE_PASS:-true}
@@ -13,7 +13,8 @@ services:
       - WEBSSH_ADMIN_USER=${WEBSSH_ADMIN_USER:-admin}
       - WEBSSH_ADMIN_PASSWORD=${WEBSSH_ADMIN_PASSWORD:-}
       - WEBSSH_ADMIN_RESET=${WEBSSH_ADMIN_RESET:-false}
-      - WEBSSH_ENABLE_SELF_UPDATE=${WEBSSH_ENABLE_SELF_UPDATE:-true}
+      - WEBSSH_REQUIRE_ACCOUNT=${WEBSSH_REQUIRE_ACCOUNT:-true}
+      - WEBSSH_ENABLE_SELF_UPDATE=${WEBSSH_ENABLE_SELF_UPDATE:-false}
       - WEBSSH_TERMINAL_WS_URL=${WEBSSH_TERMINAL_WS_URL:-}
       # Uncomment to enable basic auth for the web UI:
       # - authInfo=admin:your_password

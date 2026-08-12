@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,19 @@ func TestUpdaterRunArgsKeepsIdentifyingLabel(t *testing.T) {
 		}
 	}
 	t.Fatal("webssh.updater=true label is missing; status polling and cleanup would lose track of the helper")
+}
+
+func TestUpdaterRunArgsIncludesCreationTimestamp(t *testing.T) {
+	args := updaterRunArgs("webssh-updater-1", "/root/webssh2", "/app/source", "webssh2-webssh", "echo hi")
+	for _, label := range findFlagValues(args, "--label") {
+		if strings.HasPrefix(label, "webssh.updater.created=") {
+			if _, err := strconv.ParseInt(strings.TrimPrefix(label, "webssh.updater.created="), 10, 64); err != nil {
+				t.Fatalf("invalid updater creation timestamp: %q", label)
+			}
+			return
+		}
+	}
+	t.Fatal("webssh.updater.created label is missing")
 }
 
 func TestUpdaterRunArgsOrderAndPayload(t *testing.T) {

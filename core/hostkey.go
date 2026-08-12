@@ -1,10 +1,13 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +17,8 @@ import (
 )
 
 var knownHostsMu sync.Mutex
+
+var trustScopeRule = regexp.MustCompile(`^[a-fA-F0-9]{32,128}$`)
 
 const (
 	hostKeyActionTrustOnce = "once"
@@ -53,6 +58,18 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 func hostKeyCallbackWithDecision(action, confirmedFingerprint string) (ssh.HostKeyCallback, error) {
+	return hostKeyCallbackForScope("", action, confirmedFingerprint)
+}
+
+func NormalizeTrustScope(scope string) (string, error) {
+	scope = strings.ReplaceAll(strings.TrimSpace(scope), "-", "")
+	if !trustScopeRule.MatchString(scope) {
+		return "", fmt.Errorf("invalid SSH trust scope")
+	}
+	return strings.ToLower(scope), nil
+}
+
+func hostKeyCallbackForScope(scope, action, confirmedFingerprint string) (ssh.HostKeyCallback, error) {
 	policy := strings.ToLower(strings.TrimSpace(os.Getenv("WEBSSH_HOST_KEY_POLICY")))
 	if policy == "" {
 		policy = "tofu"
@@ -84,6 +101,21 @@ func hostKeyCallbackWithDecision(action, confirmedFingerprint string) (ssh.HostK
 			return nil, err
 		}
 		return knownhosts.New(knownHostsPath)
+	}
+	if strings.TrimSpace(scope) != "" {
+		normalizedScope, err := NormalizeTrustScope(scope)
+		if err != nil {
+			return nil, err
+		}
+		trustDir := filepath.Join(dataDir, "known_hosts.d")
+		if err := os.MkdirAll(trustDir, 0700); err != nil {
+			return nil, fmt.Errorf("create scoped SSH trust directory: %w", err)
+		}
+		if err := os.Chmod(trustDir, 0700); err != nil {
+			return nil, fmt.Errorf("secure scoped SSH trust directory: %w", err)
+		}
+		digest := sha256.Sum256([]byte(normalizedScope))
+		knownHostsPath = filepath.Join(trustDir, hex.EncodeToString(digest[:])+".known_hosts")
 	}
 	if err := ensureKnownHostsFile(knownHostsPath, true); err != nil {
 		return nil, err

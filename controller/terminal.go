@@ -9,6 +9,7 @@ import (
 	"webssh/core"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 const terminalControlPrefix = "__WEBSSH_CONTROL__:"
@@ -31,6 +32,23 @@ type terminalHostKeyMismatchMessage struct {
 	Reason    string             `json:"reason,omitempty"`
 }
 
+type terminalControlMessage struct {
+	Type string `json:"type"`
+}
+
+func writeTerminalControlMessage(sshClient *core.SSHClient, wsConn interface {
+	WriteMessage(messageType int, data []byte) error
+}, messageType string) error {
+	payload, err := json.Marshal(terminalControlMessage{Type: messageType})
+	if err != nil {
+		return err
+	}
+	if clientWS, ok := wsConn.(*websocket.Conn); ok {
+		return sshClient.WriteWebSocketMessage(clientWS, websocket.TextMessage, append([]byte(terminalControlPrefix), payload...))
+	}
+	return wsConn.WriteMessage(websocket.TextMessage, append([]byte(terminalControlPrefix), payload...))
+}
+
 func writeHostKeyMismatchMessage(wsConn interface {
 	WriteMessage(messageType int, data []byte) error
 }, sshClient core.SSHClient, mismatch *core.HostKeyMismatchError) error {
@@ -51,6 +69,12 @@ func writeHostKeyMismatchMessage(wsConn interface {
 func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
 
 	cols := c.DefaultQuery("cols", "150")
 	rows := c.DefaultQuery("rows", "35")
@@ -77,9 +101,13 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		return &responseBody
 	}
 	_ = wsConn.SetReadDeadline(time.Time{})
+	// The small limit above protects the one-time credential/config payload.
+	// Terminal frames have a separate bounded limit so a paste larger than
+	// 128 KiB does not inherit the handshake limit and disconnect the session.
+	wsConn.SetReadLimit(websocketTerminalInputLimit)
 
 	sshInfo := string(initMsg)
-	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	sshClient, err := decodeSSHClient(c, sshInfo)
 	if err != nil {
 		wsConn.WriteMessage(1, []byte("\033[31mSSH info parse error: "+err.Error()+"\033[0m"))
 		wsConn.Close()
@@ -106,6 +134,12 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		wsConn.Close()
 		sshClient.Close()
 		responseBody.Msg = "terminal initialization failed"
+		return &responseBody
+	}
+	if err := writeTerminalControlMessage(&sshClient, wsConn, "connection-ready"); err != nil {
+		wsConn.Close()
+		sshClient.Close()
+		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	sshClient.Connect(wsConn, timeout, closeTip)

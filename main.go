@@ -172,6 +172,28 @@ func terminalPreconnectHTML() string {
 	)
 }
 
+func runtimeConfig() gin.H {
+	return gin.H{
+		"showFooter":           showFooter,
+		"allowRegistration":    controller.AllowRegistration(),
+		"savePass":             savePass,
+		"requireAccount":       controller.RequireAccount(),
+		"allowLegacyPathLogin": envBool("WEBSSH_ALLOW_LEGACY_PATH_LOGIN", false),
+	}
+}
+
+func envBool(name string, fallback bool) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 func main() {
 	configureRuntime()
 	gin.SetMode(gin.ReleaseMode)
@@ -179,6 +201,7 @@ func main() {
 	server.Use(gin.Recovery())
 	server.SetTrustedProxies(nil)
 	server.Use(securityHeaders())
+	server.Use(controller.EnsureTrustScopeCookie())
 	server.Use(requestBodyLimit(4 << 20))
 	server.Use(basicAuthMiddleware())
 	server.Use(gzip.Gzip(gzip.DefaultCompression))
@@ -192,58 +215,106 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	server.GET("/config", func(c *gin.Context) {
-		c.JSON(200, gin.H{"showFooter": showFooter, "allowRegistration": controller.AllowRegistration()})
+		c.JSON(http.StatusOK, runtimeConfig())
 	})
+	gatewayAuth := controller.GatewayAuth()
 
 	api := server.Group("/api")
+	api.Use(noStoreResponses())
 	{
 		api.GET("/auth/me", controller.AuthMe)
-		api.POST("/auth/register", controller.AuthRegister)
-		api.POST("/auth/login", controller.AuthLogin)
-		api.POST("/auth/change-password", controller.AuthChangePassword)
-		api.POST("/auth/logout", controller.AuthLogout)
 		api.GET("/scripts", controller.GetScriptBookmarks)
-		api.POST("/scripts/sync", controller.SyncScriptBookmarks)
 		api.GET("/admin/accounts", controller.AdminListAccounts)
-		api.POST("/admin/accounts", controller.AdminCreateAccount)
-		api.PUT("/admin/accounts", controller.AdminUpdateAccount)
-		api.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)
 		api.GET("/admin/version", controller.AdminVersion)
-		api.POST("/admin/update", controller.AdminUpdate)
 		api.GET("/admin/update/status", controller.AdminUpdateStatus)
+
+		accountWrites := api.Group("")
+		accountWrites.Use(controller.SameOriginOnly())
+		accountWrites.POST("/auth/register", controller.AuthRegister)
+		accountWrites.POST("/auth/login", controller.AuthLogin)
+		accountWrites.POST("/auth/change-password", controller.AuthChangePassword)
+		accountWrites.POST("/auth/logout", controller.AuthLogout)
+		accountWrites.POST("/scripts/sync", controller.SyncScriptBookmarks)
+		accountWrites.POST("/admin/accounts", controller.AdminCreateAccount)
+		accountWrites.PUT("/admin/accounts", controller.AdminUpdateAccount)
+		accountWrites.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)
+		accountWrites.POST("/admin/update", controller.AdminUpdate)
 	}
 
 	server.GET("/term", func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
 		controller.TermWs(c, time.Duration(timeout)*time.Minute)
 	})
-	server.POST("/check", func(c *gin.Context) {
+	server.POST("/check", controller.SameOriginOnly(), func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
 		responseBody := controller.CheckSSH(c)
+		if c.IsAborted() {
+			return
+		}
 		responseBody.Data = map[string]interface{}{
 			"savePass": savePass,
 		}
 		c.JSON(200, responseBody)
 	})
-	server.POST("/sysinfo", func(c *gin.Context) {
-		c.JSON(200, controller.SysInfo(c))
+	server.POST("/sysinfo", controller.SameOriginOnly(), func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
+		responseBody := controller.SysInfo(c)
+		if !c.IsAborted() {
+			c.JSON(200, responseBody)
+		}
 	})
 	server.GET("/sysinfo/net", func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
 		controller.SysInfoNetWs(c)
 	})
 	file := server.Group("/file")
+	file.Use(controller.SameOriginOnly())
 	{
 		file.POST("/list", func(c *gin.Context) {
-			c.JSON(200, controller.FileList(c))
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.FileList(c)
+			if !c.IsAborted() {
+				c.JSON(200, responseBody)
+			}
 		})
 		file.POST("/download", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
 			controller.DownloadFile(c)
 		})
 		file.POST("/upload", func(c *gin.Context) {
-			c.JSON(200, controller.UploadFile(c))
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.UploadFile(c)
+			if !c.IsAborted() {
+				c.JSON(200, responseBody)
+			}
 		})
 		file.POST("/remote", func(c *gin.Context) {
-			c.JSON(200, controller.RemoteDownloadFile(c))
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.RemoteDownloadFile(c)
+			if !c.IsAborted() {
+				c.JSON(200, responseBody)
+			}
 		})
 		file.GET("/progress", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
 			controller.UploadProgressWs(c)
 		})
 	}
@@ -291,8 +362,20 @@ func securityHeaders() gin.HandlerFunc {
 func requestBodyLimit(limit int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Body != nil && c.Request.URL.Path != "/file/upload" {
-			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+			requestLimit := limit
+			if c.Request.URL.Path == "/api/scripts/sync" {
+				requestLimit = 16 << 20
+			}
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 		}
+		c.Next()
+	}
+}
+
+func noStoreResponses() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
 		c.Next()
 	}
 }
@@ -311,10 +394,14 @@ func basicAuthMiddleware() gin.HandlerFunc {
 		userOK := subtle.ConstantTimeCompare(userHash[:], expectedUserHash[:]) == 1
 		passOK := subtle.ConstantTimeCompare(passHash[:], expectedPassHash[:]) == 1
 		if !ok || !userOK || !passOK {
+			if !controller.AllowBasicAuthAttempt(c) {
+				return
+			}
 			c.Header("WWW-Authenticate", "Basic realm=\"Restricted\"")
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
+		controller.MarkBasicAuthAuthenticated(c)
 		c.Next()
 	}
 }

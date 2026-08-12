@@ -29,11 +29,12 @@ sh setup.sh
 
 ```text
 服务端口 [默认 8008，直接回车跳过]
+是否允许通过服务器 IP 直接访问？(y=监听所有网卡  [回车]=仅本机)
 是否显示底部版权页脚？([回车]=显示  n=不显示)
 是否启用 Web 登录验证？(y=启用  [回车]=不启用)
 书签管理员用户名 [默认 admin]
 书签管理员密码 [回车=自动随机生成；至少 7 个字符，最多 72 UTF-8 字节]
-是否启用页面内版本更新？([回车]=启用  n=禁用)
+是否启用页面内版本更新？(y=启用  [回车]=禁用)
 ```
 
 这里的“书签管理员”用于账号同步、脚本书签/Emoji 分类同步、用户管理和页面更新；它不是目标 SSH 服务器账号，也不是可选的 Web 页面 Basic Auth。
@@ -50,7 +51,7 @@ docker compose logs webssh | grep -A8 "WebSSH 管理员账号"
 - 未检测到 IPv6：提示“本机没有 IPv6，无法直接连接 IPv6 SSH”，按回车继续。
 - 宿主机有 IPv6、容器却没有 IPv6 路由：启动后给出 Docker IPv6 配置警告。
 
-向导生成的 `.env` 权限为 `0600`。不要把它提交到 Git。
+向导生成的 `.env` 权限为 `0600`。重复运行时会先生成 `.env.backup.时间戳.PID`，保留向导不认识的自定义键，再原子替换 `.env`；这些文件已加入 `.gitignore`，仍不要手工提交。
 
 Docker Compose 的 `.env` 密码建议使用单引号，避免 `$` 被 Compose 当作变量插值；密码本身包含单引号时写成 `\'`。
 
@@ -63,13 +64,15 @@ docker compose up -d --build
 docker compose ps
 ```
 
-默认端口为 `8008`。普通 Compose **不会挂载源码目录和 Docker socket**，页面内更新默认关闭，攻击面更小。
+默认端口为 `8008`，并且只绑定 `127.0.0.1`。普通 Compose **不会挂载源码目录和 Docker socket**，页面内更新默认关闭，攻击面更小。建议通过 Nginx/Caddy 暴露 HTTPS/WSS。
 
 自定义端口：
 
 ```bash
-PORT=3000 docker compose up -d --build
+BIND_ADDRESS=127.0.0.1 PORT=3000 docker compose up -d --build
 ```
+
+确实需要直接监听所有网卡时显式设置 `BIND_ADDRESS=0.0.0.0`。不要在公网长期使用裸 HTTP：Web 页面 Basic Auth、SSH 密码/私钥和终端数据都会经过该连接。
 
 停止服务：
 
@@ -150,7 +153,13 @@ const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+
 console.log(location.origin + "/#ssh=" + encoded);
 ```
 
-### 兼容：旧路径格式
+### 兼容：旧路径格式（默认关闭）
+
+旧路径会把密码/私钥发送到 Web 服务器、反向代理和访问日志，因此默认不解析。只有迁移旧系统时才临时设置：
+
+```env
+WEBSSH_ALLOW_LEGACY_PATH_LOGIN=true
+```
 
 | URL 格式 | 结果 |
 |---|---|
@@ -162,6 +171,8 @@ console.log(location.origin + "/#ssh=" + encoded);
 | `/[2603:c021:8012:ef00:0:dd95:ca1:7387]/admin/mypass` | 带括号 IPv6，用户 admin |
 | `/2603:c021:8012:ef00:0:dd95:ca1:7387/2222/admin/mypass` | 裸 IPv6，自定义端口 2222 |
 | `/[2603:c021:8012:ef00:0:dd95:ca1:7387]:2222/admin/mypass` | 带括号 IPv6 和端口 |
+
+迁移完成后应恢复为 `false` 并清理相关访问日志。新链接只使用上面的 `#ssh=` Fragment 格式。
 
 旧路径只在凭据包含明确的 PEM 标记（如 `-----BEGIN OPENSSH PRIVATE KEY-----`）时识别为私钥；长密码不会再因为超过 200 字符被误判。数字用户名请加 `@`，以免与端口混淆。
 
@@ -176,6 +187,8 @@ WebSSH 中可能同时存在三类密码：
 | 书签/账号同步密码 | 脚本同步、用户管理、页面更新 | 账号同步弹窗或管理员用户列表 |
 | Web 页面验证 `authInfo` | 打开页面前的 Basic Auth 门禁 | 修改 `.env` 后重建容器 |
 | SSH 密码/私钥 | 登录目标服务器 | 在目标 SSH 服务器上管理 |
+
+默认 `WEBSSH_REQUIRE_ACCOUNT=true`，未登录书签账号时不能发起 SSH、SFTP、系统信息或文件任务；页面会先打开账号登录窗口。若配置了页面 Basic Auth，通过 Basic Auth 的请求也可访问网关，但脚本云同步和账号管理仍必须登录书签账号。只有确实需要兼容旧版匿名网关时才设置 `WEBSSH_REQUIRE_ACCOUNT=false`。
 
 ### 用户修改自己的密码
 
@@ -230,10 +243,19 @@ WEBSSH_ALLOW_REGISTRATION=true
 
 相关限制：
 
-- 注册：每个直连 IP 每小时最多 5 次。
-- 登录：每个直连 IP 每分钟最多 30 次。
+- 注册：每个来源 IP 每小时最多 5 次。
+- 登录：每个来源 IP 每分钟最多 30 次。
+- 页面 Basic Auth 失败：每个来源 IP 每 5 分钟最多 30 次。
 - 最大账号数：`WEBSSH_MAX_ACCOUNTS=200`。
 - 每用户最大活动会话：`WEBSSH_MAX_SESSIONS_PER_USER=20`，超出后淘汰最旧会话。
+
+经过 Nginx、Render、Railway 等反向代理时，只能在明确知道代理出口网段的前提下信任转发地址。例如代理与 WebSSH 位于 `172.20.0.0/16`：
+
+```env
+WEBSSH_TRUSTED_PROXIES=172.20.0.0/16
+```
+
+支持英文逗号分隔多个 CIDR 或单个 IP。服务端会从 `X-Forwarded-For` 右侧开始跳过可信代理，取第一个不可信地址作为用户 IP；未配置、直连来源不可信或转发链格式错误时，完全忽略转发头。不要配置 `0.0.0.0/0` 或 `::/0`，否则客户端可伪造限流身份。
 
 ## 脚本书签和 Emoji 分类
 
@@ -248,6 +270,7 @@ WEBSSH_ALLOW_REGISTRATION=true
 - 多行脚本在远端启用 bracketed paste 时会整段提交，不会因为中间某行启动了交互式程序而把后续命令喂给它。
 - 单条脚本命令最多保存 20,000 个 Unicode 字符；导入和同步也执行相同限制。
 - 每账号最多同步 500 条脚本和 100 个分类。
+- 每个账号序列化后的脚本与分类工作区最多 8 MiB；同步请求本身最多 16 MiB。
 
 浏览器本地存储不可用或已满时，页面会提示而不是直接崩溃。
 
@@ -259,22 +282,22 @@ WEBSSH_ALLOW_REGISTRATION=true
 WEBSSH_HOST_KEY_POLICY=tofu
 ```
 
-首次连接会将目标主机密钥写入 `${WEBSSH_DATA_DIR}/known_hosts`（Docker 内为 `/app/data/known_hosts`）。以后同一地址密钥变化时，页面会显示旧指纹和新指纹，并要求用户明确选择：取消、仅本次信任，或更新该目标的指纹后连接。不会自动覆盖旧指纹，避免把中间人攻击静默放行。
+TOFU 记录会按浏览器生成的高熵信任作用域隔离，写入 `${WEBSSH_DATA_DIR}/known_hosts.d/<scope-hash>.known_hosts`。不同浏览器不会再共享或覆盖同一份主机记录。以后同一地址密钥变化时，页面会显示旧指纹和新指纹，并要求用户明确选择：取消、仅本次信任，或更新该目标的指纹后连接。不会自动覆盖旧指纹；“仅本次信任”在当前 SSH 会话建立后立即消费，后续重连会再次确认。
 
 可选策略：
 
 | 值 | 行为 |
 |---|---|
 | `tofu` | 默认；首次记录，后续严格匹配 |
-| `strict` | 只允许已有 `known_hosts` 中的密钥；文件不存在即启动连接失败 |
+| `strict` | 只允许管理员维护的全局 `known_hosts` 中的密钥；文件不存在即连接失败 |
 | `insecure` | 不校验主机密钥，仅为兼容旧部署，不推荐 |
 
 目标服务器重装导致密钥合法变化时，应先通过云厂商控制台或服务器本机可信渠道核对新指纹，再在页面点击“更新指纹并连接”。更新只替换当前 `主机:端口` 的记录，不会影响其他服务器；也可以选择“仅本次信任”而不写入 `known_hosts`。
 
-如果无法使用页面确认，也可以手动清空全部记录，下一次连接会重新进入 TOFU（这会影响所有已保存的目标）：
+升级到作用域隔离后，旧的全局 TOFU 文件不会自动复制给每个浏览器；首次连接需重新核对一次指纹。如果无法使用页面确认，也可以手动清空全部作用域记录，下一次连接会重新进入 TOFU：
 
 ```bash
-docker compose exec webssh sh -c 'rm -f /app/data/known_hosts'
+docker compose exec webssh sh -c 'find /app/data/known_hosts.d -maxdepth 1 -type f -name "*.known_hosts" -delete'
 ```
 
 默认采用 Go SSH 的安全算法集合。只有必须连接老旧设备时才临时启用 CBC 等旧算法：
@@ -292,7 +315,7 @@ WEBSSH_UPLOAD_MAX_BYTES=1073741824
 WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES=1073741824
 ```
 
-远程下载会限制重定向次数和流式大小，先写同目录临时文件，完整成功后再重命名，不会因超限而删除已有目标文件。
+普通上传和远程下载都会先写同目录随机临时文件，完整写入并关闭成功后再原子替换目标；失败、超限、关闭标签或离开页面会取消请求并清理临时文件，不会先截断已有目标。浏览器下载使用原生流式下载，不再先把整个大文件读进内存。
 
 为防 SSRF，远程下载默认拒绝 loopback、私网、链路本地、组播、CGNAT、云元数据及其他保留地址，并在每次重定向和实际拨号时重新验证解析结果。确实需要下载内网 URL 时才打开：
 
@@ -304,7 +327,7 @@ WEBSSH_ALLOW_PRIVATE_DOWNLOADS=true
 
 ## WebSocket 与 HTTP 安全配置
 
-- WebSocket 默认只允许同 Host Origin；无 Origin 的非浏览器客户端允许。
+- WebSocket 同时校验 Host 与 http/https scheme；所有状态变更接口（包括登录、注册、SSH 检查、系统信息和文件操作）要求可信 Origin/Referer。无 Origin/Referer 的非浏览器客户端仍允许。
 - 额外可信来源可用英文逗号分隔：
 
 ```env
@@ -313,13 +336,17 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 
 - `/healthz` 用于 Docker 健康检查；启用 Basic Auth 时仍可访问，但只返回 `{"status":"ok"}`。
 - SSH 凭据不再放进 `/check`、`/sysinfo`、`/file/list` 和 `/file/download` 的查询字符串；这些接口使用 POST 请求体。
-- WebSocket 初始 SSH 配置限制为 128 KiB，并要求 15 秒内发送。
+- WebSocket 初始 SSH 配置限制为 128 KiB，并要求 15 秒内发送；握手完成后终端单帧输入上限切换为 4 MiB，避免大段粘贴沿用初始化限制而断线。
 - 默认普通请求体上限为 4 MiB，上传接口使用独立限制。
+- JSON 接口必须使用 `application/json`，拒绝未知字段、多个 JSON 值和超过 30 秒仍未读完的请求体；`/api` 响应统一 `no-store`。
+- 默认最多同时建立 64 个 SSH 任务、同一客户端 8 个；可用 `WEBSSH_MAX_CONCURRENT_SSH` 和 `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` 调整。
+- 默认最多同时进行 4 个上传、同一客户端 2 个；可用 `WEBSSH_MAX_CONCURRENT_UPLOADS` 和 `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` 调整。
+- 系统信息命令最长执行 12 秒、输出最多 1 MiB；客户端断开时会关闭对应 SSH/SFTP 连接。
 - 服务端发送 `nosniff`、`SAMEORIGIN`、`no-referrer` 和权限策略响应头。
 
 ## 页面内版本更新
 
-普通 Compose 默认不具有 Docker socket 权限。安装向导默认启用页面内版本更新（该问题直接回车即可）；`setup.sh` 会在 `.env` 写入：
+普通 Compose 默认不具有 Docker socket 权限，页面更新也默认关闭。只有安装向导中明确输入 `y` 才会在 `.env` 写入：
 
 ```env
 COMPOSE_FILE=docker-compose.yml:docker-compose.update.yml
@@ -341,7 +368,7 @@ WEBSSH_ENABLE_SELF_UPDATE=false
 3. 执行 `git pull --ff-only`。
 4. 成功后执行 `docker compose up -d --build`。
 
-普通更新遇到分叉或本地冲突会停止，**不会强制覆盖源码**。只有管理员明确选择“强制更新”时才执行 `git reset --hard`；强制更新会覆盖所有受 Git 跟踪的本地修改。备份目录为 `0700`，文件为 `0600`，并已加入 `.gitignore`。
+普通更新遇到分叉或本地冲突会停止，**不会强制覆盖源码**。只有管理员明确选择“强制更新”时才执行 `git reset --hard`；强制更新会覆盖所有受 Git 跟踪的本地修改。备份目录为 `0700`、文件为 `0600`，最多保留 20 份并清理 30 天前的目录；卡在 `created` 超过 10 分钟的更新助手也会在下次更新前清理。
 
 在线更新只会取得当前仓库、当前分支已经提交并推送的内容。Render、Railway 等通常无法在容器内控制 Docker，应使用平台重新部署。
 
@@ -360,7 +387,7 @@ docker compose up -d --build
 AUTH_INFO="admin:请替换为强密码"
 ```
 
-启用后页面、静态资源、API 和 WebSocket 都受保护；只有最小化健康检查 `/healthz` 免认证。它和书签账号以及目标 SSH 账号完全独立。
+启用后页面、静态资源、API 和 WebSocket 都受保护；只有最小化健康检查 `/healthz` 免认证。它和书签账号以及目标 SSH 账号完全独立。失败尝试受 IP 限流；Basic Auth 只做编码、不提供加密，公网必须配合 HTTPS 使用。
 
 ## 本地静态资源
 
@@ -418,8 +445,9 @@ go run . -a admin:password
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `PORT` / `port` | 8008 | HTTP 服务端口 |
+| `BIND_ADDRESS` | 127.0.0.1（Compose） | Docker 发布端口的监听地址；公网直连需显式设为 `0.0.0.0` |
 | `AUTH_INFO` / `authInfo` | 空 | 页面 Basic Auth，格式 `user:pass` |
-| `SAVE_PASS` / `savePass` | true | 是否在浏览器保存 SSH 密码 |
+| `SAVE_PASS` / `savePass` | true | 是否在浏览器保存 SSH/SOCKS5 密码；设为 false 时不再写入并清除旧字段 |
 | `SHOW_FOOTER` / `showFooter` | true | 是否显示页脚 |
 | `WEBSSH_ADMIN_USER` | admin | 书签管理员用户名 |
 | `WEBSSH_ADMIN_PASSWORD` | 首次随机 | 书签管理员初始/重置密码；7 个字符起，最多 72 UTF-8 字节 |
@@ -427,17 +455,24 @@ go run . -a admin:password
 | `WEBSSH_ALLOW_REGISTRATION` | false | 是否开放自助注册 |
 | `WEBSSH_MAX_ACCOUNTS` | 200 | 最大账号数 |
 | `WEBSSH_MAX_SESSIONS_PER_USER` | 20 | 每用户活动会话上限 |
+| `WEBSSH_REQUIRE_ACCOUNT` | true | SSH/SFTP 网关是否要求书签账号会话或已通过页面 Basic Auth |
+| `WEBSSH_MAX_CONCURRENT_SSH` | 64 | 全局同时进行的终端、SFTP、检查和系统信息 SSH 任务上限 |
+| `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` | 8 | 同一来源客户端的 SSH 任务上限 |
+| `WEBSSH_MAX_CONCURRENT_UPLOADS` | 4 | 全局并发上传任务上限 |
+| `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` | 2 | 同一来源客户端的并发上传任务上限 |
 | `WEBSSH_HOST_KEY_POLICY` | tofu | SSH 主机密钥策略 |
 | `WEBSSH_ALLOW_LEGACY_CIPHERS` | false | 是否加入老旧 CBC cipher |
 | `WEBSSH_UPLOAD_MAX_BYTES` | 1073741824 | 单次上传请求上限 |
 | `WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES` | 1073741824 | 远程下载文件上限 |
 | `WEBSSH_ALLOW_PRIVATE_DOWNLOADS` | false | 是否允许远程下载访问私网/本机 |
-| `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 额外允许来源 |
+| `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 与登录 Cookie 写接口额外允许来源 |
+| `WEBSSH_TRUSTED_PROXIES` | 空 | 可读取转发客户端 IP 的可信反向代理 CIDR/IP 列表 |
 | `WEBSSH_TERMINAL_WS_URL` | 空（同源 `/term`） | 可选的终端直连 `ws://` / `wss://` 完整地址，用于绕过高延迟代理 |
-| `WEBSSH_ENABLE_SELF_UPDATE` | true（Docker Compose） | 是否启用页面内更新；Render/Railway 仍需使用平台重新部署 |
+| `WEBSSH_ALLOW_LEGACY_PATH_LOGIN` | false | 是否兼容会进入服务器日志的旧路径凭据快速登录 |
+| `WEBSSH_ENABLE_SELF_UPDATE` | false | 是否启用页面内更新；启用会挂载源码和 Docker socket |
 | `WEBSSH_SOURCE_DIR` | /app/source | 容器内源码目录 |
 | `WEBSSH_HOST_PROJECT_DIR` | 空 | 页面更新使用的宿主机绝对路径 |
-| `WEBSSH_DATA_DIR` | data | 账号数据库和 `known_hosts` 目录 |
+| `WEBSSH_DATA_DIR` | data | 账号数据库、全局 strict `known_hosts` 和作用域 TOFU 目录 |
 
 命令行参数：`-p` 端口、`-a user:pass` 页面验证、`-t` SSH 会话超时分钟数、`-s` 是否保存密码、`-v` 版本。
 
@@ -452,6 +487,8 @@ WEBSSH_ENABLE_SELF_UPDATE=false
 ```
 
 若忘记书签管理员密码，临时增加 `WEBSSH_ADMIN_RESET=true` 并重新部署；确认登录后恢复为 `false`。平台应挂载持久化数据卷，否则重部署可能丢失账号、书签和主机密钥记录。
+
+仓库中的 Render 配置会把 1 GiB persistent disk 挂载到 `/app/data`；Railway 配置声明了同一路径的必需挂载点。若平台提示缺少 volume，请先创建并挂载 `/app/data` 再部署。该目录保存账号数据库、登录 session、云脚本书签和 TOFU 主机指纹。
 
 ## 技术栈
 

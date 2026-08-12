@@ -5,8 +5,8 @@
 // ==================== State ====================
 var sessions = [];
 var activeIdx = -1;
-var sftpCurrentPath = '/';
-var sftpDirPickerPath = '/';
+var sftpRemoteSessionId = '';
+var sftpDirPickerSessionId = '';
 var serverInfoModalIdx = -1;
 var serverInfoTimer = null;
 var serverInfoSelectedIface = {};
@@ -23,6 +23,8 @@ var serverInfoNetUnit = (function () {
 })();
 var serverInfoGuideTimer = null;
 var TERMINAL_CONTROL_PREFIX = '__WEBSSH_CONTROL__:';
+var TRUST_SCOPE_KEY = 'webssh_trust_scope';
+var trustScopeMemory = '';
 
 // ==================== Particles ====================
 (function () {
@@ -76,14 +78,18 @@ var TERMINAL_CONTROL_PREFIX = '__WEBSSH_CONTROL__:';
 
 // ==================== Utility ====================
 var storageErrorShown = false;
+var storageReadFailed = {};
 function safeStorageGet(key, fallback) {
     try {
         var value = localStorage.getItem(key);
+        delete storageReadFailed[key];
         return value === null || value === undefined ? fallback : value;
     } catch (e) {
+        storageReadFailed[key] = true;
         return fallback;
     }
 }
+function storageReadIsUnavailable(key) { return !!storageReadFailed[key]; }
 function safeStorageSet(key, value) {
     try {
         localStorage.setItem(key, value);
@@ -103,6 +109,22 @@ function safeStorageRemove(key) {
     } catch (e) {
         return false;
     }
+}
+function getOrCreateTrustScope() {
+    if (/^[a-f0-9]{32,128}$/.test(trustScopeMemory)) return trustScopeMemory;
+    var stored = String(safeStorageGet(TRUST_SCOPE_KEY, '') || '').replace(/-/g, '').toLowerCase();
+    if (/^[a-f0-9]{32,128}$/.test(stored)) {
+        trustScopeMemory = stored;
+        return stored;
+    }
+    if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') return '';
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    trustScopeMemory = Array.prototype.map.call(bytes, function (value) {
+        return value.toString(16).padStart(2, '0');
+    }).join('');
+    safeStorageSet(TRUST_SCOPE_KEY, trustScopeMemory);
+    return trustScopeMemory;
 }
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
@@ -238,9 +260,9 @@ function saveProxyConfig() {
         var cfg = {
             host: document.getElementById('proxyHost').value,
             port: document.getElementById('proxyPort').value,
-            user: document.getElementById('proxyUser').value,
-            pass: document.getElementById('proxyPass').value
+            user: document.getElementById('proxyUser').value
         };
+        if (savePasswords) cfg.pass = document.getElementById('proxyPass').value;
         safeStorageSet(PROXY_KEY, JSON.stringify(cfg));
         showToast('代理配置已保存', 'success');
     } else {
@@ -255,7 +277,7 @@ function loadProxyConfig() {
             document.getElementById('proxyHost').value = cfg.host || '';
             document.getElementById('proxyPort').value = cfg.port || '1080';
             document.getElementById('proxyUser').value = cfg.user || '';
-            document.getElementById('proxyPass').value = cfg.pass || '';
+            document.getElementById('proxyPass').value = savePasswords ? (cfg.pass || '') : '';
             document.getElementById('enableProxy').checked = true;
             document.getElementById('rememberProxy').checked = true;
         }
@@ -336,6 +358,8 @@ function buildSSHInfoFromForm() {
     else { info.privateKey = document.getElementById('privateKey').value; info.passphrase = document.getElementById('passphrase').value; }
     var proxy = getProxyInfo();
     if (proxy.proxyHost) { info.proxyHost = proxy.proxyHost; info.proxyPort = proxy.proxyPort; info.proxyUser = proxy.proxyUser; info.proxyPass = proxy.proxyPass; }
+    var trustScope = getOrCreateTrustScope();
+    if (trustScope) info.trustScope = trustScope;
     return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
 }
 
@@ -344,6 +368,8 @@ function buildSSHInfoDirect(host, port, user, pass) {
     var info = { hostname: hp.host, port: hp.port, username: user || 'root', logintype: 0, password: pass || '' };
     var proxy = getProxyInfo();
     if (proxy.proxyHost) { info.proxyHost = proxy.proxyHost; info.proxyPort = proxy.proxyPort; info.proxyUser = proxy.proxyUser; info.proxyPass = proxy.proxyPass; }
+    var trustScope = getOrCreateTrustScope();
+    if (trustScope) info.trustScope = trustScope;
     return btoa(unescape(encodeURIComponent(JSON.stringify(info))));
 }
 
@@ -489,6 +515,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
         id: id, hostname: hostname, port: port, username: username,
         sshInfo: sshInfo, ws: null, term: t, fitAddon: fa, termDiv: termDiv,
         heartbeat: null, sysInfoTimer: null, sysInfoStartTimer: null, resizeObs: null,
+        _sysInfoGeneration: 0, _sysInfoController: null, _sysInfoFetchPromise: null,
         authType: opts.authType || 'password',
         authRetry: null,
         hostKeyMismatch: null,
@@ -496,8 +523,18 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _connected: false,
         _connectGeneration: 0,
         _dataDisposable: null,
+        _selectionDisposable: null,
         _lastSentSize: null,
-        _sizeSyncTimer: null
+        _sizeSyncTimer: null,
+        sftpPath: '/',
+        _sftpListGeneration: 0,
+        _sftpListController: null,
+        sftpDirPickerPath: '/',
+        _sftpDirGeneration: 0,
+        _sftpDirController: null,
+        _sftpRemoteController: null,
+        _sftpUploadControllers: [],
+        _sftpDownloadFrames: []
     };
 
     session.resizeObs = new ResizeObserver(function () { scheduleTermSizeSync(session); });
@@ -518,6 +555,10 @@ function createSession(hostname, port, username, sshInfo, opts) {
 function switchTab(idx, userActivated) {
     if (idx < 0 || idx >= sessions.length) return;
     var prevIdx = activeIdx;
+    var previousSession = prevIdx >= 0 ? sessions[prevIdx] : null;
+    if (previousSession && previousSession !== sessions[idx]) cancelSessionSftpBrowsing(previousSession);
+    if (sftpRemoteSessionId && (!sessions[idx] || sessions[idx].id !== sftpRemoteSessionId)) hideSftpRemoteModal();
+    if (sftpDirPickerSessionId && (!sessions[idx] || sessions[idx].id !== sftpDirPickerSessionId)) hideSftpDirPicker();
     activeIdx = idx;
     sessions.forEach(function (s, i) {
         if (i === idx) { s.termDiv.classList.add('active'); }
@@ -533,6 +574,8 @@ function switchTab(idx, userActivated) {
     updateSSHAuthRetryModalForActive();
     if ((prevIdx !== idx || userActivated) && s.hostKeyMismatch) s.hostKeyMismatch.dismissed = false;
     updateHostKeyMismatchModalForActive();
+    var sftpPanel = document.getElementById('sftpPanel');
+    if (sftpPanel && sftpPanel.classList.contains('open')) sftpLoad(s.sftpPath || '/', s);
 }
 
 function renderTabs() {
@@ -598,6 +641,8 @@ function stopTopbarMetricsPolling(session) {
         clearTimeout(session.sysInfoStartTimer);
         session.sysInfoStartTimer = null;
     }
+    session._sysInfoGeneration = (session._sysInfoGeneration || 0) + 1;
+    abortSessionController(session, '_sysInfoController');
 }
 
 function startTopbarMetricsPolling(session) {
@@ -834,7 +879,21 @@ function submitSSHAuthRetry() {
     s.port = port;
     s.username = user;
     s.authType = 'password';
-    s.sshInfo = buildSSHInfoDirect(host, port, user, pass);
+    try {
+        var retryInfo = decodeSSHInfoPayload(s.sshInfo);
+        retryInfo.hostname = host;
+        retryInfo.port = port;
+        retryInfo.username = user;
+        retryInfo.logintype = 0;
+        retryInfo.password = pass;
+        delete retryInfo.privateKey;
+        delete retryInfo.passphrase;
+        delete retryInfo.hostKeyAction;
+        delete retryInfo.hostKeyFingerprint;
+        s.sshInfo = encodeSSHInfoPayload(retryInfo);
+    } catch (e) {
+        s.sshInfo = buildSSHInfoDirect(host, port, user, pass);
+    }
     s.authRetry = null;
     s.hostKeyMismatch = null;
     s.hostKeyDecision = '';
@@ -846,6 +905,9 @@ function submitSSHAuthRetry() {
 }
 
 function startSessionConnection(session, afterStart) {
+    if (!ensureGatewayAccount()) {
+        return false;
+    }
     var start = function () {
         try { session.fitAddon.fit(); } catch (e) { }
         session._lastSentSize = null;
@@ -856,6 +918,7 @@ function startSessionConnection(session, afterStart) {
     // 连接成功时还会强制同步一次，没必要为了量宽度推迟连接、让按钮一直转圈。
     if (typeof requestAnimationFrame === 'function' && document.visibilityState !== 'hidden') requestAnimationFrame(start);
     else setTimeout(start, 0);
+    return true;
 }
 
 function buildTerminalWebSocketURL(cols, rows, sameOriginOnly) {
@@ -908,6 +971,8 @@ function warmTerminalEndpoint() {
 function invalidateSessionConnection(session) {
     if (!session) return;
     session._connectGeneration = (session._connectGeneration || 0) + 1;
+    stopServerInfoNetStream(session);
+    stopTopbarMetricsPolling(session);
 }
 
 function connectSession(session) {
@@ -922,6 +987,10 @@ function connectSession(session) {
     if (session._dataDisposable && typeof session._dataDisposable.dispose === 'function') {
         try { session._dataDisposable.dispose(); } catch (e) { }
         session._dataDisposable = null;
+    }
+    if (session._selectionDisposable && typeof session._selectionDisposable.dispose === 'function') {
+        try { session._selectionDisposable.dispose(); } catch (e) { }
+        session._selectionDisposable = null;
     }
     // 容器还没布局完时 fit() 可能量不出尺寸，兜底成和后端一致的默认值，
     // 避免把 0 或 NaN 当作列数带进 pty。
@@ -961,6 +1030,26 @@ function connectSession(session) {
             openSocket(fallbackWsUrl, true);
         }, 4000) : null;
 
+        function markConnected() {
+            if (session._connected) return;
+            session._connected = true;
+            if (session.hostKeyDecision) clearHostKeyDecision(session);
+            session.hostKeyMismatch = null;
+            session.authRetry = null;
+            updateSSHAuthRetryModalForActive();
+            updateHostKeyMismatchModalForActive();
+            showToast(session.hostname + ' 连接成功', 'success');
+            setupAutoCopy(session);
+            maybeShowFirstServerInfoGuide(session);
+            session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
+            startTopbarMetricsPolling(session);
+            if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
+                fetchSysInfoFor(session);
+                startServerInfoNetStream(session);
+            }
+            syncTermSize(session, true);
+        }
+
         ws.onopen = function () {
             if (!isCurrentConnection() || session.ws !== ws) return;
             if (transportTimer) { clearTimeout(transportTimer); transportTimer = null; }
@@ -974,6 +1063,10 @@ function connectSession(session) {
             if (controlMessage && controlMessage.type === 'host-key-mismatch') {
                 failedBeforeConnect = true;
                 handleHostKeyMismatch(session, controlMessage);
+                return;
+            }
+            if (controlMessage && controlMessage.type === 'connection-ready') {
+                markConnected();
                 return;
             }
             var terminalData = isText ? e.data : new Uint8Array(e.data);
@@ -990,20 +1083,7 @@ function connectSession(session) {
                     showToast(session.hostname + ' 连接失败：' + stripAnsiText(e.data), 'error');
                     return;
                 }
-                session._connected = true;
-                if (session.hostKeyDecision === 'replace') clearHostKeyDecision(session);
-                session.hostKeyMismatch = null;
-                session.authRetry = null;
-                updateSSHAuthRetryModalForActive();
-                updateHostKeyMismatchModalForActive();
-                showToast(session.hostname + ' 连接成功', 'success');
-                setupAutoCopy(session);
-                maybeShowFirstServerInfoGuide(session);
-                session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
-                startTopbarMetricsPolling(session);
-                // pty 已就绪，把当前真实尺寸再对齐一次：建连时用的列数是
-                // 握手前量的，期间字体加载或布局变化都可能让它过期。
-                syncTermSize(session, true);
+                markConnected();
             }
             session.term.write(terminalData);
         };
@@ -1021,7 +1101,19 @@ function connectSession(session) {
                 openSocket(fallbackWsUrl, true);
                 return;
             }
-            if (!session._connected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
+            var wasConnected = session._connected;
+            session._connected = false;
+            session.ws = null;
+            stopServerInfoNetStream(session);
+            cancelSessionSftpRequests(session);
+            if (wasConnected && sessions.indexOf(session) !== -1) {
+                showToast(session.hostname + ' 连接已关闭', 'info');
+                var sftpPanel = document.getElementById('sftpPanel');
+                if (sessions[activeIdx] === session && sftpPanel && sftpPanel.classList.contains('open')) {
+                    document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">SSH 连接已关闭</div>';
+                }
+            }
+            if (!wasConnected && !failedBeforeConnect) showToast(session.hostname + ' 无法连接', 'error');
         };
     }
 
@@ -1037,6 +1129,7 @@ function connectSession(session) {
 }
 
 function connectFromLogin() {
+    if (!ensureGatewayAccount()) return;
     var btn = document.getElementById('connectBtn');
     btn.classList.add('loading');
     setStatus('connecting', '连接中...');
@@ -1106,8 +1199,12 @@ function maybeShowFirstServerInfoGuide(session) {
 // ==================== Tab Actions ====================
 function closeTab(idx) {
     if (idx < 0 || idx >= sessions.length) return;
+    var activeSession = activeIdx >= 0 ? sessions[activeIdx] : null;
     if (serverInfoModalIdx === idx) hideServerInfoModal();
     var s = sessions[idx];
+    if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
+    if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
+    cancelSessionSftpRequests(s);
     invalidateSessionConnection(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
@@ -1116,6 +1213,7 @@ function closeTab(idx) {
     if (s._resizeHandler) removeEventListener('resize', s._resizeHandler);
     if (s._sizeSyncTimer) { clearTimeout(s._sizeSyncTimer); s._sizeSyncTimer = null; }
     if (s._dataDisposable && typeof s._dataDisposable.dispose === 'function') { try { s._dataDisposable.dispose(); } catch (e) { } }
+    if (s._selectionDisposable && typeof s._selectionDisposable.dispose === 'function') { try { s._selectionDisposable.dispose(); } catch (e) { } }
     if (s.term) s.term.dispose();
     if (s.termDiv) s.termDiv.remove();
     sessions.splice(idx, 1);
@@ -1129,7 +1227,12 @@ function closeTab(idx) {
         showToast('已断开', 'info');
     } else {
         if (serverInfoModalIdx > idx) serverInfoModalIdx--;
-        activeIdx = Math.min(idx, sessions.length - 1);
+        if (activeSession && activeSession !== s) {
+            activeIdx = sessions.indexOf(activeSession);
+            if (activeIdx < 0) activeIdx = Math.min(idx, sessions.length - 1);
+        } else {
+            activeIdx = Math.min(idx, sessions.length - 1);
+        }
         switchTab(activeIdx);
     }
     renderTabs();
@@ -1140,6 +1243,9 @@ function closeActiveTab() { if (activeIdx >= 0) closeTab(activeIdx); }
 function reconnectTab() {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
     var s = sessions[activeIdx];
+    if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
+    if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
+    cancelSessionSftpRequests(s);
     invalidateSessionConnection(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
@@ -1152,6 +1258,7 @@ function showAddTab() { document.getElementById('addTabModal').classList.add('sh
 function hideAddTab() { document.getElementById('addTabModal').classList.remove('show'); }
 
 function addNewTab() {
+    if (!ensureGatewayAccount()) return;
     var hp = parseHostPortInput(document.getElementById('newTabHost').value, document.getElementById('newTabPort').value);
     var h = hp.host;
     var p = hp.port;
@@ -1169,11 +1276,18 @@ function addNewTab() {
 
 // ==================== System Info ====================
 function fetchSysInfoFor(session) {
-    if (!session.sshInfo) return;
+    if (!session.sshInfo || !session._connected || sessions.indexOf(session) === -1) return;
     if (session._sysInfoFetchPromise) return session._sysInfoFetchPromise;
-    session._sysInfoFetchPromise = fetch('/sysinfo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: session.sshInfo }) })
+    var requestGeneration = (session._sysInfoGeneration || 0) + 1;
+    session._sysInfoGeneration = requestGeneration;
+    var connectionGeneration = session._connectGeneration;
+    var sshInfo = session.sshInfo;
+    var controller = new AbortController();
+    session._sysInfoController = controller;
+    var requestPromise = fetch('/sysinfo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: sshInfo }), signal: controller.signal })
         .then(function (r) { return r.json(); })
         .then(function (d) {
+            if (sessions.indexOf(session) === -1 || session._sysInfoGeneration !== requestGeneration || session._connectGeneration !== connectionGeneration || session.sshInfo !== sshInfo) return d;
             if (d.Msg === 'success' && d.Data) {
                 if (session._lastMetrics && session._lastMetrics.updatedAt && session._serverInfoNetWanted) {
                     ['mainIface', 'rxTotal', 'txTotal', 'rxRate', 'txRate', 'interfaces', 'updatedAt'].forEach(function (key) {
@@ -1190,15 +1304,18 @@ function fetchSysInfoFor(session) {
             }
             return d;
         })
-        .catch(function () {
+        .catch(function (err) {
+            if (requestWasAborted(err) || session._sysInfoGeneration !== requestGeneration) return;
             if (serverInfoModalIdx >= 0 && sessions[serverInfoModalIdx] === session) {
                 renderServerInfoError('网络请求失败，请稍后重试');
             }
         })
         .finally(function () {
-            session._sysInfoFetchPromise = null;
+            if (session._sysInfoController === controller) session._sysInfoController = null;
+            if (session._sysInfoFetchPromise === requestPromise) session._sysInfoFetchPromise = null;
         });
-    return session._sysInfoFetchPromise;
+    session._sysInfoFetchPromise = requestPromise;
+    return requestPromise;
 }
 
 function mergeNetworkMetrics(session, data) {
@@ -1213,7 +1330,7 @@ function mergeNetworkMetrics(session, data) {
 }
 
 function startServerInfoNetStream(session) {
-    if (!session || !session.sshInfo || session._serverInfoNetWanted) return;
+    if (!session || !session.sshInfo || !session._connected || session._serverInfoNetWanted) return;
     session._serverInfoNetWanted = true;
 
     function connect() {
@@ -2084,7 +2201,7 @@ function toggleSftp() {
     var p = document.getElementById('sftpPanel');
     var wasOpen = p.classList.contains('open');
     p.classList.toggle('open');
-    if (!wasOpen && activeIdx >= 0) sftpLoad(document.getElementById('sftpPath').value || '/');
+    if (!wasOpen && activeIdx >= 0 && sessions[activeIdx]) sftpLoad(sessions[activeIdx].sftpPath || '/', sessions[activeIdx]);
     setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 
@@ -2093,6 +2210,9 @@ var CBK = 'webssh_conn_bm';
 var SBK = 'webssh_script_bm';
 var SCAT = 'webssh_script_categories';
 var SBK_UPDATED = 'webssh_script_bm_updated_at';
+var SBK_REVISION = 'webssh_script_bm_revision';
+var SCRIPT_LEGACY_OWNER = 'webssh_script_legacy_owner';
+var AUTH_EVENT_KEY = 'webssh_auth_event';
 var scriptSearchQuery = '';
 var activeScriptCategory = '';
 var scriptSearchFrame = 0;
@@ -2104,8 +2224,18 @@ var EMOJI_OPTIONS = ['🛠️','⚙️','🔧','🔨','🧰','💻','🖥️','�
 var currentAccount = null;
 var authMode = 'login';
 var allowRegistration = false;
-var accountAutoSynced = false;
+var allowLegacyPathLogin = false;
+var requireGatewayAccount = true;
+var urlAutoLoginHandled = false;
+// Default to the safer policy until /config explicitly enables password
+// persistence. This also prevents a failed config request from leaking a
+// password when the server was started with SAVE_PASS=false.
+var savePasswords = false;
+var accountAutoSynced = '';
 var scriptSyncTimer = null;
+var scriptSyncTimerAccount = '';
+var scriptSyncGeneration = 0;
+var authStateGeneration = 0;
 var managedAccounts = [];
 var managedAdminCount = 0;
 var managedAccountPage = 1;
@@ -2114,30 +2244,144 @@ var categoryManagerPage = 1;
 var categoryManagerPageSize = 5;
 var pendingDeleteCategoryId = '';
 var pendingDeleteScriptIndex = -1;
+var pendingDeleteScriptId = '';
 var scriptManagerPreserveDrawer = false;
 var editingManagedAccount = null;
 var versionUpdatePollTimer = null;
 
-function loadBM(k) { try { return JSON.parse(safeStorageGet(k)) || []; } catch (e) { return []; } }
-function getScriptUpdatedAt() { return parseInt(safeStorageGet(SBK_UPDATED)) || 0; }
-function setScriptUpdatedAt(ts) { safeStorageSet(SBK_UPDATED, parseInt(ts) || Date.now()); }
-function saveScriptBookmarksData(v, ts) {
-    safeStorageSet(SBK, JSON.stringify(v || []));
-    setScriptUpdatedAt(ts || Date.now());
+function scriptAccountName(account) {
+    var username = account && account.username ? String(account.username).trim().toLowerCase() : '';
+    return username;
+}
+function scriptStorageKey(base, accountName) {
+    accountName = accountName === undefined ? scriptAccountName(currentAccount) : String(accountName || '').trim().toLowerCase();
+    return accountName ? base + '::' + encodeURIComponent(accountName) : base;
+}
+function isScriptStorageBaseKey(key) { return key === SBK || key === SCAT || key === SBK_UPDATED || key === SBK_REVISION; }
+function activeStorageKey(key) { return isScriptStorageBaseKey(key) ? scriptStorageKey(key) : key; }
+function scriptStorageGet(key, fallback) { return safeStorageGet(activeStorageKey(key), fallback); }
+function scriptStorageSet(key, value) { return safeStorageSet(activeStorageKey(key), value); }
+function scriptStorageRemove(key) { return safeStorageRemove(activeStorageKey(key)); }
+function loadBM(k) {
+    var storageKey = activeStorageKey(k);
+    var raw = safeStorageGet(storageKey, null);
+    if (storageReadIsUnavailable(storageKey)) {
+        if (isScriptStorageBaseKey(k)) markScriptStorageCorrupt(k);
+        return [];
+    }
+    if (raw === null) return [];
+    try {
+        var parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+            if (isScriptStorageBaseKey(k)) markScriptStorageCorrupt(k);
+            return [];
+        }
+        return parsed;
+    } catch (e) {
+        // A corrupt workspace must never be silently treated as an empty one.
+        // The sync layer checks this marker and refuses destructive pushes.
+        if (isScriptStorageBaseKey(k)) markScriptStorageCorrupt(k);
+        return [];
+    }
+}
+var scriptStorageCorrupt = {};
+function markScriptStorageCorrupt(key) { scriptStorageCorrupt[activeStorageKey(key)] = true; }
+function isScriptStorageCorrupt() {
+    if (typeof scriptStorageCorrupt === 'undefined' || !scriptStorageCorrupt) return false;
+    var activePrefix = scriptAccountName(currentAccount);
+    return Object.keys(scriptStorageCorrupt).some(function (key) {
+        if (!scriptStorageCorrupt[key]) return false;
+        if (!activePrefix) return key === SBK || key === SCAT || key === SBK_UPDATED || key === SBK_REVISION;
+        return key === scriptStorageKey(SBK, activePrefix) || key === scriptStorageKey(SCAT, activePrefix) ||
+            key === scriptStorageKey(SBK_UPDATED, activePrefix) || key === scriptStorageKey(SBK_REVISION, activePrefix);
+    });
+}
+function getScriptUpdatedAt() { return parseInt(scriptStorageGet(SBK_UPDATED)) || 0; }
+function getScriptRevision() { return Math.max(0, parseInt(scriptStorageGet(SBK_REVISION), 10) || 0); }
+function setScriptRevision(revision) {
+    revision = Math.max(0, parseInt(revision, 10) || 0);
+    return scriptStorageSet(SBK_REVISION, String(revision)) ? revision : null;
+}
+function setScriptUpdatedAt(ts) {
+    var parsed = parseInt(ts, 10);
+    if (!isFinite(parsed) || parsed < 0) parsed = 0;
+    return scriptStorageSet(SBK_UPDATED, String(parsed)) ? parsed : null;
+}
+function touchScriptUpdatedAt(now) {
+    var candidate = parseInt(now, 10);
+    if (!isFinite(candidate) || candidate < 0) candidate = Date.now();
+    // Date.now() can move backwards and an offline browser can be behind the
+    // server clock. Every local mutation must still advance the logical clock.
+    return setScriptUpdatedAt(Math.max(candidate, getScriptUpdatedAt() + 1));
+}
+function saveScriptBookmarksData(v, ts, acceptTimestamp) {
+    var categories = loadScriptCategories();
+    if (isScriptStorageCorrupt()) return false;
+    return saveScriptWorkspaceAtomically(v || [], categories, ts, getScriptRevision(), !!acceptTimestamp);
 }
 function loadScriptCategories() {
     return normalizeScriptCategories(loadBM(SCAT));
 }
-function saveScriptCategoriesData(v, ts) {
-    safeStorageSet(SCAT, JSON.stringify(normalizeScriptCategories(v)));
-    setScriptUpdatedAt(ts || Date.now());
+function saveScriptCategoriesData(v, ts, acceptTimestamp) {
+    var scripts = loadBM(SBK);
+    if (isScriptStorageCorrupt()) return false;
+    return saveScriptWorkspaceAtomically(scripts, v, ts, getScriptRevision(), !!acceptTimestamp);
+}
+function setScriptUpdatedAtMonotonic(ts) {
+    var parsed = parseInt(ts, 10);
+    if (!isFinite(parsed) || parsed < 0) parsed = Date.now();
+    return setScriptUpdatedAt(Math.max(parsed, getScriptUpdatedAt()));
 }
 function saveBM(k, v) {
-    safeStorageSet(k, JSON.stringify(v));
-    if (k === SBK) setScriptUpdatedAt(Date.now());
+    if (k === SBK) return saveScriptBookmarksData(v);
+    return safeStorageSet(activeStorageKey(k), JSON.stringify(v));
 }
 function ensureScriptBookmarkClock() {
-    if (loadBM(SBK).length && !getScriptUpdatedAt()) setScriptUpdatedAt(Date.now());
+    if (loadBM(SBK).length && !getScriptUpdatedAt()) touchScriptUpdatedAt();
+}
+
+function migrateLegacyScriptWorkspace(username) {
+    username = String(username || '').trim().toLowerCase();
+    if (!username) return;
+    var owner = String(safeStorageGet(SCRIPT_LEGACY_OWNER, '') || '').trim().toLowerCase();
+    if (owner && owner !== username) return;
+    var scopedKeys = [SBK, SCAT, SBK_UPDATED, SBK_REVISION].map(function (key) { return scriptStorageKey(key, username); });
+    if (scopedKeys.some(function (key) { return safeStorageGet(key, null) !== null; })) return;
+    var legacyScripts = safeStorageGet(SBK, null);
+    var legacyCategories = safeStorageGet(SCAT, null);
+    var legacyUpdated = safeStorageGet(SBK_UPDATED, null);
+    if (legacyScripts === null && legacyCategories === null && legacyUpdated === null) return;
+    var writes = [
+        safeStorageSet(scopedKeys[0], legacyScripts === null ? '[]' : legacyScripts),
+        safeStorageSet(scopedKeys[1], legacyCategories === null ? '[]' : legacyCategories),
+        safeStorageSet(scopedKeys[2], legacyUpdated === null ? '0' : legacyUpdated),
+        safeStorageSet(scopedKeys[3], '0')
+    ];
+    if (writes.every(Boolean)) safeStorageSet(SCRIPT_LEGACY_OWNER, username);
+}
+
+function saveScriptWorkspaceAtomically(scripts, categories, updatedAt, revision, acceptTimestamp) {
+    var keys = [activeStorageKey(SBK), activeStorageKey(SCAT), activeStorageKey(SBK_UPDATED), activeStorageKey(SBK_REVISION)];
+    var oldValues = keys.map(function (key) { return safeStorageGet(key, null); });
+    if (keys.some(function (key) { return storageReadIsUnavailable(key); })) return false;
+    var nextTimestamp = parseInt(updatedAt, 10);
+    if (!isFinite(nextTimestamp) || nextTimestamp < 0) nextTimestamp = Date.now();
+    nextTimestamp = acceptTimestamp ? Math.max(nextTimestamp, getScriptUpdatedAt()) : Math.max(nextTimestamp, getScriptUpdatedAt() + 1);
+    var values = [
+        JSON.stringify(Array.isArray(scripts) ? scripts : []),
+        JSON.stringify(normalizeScriptCategories(categories)),
+        String(nextTimestamp),
+        String(Math.max(0, parseInt(revision, 10) || 0))
+    ];
+    for (var i = 0; i < keys.length; i++) {
+        if (safeStorageSet(keys[i], values[i])) continue;
+        for (var j = 0; j < i; j++) {
+            if (oldValues[j] === null) safeStorageRemove(keys[j]);
+            else safeStorageSet(keys[j], oldValues[j]);
+        }
+        return false;
+    }
+    return true;
 }
 
 function createScriptCategoryId() {
@@ -2239,7 +2483,7 @@ function extractImportedCategories(data) {
 }
 
 function normalizeImportedScripts(items) {
-    var out = [];
+    var out = [], seenIds = {};
     (Array.isArray(items) ? items : []).forEach(function (item, idx) {
         if (!item || typeof item !== 'object') return;
         var name = typeof item.name === 'string' ? item.name.trim() : '';
@@ -2251,7 +2495,19 @@ function normalizeImportedScripts(items) {
         if (!cmd) return;
         cmd = Array.from(cmd).slice(0, MAX_SCRIPT_COMMAND_CHARS).join('');
         if (!name) name = '导入脚本 ' + (idx + 1);
-        var normalized = { name: name.slice(0, 80), cmd: cmd };
+        var id = typeof item.id === 'string' ? item.id.trim().slice(0, 80) : '';
+        if (!id) id = legacyScriptBookmarkId(name, cmd);
+        var baseId = id;
+        if (seenIds[baseId]) {
+            var suffix = 2;
+            do {
+                var suffixText = '_' + suffix;
+                id = Array.from(baseId).slice(0, Math.max(1, 80 - Array.from(suffixText).length)).join('') + suffixText;
+                suffix++;
+            } while (seenIds[id]);
+        }
+        seenIds[id] = true;
+        var normalized = { id: id, name: name.slice(0, 80), cmd: cmd };
         var categoryId = typeof item.categoryId === 'string' ? item.categoryId.trim().slice(0, 80) : '';
         if (categoryId) normalized.categoryId = categoryId;
         var useCount = parseScriptUseCount(item);
@@ -2292,6 +2548,44 @@ function mergeImportedScriptCategories(incoming) {
     return { categories: current, idMap: idMap, added: added, capacitySkipped: capacitySkipped };
 }
 
+function buildImportedScriptWorkspace(data) {
+    if (isScriptStorageCorrupt()) return null;
+    var categoryMerge = mergeImportedScriptCategories(extractImportedCategories(data));
+    if (isScriptStorageCorrupt()) return null;
+    var validCategoryIds = {};
+    categoryMerge.categories.forEach(function (cat) { validCategoryIds[cat.id] = true; });
+    var incoming = normalizeImportedScripts(extractImportedScripts(data));
+    incoming.forEach(function (script) {
+        if (!script.categoryId) return;
+        script.categoryId = categoryMerge.idMap[script.categoryId] || script.categoryId;
+        if (!validCategoryIds[script.categoryId]) delete script.categoryId;
+    });
+    var current = loadSortedScriptBookmarks();
+    var seen = {};
+    current.forEach(function (b) { seen[scriptBookmarkKey(b)] = true; });
+    var added = 0, skipped = 0, capacitySkipped = 0;
+    incoming.forEach(function (b) {
+        var key = scriptBookmarkKey(b);
+        if (seen[key]) { skipped++; return; }
+        if (current.length >= MAX_SCRIPT_BOOKMARKS) { capacitySkipped++; return; }
+        current.push(b);
+        seen[key] = true;
+        added++;
+    });
+    var cleaned = cleanScriptCategoryReferences(current, categoryMerge.categories);
+    sortScriptBookmarks(current);
+    return {
+        scripts: current,
+        categories: categoryMerge.categories,
+        added: added,
+        skipped: skipped,
+        cleaned: cleaned,
+        capacitySkipped: capacitySkipped,
+        categoryAdded: categoryMerge.added,
+        categoryCapacitySkipped: categoryMerge.capacitySkipped
+    };
+}
+
 function importScriptBookmarks(input) {
     var file = input && input.files && input.files[0];
     if (!file) return;
@@ -2299,45 +2593,22 @@ function importScriptBookmarks(input) {
     reader.onload = function () {
         try {
             var data = JSON.parse(reader.result);
-            var categoryMerge = mergeImportedScriptCategories(extractImportedCategories(data));
-            var validCategoryIds = {};
-            categoryMerge.categories.forEach(function (cat) { validCategoryIds[cat.id] = true; });
-            var incoming = normalizeImportedScripts(extractImportedScripts(data));
-            incoming.forEach(function (script) {
-                if (!script.categoryId) return;
-                script.categoryId = categoryMerge.idMap[script.categoryId] || script.categoryId;
-                if (!validCategoryIds[script.categoryId]) delete script.categoryId;
-            });
-            if (!incoming.length && !categoryMerge.added) { showToast('未找到可导入的脚本书签或分类', 'error'); return; }
-            var current = loadSortedScriptBookmarks();
-            var seen = {};
-            current.forEach(function (b) { seen[scriptBookmarkKey(b)] = true; });
-            var added = 0, skipped = 0, capacitySkipped = 0;
-            incoming.forEach(function (b) {
-                var key = scriptBookmarkKey(b);
-                if (seen[key]) { skipped++; return; }
-                if (current.length >= MAX_SCRIPT_BOOKMARKS) { capacitySkipped++; return; }
-                current.push(b);
-                seen[key] = true;
-                added++;
-            });
-            var cleaned = cleanScriptCategoryReferences(current, categoryMerge.categories);
-            var now = Date.now();
-            if (added || cleaned) {
-                sortScriptBookmarks(current);
-                saveScriptBookmarksData(current, now);
+            var result = buildImportedScriptWorkspace(data);
+            if (!result) { showToast('本地书签数据损坏，导入已停止以避免覆盖原数据', 'error'); return; }
+            if (!result.added && !result.categoryAdded) { showToast('未找到可导入的脚本书签或分类', 'error'); return; }
+            if (!saveScriptWorkspaceAtomically(result.scripts, result.categories, Date.now(), getScriptRevision(), false)) {
+                showToast('浏览器存储失败，导入内容未保存', 'error');
+                return;
             }
-            if (categoryMerge.added) saveScriptCategoriesData(categoryMerge.categories, now);
             renderScriptBookmarks();
             renderCategoryManager();
             updateScriptManagerSummary();
-            if (added || categoryMerge.added || cleaned) syncLocalScriptsIfLogged();
-            var message = '已导入 ' + added + ' 个脚本、' + categoryMerge.added + ' 个分类';
-            if (!added && !categoryMerge.added) message = '没有新增内容，跳过 ' + skipped + ' 个重复脚本';
-            if (capacitySkipped || categoryMerge.capacitySkipped) {
-                message += '；容量已满，另跳过 ' + capacitySkipped + ' 个脚本、' + categoryMerge.capacitySkipped + ' 个分类';
+            syncLocalScriptsIfLogged();
+            var message = '已导入 ' + result.added + ' 个脚本、' + result.categoryAdded + ' 个分类';
+            if (result.capacitySkipped || result.categoryCapacitySkipped) {
+                message += '；容量已满，另跳过 ' + result.capacitySkipped + ' 个脚本、' + result.categoryCapacitySkipped + ' 个分类';
             }
-            showToast(message, (added || categoryMerge.added) ? 'success' : 'info');
+            showToast(message, 'success');
         } catch (e) {
             showToast('导入失败：JSON 文件无效', 'error');
         } finally {
@@ -2428,7 +2699,10 @@ function apiJSON(url, options) {
         return r.text().then(function (txt) {
             var data = {};
             try { data = txt ? JSON.parse(txt) : {}; } catch (e) { data = { ok: false, msg: txt || '请求失败' }; }
-            if (!r.ok || data.ok === false) throw data;
+            if (!r.ok || data.ok === false) {
+                data.status = r.status;
+                throw data;
+            }
             return data;
         });
     });
@@ -2523,6 +2797,92 @@ function validateAccountPasswordInput(password, label) {
     return true;
 }
 
+function createScriptBookmarkId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return 'scr_' + window.crypto.randomUUID();
+    return 'scr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 12);
+}
+
+function legacyScriptBookmarkId(name, cmd) {
+    var hash = 2166136261;
+    Array.from(String(name) + '\u0000' + String(cmd)).forEach(function (ch) {
+        hash ^= ch.codePointAt(0);
+        hash = Math.imul(hash, 16777619);
+    });
+    return 'scr_legacy_' + (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function cancelPendingScriptSync() {
+    if (scriptSyncTimer) clearTimeout(scriptSyncTimer);
+    scriptSyncTimer = null;
+    scriptSyncTimerAccount = '';
+    scriptSyncGeneration++;
+}
+
+function refreshActiveScriptWorkspaceUI() {
+    ensureScriptBookmarkClock();
+    renderScriptBookmarks();
+    renderCategoryManager();
+    updateScriptManagerSummary();
+}
+
+function applyCurrentAccount(account) {
+    var next = account && account.username ? {
+        username: String(account.username).trim().toLowerCase(),
+        isAdmin: !!account.isAdmin
+    } : null;
+    var previousName = scriptAccountName(currentAccount);
+    var nextName = scriptAccountName(next);
+    currentAccount = next;
+    if (previousName !== nextName) {
+        cancelPendingScriptSync();
+        accountAutoSynced = '';
+        if (nextName) migrateLegacyScriptWorkspace(nextName);
+        refreshActiveScriptWorkspaceUI();
+    }
+    updateAccountUI();
+}
+
+function ensureGatewayAccount() {
+    if (!requireGatewayAccount || (currentAccount && currentAccount.username)) return true;
+    openAuthModal('login');
+    showToast('请先登录 WebSSH 书签账号再建立 SSH/SFTP 连接', 'info');
+    return false;
+}
+
+var authBroadcastChannel = null;
+try {
+    if (typeof BroadcastChannel === 'function') {
+        authBroadcastChannel = new BroadcastChannel('webssh-auth-state');
+        authBroadcastChannel.onmessage = function () {
+            authStateGeneration++;
+            cancelPendingScriptSync();
+            refreshAccountState();
+        };
+    }
+} catch (e) { authBroadcastChannel = null; }
+
+function broadcastAuthStateChange() {
+    var value = Date.now() + ':' + Math.random();
+    try { localStorage.setItem(AUTH_EVENT_KEY, value); } catch (e) { }
+    try { if (authBroadcastChannel) authBroadcastChannel.postMessage(value); } catch (e) { }
+}
+
+window.addEventListener('storage', function (event) {
+    if (event.key === AUTH_EVENT_KEY) {
+        authStateGeneration++;
+        cancelPendingScriptSync();
+        refreshAccountState();
+        return;
+    }
+    var username = scriptAccountName(currentAccount);
+    if (!username) return;
+    var activeKeys = [SBK, SCAT, SBK_UPDATED, SBK_REVISION].map(function (key) { return scriptStorageKey(key, username); });
+    if (activeKeys.indexOf(event.key) >= 0) {
+        scriptSyncGeneration++;
+        refreshActiveScriptWorkspaceUI();
+    }
+});
+
 function submitAuthForm() {
     var username = document.getElementById('authUsername').value.trim();
     var password = document.getElementById('authPassword').value;
@@ -2531,12 +2891,13 @@ function submitAuthForm() {
     var path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
     apiJSON(path, { method: 'POST', body: { username: username, password: password } })
         .then(function (res) {
-            currentAccount = {
+            authStateGeneration++;
+            applyCurrentAccount({
                 username: res.data && res.data.username ? res.data.username : username.toLowerCase(),
                 isAdmin: !!(res.data && res.data.isAdmin)
-            };
-            accountAutoSynced = false;
-            updateAccountUI();
+            });
+            accountAutoSynced = currentAccount.username;
+            broadcastAuthStateChange();
             hideAuthModal();
             showToast((authMode === 'register' ? '注册成功' : '登录成功') + '，正在同步书签...', 'success');
             syncScriptBookmarks('auto');
@@ -2545,11 +2906,12 @@ function submitAuthForm() {
 }
 
 function logoutAccount() {
+    cancelPendingScriptSync();
     apiJSON('/api/auth/logout', { method: 'POST' })
         .then(function () {
-            currentAccount = null;
-            accountAutoSynced = false;
-            updateAccountUI();
+            authStateGeneration++;
+            applyCurrentAccount(null);
+            broadcastAuthStateChange();
             clearPasswordChangeForm();
             hideAuthModal();
             showToast('已退出登录，本地书签仍保留在浏览器', 'info');
@@ -2789,8 +3151,9 @@ function deleteManagedAccount(username) {
         .then(function (res) {
             updateManagedAccounts(res.data || {});
             if (currentAccount && currentAccount.username === acc.username) {
-                currentAccount = null;
-                updateAccountUI();
+                authStateGeneration++;
+                applyCurrentAccount(null);
+                broadcastAuthStateChange();
                 hideAccountEditModal();
                 hideAccountAdminModal();
             } else {
@@ -2802,19 +3165,20 @@ function deleteManagedAccount(username) {
 }
 
 function refreshAccountState() {
+    var requestGeneration = ++authStateGeneration;
     apiJSON('/api/auth/me')
         .then(function (res) {
+            if (requestGeneration !== authStateGeneration) return;
             var d = res.data || {};
-            currentAccount = d.loggedIn ? { username: d.username, isAdmin: !!d.isAdmin } : null;
-            updateAccountUI();
-            if (currentAccount && !accountAutoSynced) {
-                accountAutoSynced = true;
+            applyCurrentAccount(d.loggedIn ? { username: d.username, isAdmin: !!d.isAdmin } : null);
+            if (currentAccount && accountAutoSynced !== currentAccount.username) {
+                accountAutoSynced = currentAccount.username;
                 syncScriptBookmarks('auto', true);
             }
         })
-        .catch(function () {
-            currentAccount = null;
-            updateAccountUI();
+        .catch(function (err) {
+            if (requestGeneration !== authStateGeneration) return;
+            if (err && err.status === 401) applyCurrentAccount(null);
         });
 }
 
@@ -2822,55 +3186,176 @@ function normalizeCloudScripts(items) {
     return normalizeImportedScripts(Array.isArray(items) ? items : []);
 }
 
-function syncScriptBookmarks(mode, silent) {
+function captureScriptSyncSnapshot() {
+    var scripts = loadSortedScriptBookmarks();
+    var categories = loadScriptCategories();
+    return {
+        account: scriptAccountName(currentAccount),
+        updatedAt: getScriptUpdatedAt(),
+        revision: getScriptRevision(),
+        scripts: scripts,
+        categories: categories,
+        scriptsStorage: scriptStorageGet(SBK, ''),
+        categoriesStorage: scriptStorageGet(SCAT, '')
+    };
+}
+
+function scriptSyncSnapshotIsCurrent(snapshot) {
+    if (!snapshot || scriptAccountName(currentAccount) !== snapshot.account) return false;
+    if (getScriptUpdatedAt() !== snapshot.updatedAt || getScriptRevision() !== snapshot.revision) return false;
+    return scriptStorageGet(SBK, '') === snapshot.scriptsStorage &&
+        scriptStorageGet(SCAT, '') === snapshot.categoriesStorage;
+}
+
+function reconcileCloudScriptConflict(data) {
+    data = data || {};
+    if (!Array.isArray(data.scripts) || !Array.isArray(data.categories)) return false;
+    var cloudCategories = normalizeScriptCategories(data.categories);
+    var categoryMerge = mergeImportedScriptCategories(cloudCategories);
+    var categories = categoryMerge.categories;
+    var validCategoryIds = {};
+    categories.forEach(function (category) { validCategoryIds[category.id] = true; });
+    var cloudScripts = normalizeCloudScripts(data.scripts);
+    cloudScripts.forEach(function (script) {
+        if (!script.categoryId) return;
+        script.categoryId = categoryMerge.idMap[script.categoryId] || script.categoryId;
+        if (!validCategoryIds[script.categoryId]) delete script.categoryId;
+    });
+    var current = loadSortedScriptBookmarks();
+    if (isScriptStorageCorrupt()) return false;
+    if (categoryMerge.capacitySkipped) {
+        showToast('分类容量已满，无法安全合并云端分类；请先导出并清理本地分类', 'error');
+        return false;
+    }
+    var seen = {};
+    current.forEach(function (script) { seen[scriptBookmarkKey(script)] = true; });
+    var skippedForCapacity = 0;
+    cloudScripts.forEach(function (script) {
+        var key = scriptBookmarkKey(script);
+        if (!key.trim() || seen[key]) return;
+        if (current.length >= MAX_SCRIPT_BOOKMARKS) { skippedForCapacity++; return; }
+        current.push(script);
+        seen[key] = true;
+    });
+    if (skippedForCapacity) {
+        showToast('脚本容量已满，无法安全合并全部云端脚本；请先导出并清理本地脚本', 'error');
+        return false;
+    }
+    cleanScriptCategoryReferences(current, categories);
+    sortScriptBookmarks(current);
+    var cloudUpdatedAt = Math.max(0, parseInt(data.updatedAt, 10) || 0);
+    var revision = Math.max(0, parseInt(data.revision, 10) || 0);
+    if (!saveScriptWorkspaceAtomically(current, categories, Math.max(Date.now(), cloudUpdatedAt), revision, false)) return false;
+    refreshActiveScriptWorkspaceUI();
+    return true;
+}
+
+function syncScriptBookmarks(mode, silent, retryCount, conflictMerged) {
     mode = mode || 'auto';
+    retryCount = Math.max(0, parseInt(retryCount, 10) || 0);
     if (!currentAccount || !currentAccount.username) {
         openAuthModal('login');
         showToast('请先登录账号再同步云端书签', 'info');
         return;
     }
     if (!silent) setCloudStatus('正在同步书签...', '');
+    var accountUsername = currentAccount.username;
+    var requestGeneration = ++scriptSyncGeneration;
+    var snapshot = captureScriptSyncSnapshot();
     var payload = {
         mode: mode,
-        scripts: loadSortedScriptBookmarks(),
-        categories: loadScriptCategories(),
-        updatedAt: getScriptUpdatedAt()
+        account: accountUsername,
+        baseRevision: snapshot.revision,
+        updatedAt: snapshot.updatedAt
     };
+    if (mode !== 'pull') {
+        payload.scripts = snapshot.scripts;
+        payload.categories = snapshot.categories;
+    }
     apiJSON('/api/scripts/sync', { method: 'POST', body: payload })
         .then(function (res) {
+            // A response from an older request, another account, or a request
+            // whose local snapshot changed must never write into localStorage.
+            if (requestGeneration !== scriptSyncGeneration || !currentAccount || currentAccount.username !== accountUsername) return;
+            if (!scriptSyncSnapshotIsCurrent(snapshot)) {
+                setCloudStatus('检测到本地新修改，正在重新同步...', 'warn');
+                syncLocalScriptsIfLogged(0);
+                return;
+            }
             var d = res.data || {};
+            if (d.username && d.username !== accountUsername) {
+                cancelPendingScriptSync();
+                refreshAccountState();
+                return;
+            }
+            if (!Array.isArray(d.scripts) || !Array.isArray(d.categories)) {
+                throw { status: 502, msg: '云端同步响应格式不正确，本地数据未改动' };
+            }
+            var syncedAt = parseInt(d.updatedAt, 10);
+            if (!isFinite(syncedAt) || syncedAt < 0) {
+                throw { status: 502, msg: '云端同步时间无效，本地数据未改动' };
+            }
             var scripts = normalizeCloudScripts(d.scripts);
-            var categories = Array.isArray(d.categories) ? normalizeScriptCategories(d.categories) : loadScriptCategories();
+            var categories = normalizeScriptCategories(d.categories);
+            if (typeof isScriptStorageCorrupt === 'function' && isScriptStorageCorrupt()) {
+                setCloudStatus('本地书签数据损坏，已停止同步以避免覆盖云端', 'warn', 6000);
+                if (!silent) showToast('本地书签数据损坏，请先导出或清理后再同步', 'error');
+                return;
+            }
             cleanScriptCategoryReferences(scripts, categories);
-            if (Array.isArray(d.categories)) saveScriptCategoriesData(categories, d.updatedAt || Date.now());
-            var merged = mergeScriptBookmarksIncremental(scripts, d.updatedAt || Date.now(), d.mode === 'pull' || d.mode === 'push');
-            if (cleanScriptCategoryReferences(merged.scripts, categories)) saveScriptBookmarksData(merged.scripts, d.updatedAt || Date.now());
-            renderScriptBookmarks();
-            renderCategoryManager();
-            updateScriptManagerSummary();
+            if (!saveScriptWorkspaceAtomically(scripts, categories, syncedAt, d.revision, true)) {
+                setCloudStatus('浏览器存储失败，未更新同步版本', 'warn', 5000);
+                if (!silent) showToast('浏览器存储空间不足，云端数据未写入本地', 'error');
+                return;
+            }
+            var merged = { scripts: scripts, added: 0 };
+            refreshActiveScriptWorkspaceUI();
             updateAccountUI();
             var msg = '书签已是最新';
             if (d.mode === 'push') msg = '本地书签已同步到云端';
             else if (d.mode === 'pull') msg = '云端书签已同步到本地';
-            if (merged.added) msg += '，新增 ' + merged.added + ' 个';
+            if (conflictMerged) msg = '并发修改已合并并同步';
             var categoryCount = categories.length;
             var detail = merged.scripts.length + ' 个脚本 · ' + categoryCount + ' 个分类';
             if (!silent) setCloudStatus(msg + ' · ' + detail, 'synced', 3500);
             if (!silent) showToast(msg + '（' + detail + '）', 'success');
         })
         .catch(function (err) {
+            if (requestGeneration !== scriptSyncGeneration || !currentAccount || currentAccount.username !== accountUsername) return;
+            if (err && err.code === 'account_changed') {
+                cancelPendingScriptSync();
+                refreshAccountState();
+                return;
+            }
+            if (err && err.code === 'revision_conflict' && retryCount < 2 && scriptSyncSnapshotIsCurrent(snapshot)) {
+                if (!reconcileCloudScriptConflict(err.data || {})) {
+                    if (!silent) showToast('并发数据合并失败：浏览器存储不可用', 'error');
+                    return;
+                }
+                syncScriptBookmarks('push', silent, retryCount + 1, true);
+                return;
+            }
+            if (!scriptSyncSnapshotIsCurrent(snapshot)) {
+                syncLocalScriptsIfLogged(0);
+                return;
+            }
             if (!silent) setCloudStatus('同步失败：' + (err.msg || '请稍后重试'), 'warn', 5000);
             if (!silent) showToast(err.msg || '同步失败', 'error');
         });
 }
 
-function syncLocalScriptsIfLogged() {
+function syncLocalScriptsIfLogged(delay) {
     if (!currentAccount || !currentAccount.username) return;
     if (scriptSyncTimer) clearTimeout(scriptSyncTimer);
+    scriptSyncTimerAccount = currentAccount.username;
+    delay = typeof delay === 'number' && delay >= 0 ? delay : 350;
     scriptSyncTimer = setTimeout(function () {
         scriptSyncTimer = null;
+        var timerAccount = scriptSyncTimerAccount;
+        scriptSyncTimerAccount = '';
+        if (!currentAccount || currentAccount.username !== timerAccount) return;
         syncScriptBookmarks('push', true);
-    }, 350);
+    }, delay);
 }
 
 function setVersionStatus(text, cls) {
@@ -3021,10 +3506,11 @@ function saveConnBookmark() {
     document.getElementById('port').value = p;
     var at = document.querySelector('.auth-tab.active').dataset.tab;
     var bm = { hostname: h, port: p, username: u, authType: at };
-    if (at === 'password') bm.password = document.getElementById('password').value;
+    if (savePasswords && at === 'password') bm.password = document.getElementById('password').value;
     var bms = loadBM(CBK), idx = bms.findIndex(function (b) { return b.hostname === h && b.port === p && b.username === u; });
     if (idx >= 0) bms[idx] = bm; else bms.push(bm);
-    saveBM(CBK, bms); renderConnBookmarks(); showToast('已保存', 'success');
+    if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未保存', 'error'); return; }
+    renderConnBookmarks(); showToast('已保存', 'success');
 }
 
 function applyConn(i) {
@@ -3033,12 +3519,18 @@ function applyConn(i) {
     document.getElementById('hostname').value = formatHostForInput(hp.host);
     document.getElementById('port').value = hp.port;
     document.getElementById('username').value = b.username || 'root';
+    document.getElementById('password').value = '';
+    document.getElementById('privateKey').value = '';
+    document.getElementById('passphrase').value = '';
     if (b.authType === 'key') switchAuthTab('key');
-    else { switchAuthTab('password'); if (b.password) document.getElementById('password').value = b.password; }
+    else {
+        switchAuthTab('password');
+        document.getElementById('password').value = savePasswords && b.password ? b.password : '';
+    }
     showToast('已填入', 'info');
 }
 
-function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); saveBM(CBK, bms); renderConnBookmarks(); showToast('已删除', 'info'); }
+function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未删除', 'error'); return; } renderConnBookmarks(); showToast('已删除', 'info'); }
 
 // ==================== Preset Scripts ====================
 var PRESET_SCRIPTS = [
@@ -3082,6 +3574,7 @@ var PRESET_SCRIPTS = [
 var showPresets = false;
 
 function scriptBookmarkKey(b) {
+    if (b && typeof b.id === 'string' && b.id.trim()) return 'id:' + b.id.trim();
     return ((b && b.name ? b.name : '').trim()) + '\n' + ((b && b.cmd ? b.cmd : '').trim());
 }
 
@@ -3121,7 +3614,7 @@ function sortScriptBookmarks(bms) {
 
 function loadSortedScriptBookmarks() {
     var bms = normalizeImportedScripts(loadBM(SBK));
-    if (sortScriptBookmarks(bms)) safeStorageSet(SBK, JSON.stringify(bms));
+    if (sortScriptBookmarks(bms) && !scriptStorageSet(SBK, JSON.stringify(bms))) return [];
     return bms;
 }
 
@@ -3257,7 +3750,7 @@ function mergeScriptBookmarksIncremental(incoming, updatedAt, replaceExisting) {
     incoming = normalizeCloudScripts(incoming);
     if (replaceExisting) {
         sortScriptBookmarks(incoming);
-        saveScriptBookmarksData(incoming, updatedAt || Date.now());
+        if (!saveScriptBookmarksData(incoming, updatedAt, true)) return { scripts: incoming, added: 0, capacitySkipped: 0, storageError: true };
         rebuildScriptSearchIndex(incoming);
         return { scripts: incoming, added: 0, capacitySkipped: 0 };
     }
@@ -3275,7 +3768,7 @@ function mergeScriptBookmarksIncremental(incoming, updatedAt, replaceExisting) {
     });
     if (added.length || updatedAt) {
         sortScriptBookmarks(current);
-        saveScriptBookmarksData(current, updatedAt || Date.now());
+        if (!saveScriptBookmarksData(current, updatedAt, true)) return { scripts: current, added: added.length, capacitySkipped: capacitySkipped, storageError: true };
     }
     rebuildScriptSearchIndex(current);
     return { scripts: current, added: added.length, capacitySkipped: capacitySkipped };
@@ -3323,6 +3816,7 @@ function openEditScriptModal(i) {
 function openScriptModal(i, bookmark) {
     var editing = i >= 0 && bookmark;
     document.getElementById('editScriptIndex').value = editing ? i : -1;
+    document.getElementById('editScriptId').value = editing ? (bookmark.id || '') : '';
     document.getElementById('editScriptName').value = editing ? (bookmark.name || '') : '';
     document.getElementById('editScriptContent').value = editing ? (bookmark.cmd || '') : '';
     document.getElementById('editScriptCategory').value = editing ? (bookmark.categoryId || '') : (activeScriptCategory && activeScriptCategory !== '__uncategorized__' ? activeScriptCategory : '');
@@ -3338,7 +3832,7 @@ function openScriptModal(i, bookmark) {
 function hideEditScriptModal() {
     var modal = document.getElementById('editScriptModal');
     if (modal) modal.classList.remove('show');
-    ['editScriptIndex','editScriptName','editScriptContent','editScriptCategory'].forEach(function (id) {
+    ['editScriptIndex','editScriptId','editScriptName','editScriptContent','editScriptCategory'].forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.value = id === 'editScriptIndex' ? '-1' : '';
     });
@@ -3346,6 +3840,7 @@ function hideEditScriptModal() {
 
 function saveEditedScriptBookmark() {
     var idx = parseInt(document.getElementById('editScriptIndex').value, 10);
+    var targetId = document.getElementById('editScriptId').value.trim();
     var name = document.getElementById('editScriptName').value.trim();
     var cmd = document.getElementById('editScriptContent').value.trim();
     var categoryId = document.getElementById('editScriptCategory').value.trim();
@@ -3356,16 +3851,21 @@ function saveEditedScriptBookmark() {
     if (categoryId) item.categoryId = categoryId;
     var editing = idx >= 0 && isFinite(idx);
     if (editing) {
-        if (!bms[idx]) { hideEditScriptModal(); return; }
+        if (!bms[idx] || (targetId && bms[idx].id !== targetId)) {
+            var targetIndex = bms.findIndex(function (entry) { return entry && entry.id === targetId; });
+            if (targetIndex < 0) { hideEditScriptModal(); showToast('脚本已被其他标签页修改，请重新打开', 'warn'); return; }
+            idx = targetIndex;
+        }
         item = Object.assign({}, bms[idx], item);
         if (!categoryId) delete item.categoryId;
         bms[idx] = item;
     } else {
         if (bms.length >= MAX_SCRIPT_BOOKMARKS) { showToast('脚本数量已达到 ' + MAX_SCRIPT_BOOKMARKS + ' 个上限', 'error'); return; }
+        item.id = createScriptBookmarkId();
         bms.push(item);
     }
     sortScriptBookmarks(bms);
-    saveBM(SBK, bms);
+    if (!saveBM(SBK, bms)) { showToast('浏览器存储失败，脚本未保存', 'error'); return; }
     hideEditScriptModal();
     renderScriptBookmarks();
     updateScriptManagerSummary();
@@ -3382,7 +3882,8 @@ var pendingRunCommand = null;
 // 多行脚本一旦发出就会被逐行执行，没有中途反悔的机会，所以先把完整内容摊开让用户确认。
 // 单行命令仍然点一下就跑，不打断日常操作。
 function confirmRunCommand(name, cmd, onConfirm) {
-    if (commandLineCount(cmd) <= 1) { onConfirm(); return; }
+    var dangerous = /(^|[;&|\n])\s*(reboot|shutdown|poweroff|halt|init\s+[06])\b|\b(iptables|ufw|firewalld|sshd|systemctl\s+(restart|stop|disable)|passwd\s+root)\b/i.test(cmd || '');
+    if (commandLineCount(cmd) <= 1 && !dangerous) { onConfirm(); return; }
     var modal = document.getElementById('runScriptConfirmModal');
     if (!modal) { onConfirm(); return; }
     pendingRunCommand = onConfirm;
@@ -3390,7 +3891,7 @@ function confirmRunCommand(name, cmd, onConfirm) {
     var desc = document.getElementById('runScriptConfirmDescription');
     var preview = document.getElementById('runScriptConfirmCommand');
     if (title) title.textContent = '确定运行脚本“' + (name || '未命名脚本') + '”吗？';
-    if (desc) desc.textContent = '这个脚本共 ' + commandLineCount(cmd) + ' 行，确认后会在当前会话中依次执行。';
+    if (desc) desc.textContent = (dangerous ? '这是可能中断连接或修改系统安全设置的高风险命令。' : '这个脚本共 ' + commandLineCount(cmd) + ' 行。') + '确认后会在当前会话中执行。';
     if (preview) preview.textContent = cmd.replace(/\r\n?/g, '\n');
     modal.classList.add('show');
 }
@@ -3411,7 +3912,7 @@ function runScript(i) {
     var bms = loadSortedScriptBookmarks();
     var b = bms[i]; if (!b) return;
     if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].ws || sessions[activeIdx].ws.readyState !== 1) { showToast('无活动连接', 'error'); return; }
-    var name = b.name, cmd = b.cmd;
+    var name = b.name, cmd = b.cmd, targetId = b.id;
     confirmRunCommand(name, cmd, function () {
         if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
         if (!sendCommandToSession(sessions[activeIdx], cmd)) { showToast('无活动连接', 'error'); return; }
@@ -3419,11 +3920,12 @@ function runScript(i) {
         sessions[activeIdx].term.focus();
         // 确认框是异步的，期间列表可能已被改动，索引对不上就不再改动排序数据。
         var list = loadSortedScriptBookmarks();
-        var target = list[i];
+        var targetIndex = list.findIndex(function (entry) { return entry && entry.id === targetId; });
+        var target = targetIndex >= 0 ? list[targetIndex] : null;
         if (!target || target.cmd !== cmd) return;
-        list.splice(i, 1);
+        list.splice(targetIndex, 1);
         list.unshift(Object.assign({}, target, { useCount: parseScriptUseCount(target) + 1, lastUsed: Date.now() }));
-        saveBM(SBK, list);
+        if (!saveBM(SBK, list)) { showToast('浏览器存储失败，使用次数未保存', 'error'); return; }
         renderScriptBookmarks();
         syncLocalScriptsIfLogged();
     });
@@ -3434,6 +3936,7 @@ function delScript(i) {
     var bookmark = bms[i];
     if (!bookmark) return;
     pendingDeleteScriptIndex = i;
+    pendingDeleteScriptId = bookmark.id || '';
     var title = document.getElementById('scriptDeleteTitle');
     var description = document.getElementById('scriptDeleteDescription');
     if (title) title.textContent = '确定删除脚本“' + (bookmark.name || '未命名脚本') + '”吗？';
@@ -3446,15 +3949,17 @@ function hideScriptDeleteModal() {
     var modal = document.getElementById('scriptDeleteModal');
     if (modal) modal.classList.remove('show');
     pendingDeleteScriptIndex = -1;
+    pendingDeleteScriptId = '';
 }
 
 function confirmDelScript() {
     var i = pendingDeleteScriptIndex;
     if (i < 0) return;
     var bms = loadSortedScriptBookmarks();
-    if (!bms[i]) { hideScriptDeleteModal(); return; }
-    bms.splice(i, 1);
-    saveBM(SBK, bms);
+    var targetIndex = pendingDeleteScriptId ? bms.findIndex(function (entry) { return entry && entry.id === pendingDeleteScriptId; }) : i;
+    if (targetIndex < 0 || !bms[targetIndex]) { hideScriptDeleteModal(); showToast('脚本已被其他标签页修改，请重新打开', 'warn'); return; }
+    bms.splice(targetIndex, 1);
+    if (!saveBM(SBK, bms)) { showToast('浏览器存储失败，脚本未删除', 'error'); return; }
     hideScriptDeleteModal();
     renderScriptBookmarks();
     updateScriptManagerSummary();
@@ -3569,7 +4074,7 @@ function saveScriptCategory() {
         categoryManagerPage = Math.max(1, Math.ceil(categories.length / categoryManagerPageSize));
     }
     var bms = loadSortedScriptBookmarks();
-    saveScriptCategoriesData(categories);
+    if (!saveScriptCategoriesData(categories)) { showToast('浏览器存储失败，分类未保存', 'error'); return; }
     resetCategoryEditor();
     renderCategoryManager(categories, bms);
     renderScriptCategoryFilters(categories, bms);
@@ -3636,9 +4141,10 @@ function performDeleteScriptCategory(id, action) {
     } else if (affected) {
         bms.forEach(function (b) { if (b.categoryId === id) delete b.categoryId; });
     }
-    var now = Date.now();
-    saveScriptCategoriesData(categories, now);
-    if (affected) saveScriptBookmarksData(bms, now);
+    if (!saveScriptWorkspaceAtomically(bms, categories, Date.now(), getScriptRevision(), false)) {
+        showToast('浏览器存储失败，分类或脚本未保存', 'error');
+        return;
+    }
     if (wasActive) activeScriptCategory = '';
     hideCategoryDeleteModal();
     resetCategoryEditor();
@@ -3704,21 +4210,84 @@ function renderCategoryManager(categories, bms) {
 }
 
 // ==================== SFTP ====================
-function sftpLoad(path) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
-    var sshInfo = sessions[activeIdx].sshInfo;
-    sftpCurrentPath = path;
-    document.getElementById('sftpPath').value = path;
-    document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">加载中...</div>';
-    fetch('/file/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: sshInfo, path: path }) })
+function getSessionById(id) {
+    for (var i = 0; i < sessions.length; i++) if (sessions[i] && sessions[i].id === id) return sessions[i];
+    return null;
+}
+
+function getActiveSession() {
+    return activeIdx >= 0 && sessions[activeIdx] ? sessions[activeIdx] : null;
+}
+
+function abortSessionController(session, field) {
+    if (!session || !session[field]) return;
+    try { session[field].abort(); } catch (e) { }
+    session[field] = null;
+}
+
+function cancelSessionSftpBrowsing(session) {
+    if (!session) return;
+    session._sftpListGeneration = (session._sftpListGeneration || 0) + 1;
+    session._sftpDirGeneration = (session._sftpDirGeneration || 0) + 1;
+    abortSessionController(session, '_sftpListController');
+    abortSessionController(session, '_sftpDirController');
+}
+
+function cancelSessionSftpRequests(session) {
+    if (!session) return;
+    cancelSessionSftpBrowsing(session);
+    abortSessionController(session, '_sftpRemoteController');
+    (session._sftpUploadControllers || []).forEach(function (controller) {
+        try { controller.abort(); } catch (e) { }
+    });
+    session._sftpUploadControllers = [];
+    (session._sftpDownloadFrames || []).forEach(function (frame) {
+        if (frame && frame.parentNode) frame.remove();
+    });
+    session._sftpDownloadFrames = [];
+}
+
+function requestWasAborted(err) {
+    return !!(err && err.name === 'AbortError');
+}
+
+function sftpLoad(path, session) {
+    session = session || getActiveSession();
+    if (!session || sessions.indexOf(session) === -1) return;
+    if (!session._connected) {
+        if (getActiveSession() === session) document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">SSH 连接尚未就绪</div>';
+        return;
+    }
+    path = normalizeSftpDir(path);
+    session.sftpPath = path;
+    session._sftpListGeneration = (session._sftpListGeneration || 0) + 1;
+    var generation = session._sftpListGeneration;
+    abortSessionController(session, '_sftpListController');
+    var controller = new AbortController();
+    session._sftpListController = controller;
+    if (getActiveSession() === session) {
+        document.getElementById('sftpPath').value = path;
+        document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">加载中...</div>';
+    }
+    fetch('/file/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sshInfo: session.sshInfo, path: path }),
+        signal: controller.signal
+    })
         .then(function (r) { return r.json(); })
         .then(function (d) {
+            if (sessions.indexOf(session) === -1 || session._sftpListGeneration !== generation || getActiveSession() !== session) return;
+            session._sftpListController = null;
             if (d.Msg !== 'success') { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(d.Msg) + '</div>'; return; }
+            var actualPath = normalizeSftpDir(d.Data && d.Data.path ? d.Data.path : path);
+            session.sftpPath = actualPath;
+            document.getElementById('sftpPath').value = actualPath;
             var list = (d.Data && d.Data.list) || [];
             if (!list.length) { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">空目录</div>'; return; }
             document.getElementById('sftpBody').innerHTML = list.map(function (f) {
                 var isDir = f.IsDir;
-                var fp = (path === '/' ? '/' : path + '/') + f.Name;
+                var fp = (actualPath === '/' ? '/' : actualPath + '/') + f.Name;
                 var fpArg = escAttr(JSON.stringify(fp));
                 var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
                 var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : 'onclick="sftpDownload(' + fpArg + ')"';
@@ -3726,32 +4295,57 @@ function sftpLoad(path) {
                 return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span><span class="sftp-meta">' + esc(f.Size) + '</span>' + dl + '</div>';
             }).join('');
         })
-        .catch(function () { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>'; });
+        .catch(function (err) {
+            if (session._sftpListGeneration !== generation || requestWasAborted(err) || getActiveSession() !== session) return;
+            session._sftpListController = null;
+            document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>';
+        });
 }
 
-function sftpGo() { sftpLoad(document.getElementById('sftpPath').value.trim() || '/'); }
-function sftpUp() { var p = sftpCurrentPath.replace(/\/$/, ''); var i = p.lastIndexOf('/'); sftpLoad(i <= 0 ? '/' : p.substring(0, i)); }
+function sftpGo() {
+    var session = getActiveSession();
+    if (session) sftpLoad(document.getElementById('sftpPath').value.trim() || '/', session);
+}
+function sftpUp() {
+    var session = getActiveSession();
+    if (!session) return;
+    var p = normalizeSftpDir(session.sftpPath).replace(/\/$/, '');
+    var i = p.lastIndexOf('/');
+    sftpLoad(i <= 0 ? '/' : p.substring(0, i), session);
+}
 
 function sftpDownload(path) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
-    var sshInfo = sessions[activeIdx].sshInfo;
-    showToast('正在准备下载...', 'info');
-    fetch('/file/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sshInfo: sshInfo, path: path })
-    }).then(function (response) {
-        if (!response.ok) return response.json().then(function (data) { throw new Error(data.Msg || '下载失败'); });
-        return response.blob().then(function (blob) { return { blob: blob, disposition: response.headers.get('Content-Disposition') || '' }; });
-    }).then(function (result) {
-        var filename = String(path || '').split('/').pop() || 'download';
-        var match = /filename(?:\*=UTF-8''|=)\"?([^\";]+)/i.exec(result.disposition);
-        if (match && match[1]) { try { filename = decodeURIComponent(match[1]); } catch (e) { filename = match[1]; } }
-        var objectURL = URL.createObjectURL(result.blob);
-        var link = document.createElement('a');
-        link.href = objectURL; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
-        setTimeout(function () { URL.revokeObjectURL(objectURL); }, 1000);
-    }).catch(function (err) { showToast(err.message || '下载失败', 'error'); });
+    var session = getActiveSession();
+    if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    var iframe = document.createElement('iframe');
+    var targetName = 'webssh_download_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    iframe.name = targetName;
+    iframe.style.display = 'none';
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/file/download';
+    form.target = targetName;
+    form.style.display = 'none';
+    [['sshInfo', session.sshInfo], ['path', path]].forEach(function (item) {
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = item[0];
+        input.value = item[1];
+        form.appendChild(input);
+    });
+    document.body.appendChild(iframe);
+    session._sftpDownloadFrames.push(iframe);
+    document.body.appendChild(form);
+    var cleanup = function () {
+        if (iframe.parentNode) iframe.remove();
+        var pos = session._sftpDownloadFrames.indexOf(iframe);
+        if (pos >= 0) session._sftpDownloadFrames.splice(pos, 1);
+    };
+    iframe.addEventListener('load', function () { setTimeout(cleanup, 1000); }, { once: true });
+    showToast('下载已交给浏览器处理', 'info');
+    form.submit();
+    form.remove();
+    setTimeout(cleanup, 10 * 60 * 1000);
 }
 
 function normalizeSftpDir(path) {
@@ -3764,12 +4358,14 @@ function normalizeSftpDir(path) {
 }
 
 function showSftpRemoteModal() {
-    if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
+    var session = getActiveSession();
+    if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     var modal = document.getElementById('sftpRemoteModal');
     if (!modal) return;
+    sftpRemoteSessionId = session.id;
     document.getElementById('sftpRemoteUrl').value = '';
     document.getElementById('sftpRemoteName').value = '';
-    document.getElementById('sftpRemotePath').value = normalizeSftpDir(sftpCurrentPath || document.getElementById('sftpPath').value || '/');
+    document.getElementById('sftpRemotePath').value = normalizeSftpDir(session.sftpPath || '/');
     document.getElementById('sftpRemoteStatus').textContent = '';
     var btn = document.getElementById('sftpRemoteSubmit');
     if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
@@ -3778,6 +4374,9 @@ function showSftpRemoteModal() {
 }
 
 function hideSftpRemoteModal() {
+    var session = getSessionById(sftpRemoteSessionId);
+    if (session) abortSessionController(session, '_sftpRemoteController');
+    sftpRemoteSessionId = '';
     var modal = document.getElementById('sftpRemoteModal');
     if (modal) modal.classList.remove('show');
 }
@@ -3790,69 +4389,97 @@ function setSftpRemoteStatus(message, type) {
 }
 
 function submitSftpRemoteDownload() {
-    if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
+    var session = getSessionById(sftpRemoteSessionId);
+    if (!session || !session._connected) { showToast('连接已关闭或尚未就绪', 'error'); return; }
     var url = document.getElementById('sftpRemoteUrl').value.trim();
     var filename = document.getElementById('sftpRemoteName').value.trim();
     var path = normalizeSftpDir(document.getElementById('sftpRemotePath').value);
     if (!url) { setSftpRemoteStatus('请先填写下载链接', 'error'); return; }
     var btn = document.getElementById('sftpRemoteSubmit');
+    var requestGeneration = (session._sftpRemoteGeneration || 0) + 1;
+    session._sftpRemoteGeneration = requestGeneration;
     if (btn) { btn.disabled = true; btn.textContent = '下载中...'; }
     setSftpRemoteStatus('正在远程下载到 ' + path + '，请稍等...', 'info');
+    abortSessionController(session, '_sftpRemoteController');
+    var controller = new AbortController();
+    session._sftpRemoteController = controller;
     var fd = new FormData();
-    fd.append('sshInfo', sessions[activeIdx].sshInfo);
+    fd.append('sshInfo', session.sshInfo);
     fd.append('url', url);
     fd.append('filename', filename);
     fd.append('path', path);
-    fetch('/file/remote', { method: 'POST', body: fd })
+    fetch('/file/remote', { method: 'POST', body: fd, signal: controller.signal })
         .then(function (r) { return r.json(); })
         .then(function (d) {
+            if (session._sftpRemoteGeneration !== requestGeneration || session._sftpRemoteController !== controller) return;
             if (d.Msg === 'success') {
                 var saved = d.Data && d.Data.path ? d.Data.path : path;
                 setSftpRemoteStatus('下载完成：' + saved, 'success');
                 showToast('远程下载完成', 'success');
-                sftpLoad(path);
-                setTimeout(hideSftpRemoteModal, 800);
+                if (sessions.indexOf(session) !== -1) sftpLoad(path, session);
+                setTimeout(function () { if (sftpRemoteSessionId === session.id) hideSftpRemoteModal(); }, 800);
             } else {
                 setSftpRemoteStatus(d.Msg || '下载失败', 'error');
                 showToast('远程下载失败', 'error');
             }
         })
-        .catch(function () {
+        .catch(function (err) {
+            if (requestWasAborted(err)) return;
+            if (session._sftpRemoteGeneration !== requestGeneration) return;
             setSftpRemoteStatus('网络请求失败', 'error');
             showToast('远程下载失败', 'error');
         })
         .finally(function () {
-            if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
+            if (session._sftpRemoteController === controller) {
+                session._sftpRemoteController = null;
+                if (btn) { btn.disabled = false; btn.textContent = '开始下载'; }
+            }
         });
 }
 
 function showSftpDirPicker() {
-    if (activeIdx < 0 || !sessions[activeIdx]) { showToast('无活动连接', 'error'); return; }
+    var session = getSessionById(sftpRemoteSessionId) || getActiveSession();
+    if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     var modal = document.getElementById('sftpDirModal');
     if (!modal) return;
-    sftpDirPickerPath = normalizeSftpDir(document.getElementById('sftpRemotePath').value || sftpCurrentPath);
+    sftpDirPickerSessionId = session.id;
+    session.sftpDirPickerPath = normalizeSftpDir(document.getElementById('sftpRemotePath').value || session.sftpPath);
     modal.classList.add('show');
-    sftpDirLoad(sftpDirPickerPath);
+    sftpDirLoad(session.sftpDirPickerPath, session);
 }
 
 function hideSftpDirPicker() {
+    var session = getSessionById(sftpDirPickerSessionId);
+    if (session) abortSessionController(session, '_sftpDirController');
+    sftpDirPickerSessionId = '';
     var modal = document.getElementById('sftpDirModal');
     if (modal) modal.classList.remove('show');
 }
 
-function sftpDirLoad(path) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+function sftpDirLoad(path, session) {
+    session = session || getSessionById(sftpDirPickerSessionId);
+    if (!session || sessions.indexOf(session) === -1) return;
     path = normalizeSftpDir(path);
-    sftpDirPickerPath = path;
+    session.sftpDirPickerPath = path;
+    session._sftpDirGeneration = (session._sftpDirGeneration || 0) + 1;
+    var generation = session._sftpDirGeneration;
+    abortSessionController(session, '_sftpDirController');
+    var controller = new AbortController();
+    session._sftpDirController = controller;
     var pathInput = document.getElementById('sftpDirPath');
     var listEl = document.getElementById('sftpDirList');
     if (pathInput) pathInput.value = path;
     if (!listEl) return;
     listEl.innerHTML = '<div class="sftp-loading">加载中...</div>';
-    fetch('/file/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: sessions[activeIdx].sshInfo, path: path }) })
+    fetch('/file/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sshInfo: session.sshInfo, path: path }), signal: controller.signal })
         .then(function (r) { return r.json(); })
         .then(function (d) {
+            if (sessions.indexOf(session) === -1 || session._sftpDirGeneration !== generation || sftpDirPickerSessionId !== session.id) return;
+            session._sftpDirController = null;
             if (d.Msg !== 'success') { listEl.innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(d.Msg) + '</div>'; return; }
+            path = normalizeSftpDir(d.Data && d.Data.path ? d.Data.path : path);
+            session.sftpDirPickerPath = path;
+            if (pathInput) pathInput.value = path;
             var list = ((d.Data && d.Data.list) || []).filter(function (f) { return f.IsDir; });
             var rows = [];
             if (path !== '/') rows.push('<button type="button" class="sftp-dir-row up" onclick="sftpDirUp()">.. 上级目录</button>');
@@ -3862,44 +4489,69 @@ function sftpDirLoad(path) {
             }));
             listEl.innerHTML = rows.join('') || '<div class="sftp-loading">没有子目录</div>';
         })
-        .catch(function () { listEl.innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>'; });
+        .catch(function (err) {
+            if (requestWasAborted(err) || session._sftpDirGeneration !== generation || sftpDirPickerSessionId !== session.id) return;
+            session._sftpDirController = null;
+            listEl.innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>';
+        });
 }
 
 function sftpDirGo() {
-    sftpDirLoad(document.getElementById('sftpDirPath').value);
+    var session = getSessionById(sftpDirPickerSessionId);
+    if (session) sftpDirLoad(document.getElementById('sftpDirPath').value, session);
 }
 
 function sftpDirUp() {
-    var p = normalizeSftpDir(sftpDirPickerPath).replace(/\/$/, '');
+    var session = getSessionById(sftpDirPickerSessionId);
+    if (!session) return;
+    var p = normalizeSftpDir(session.sftpDirPickerPath).replace(/\/$/, '');
     var i = p.lastIndexOf('/');
-    sftpDirLoad(i <= 0 ? '/' : p.substring(0, i));
+    sftpDirLoad(i <= 0 ? '/' : p.substring(0, i), session);
 }
 
 function confirmSftpDirPicker() {
-    document.getElementById('sftpRemotePath').value = normalizeSftpDir(sftpDirPickerPath);
+    var session = getSessionById(sftpDirPickerSessionId);
+    if (!session || sftpRemoteSessionId !== session.id) { hideSftpDirPicker(); return; }
+    document.getElementById('sftpRemotePath').value = normalizeSftpDir(session.sftpDirPickerPath);
     hideSftpDirPicker();
 }
 
 function sftpUpload() {
     var input = document.getElementById('sftpUploadInput');
-    if (!input.files.length || activeIdx < 0) return;
-    var sshInfo = sessions[activeIdx].sshInfo;
+    var session = getActiveSession();
+    if (!input.files.length || !session) return;
+    if (!session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    var sshInfo = session.sshInfo;
+    var uploadPath = normalizeSftpDir(session.sftpPath);
     Array.from(input.files).forEach(function (f, index) {
+        var controller = new AbortController();
+        session._sftpUploadControllers.push(controller);
         var fd = new FormData();
         var uploadId = window.crypto && typeof window.crypto.randomUUID === 'function'
             ? window.crypto.randomUUID()
             : Date.now().toString(36) + '_' + index + '_' + Math.random().toString(36).slice(2);
-        fd.append('file', f); fd.append('sshInfo', sshInfo); fd.append('path', sftpCurrentPath); fd.append('id', uploadId);
-        fetch('/file/upload', { method: 'POST', body: fd })
+        fd.append('sshInfo', sshInfo); fd.append('path', uploadPath); fd.append('id', uploadId); fd.append('file', f);
+        fetch('/file/upload', { method: 'POST', body: fd, signal: controller.signal })
             .then(function (r) { return r.json(); })
-            .then(function (d) { if (d.Msg === 'success') { showToast('上传成功: ' + f.name, 'success'); sftpLoad(sftpCurrentPath); } else showToast('上传失败', 'error'); })
-            .catch(function () { showToast('上传失败', 'error'); });
+            .then(function (d) {
+                if (sessions.indexOf(session) === -1) return;
+                if (d.Msg === 'success') { showToast('上传成功: ' + f.name, 'success'); sftpLoad(uploadPath, session); }
+                else showToast('上传失败: ' + (d.Msg || f.name), 'error');
+            })
+            .catch(function (err) { if (!requestWasAborted(err)) showToast('上传失败', 'error'); })
+            .finally(function () {
+                var idx = session._sftpUploadControllers.indexOf(controller);
+                if (idx >= 0) session._sftpUploadControllers.splice(idx, 1);
+            });
     });
     input.value = '';
 }
 
 document.getElementById('sftpPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') sftpGo(); });
 document.getElementById('sftpDirPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') sftpDirGo(); });
+addEventListener('pagehide', function () {
+    sessions.forEach(cancelSessionSftpRequests);
+});
 
 // ==================== Copy / Paste / Context Menu ====================
 function termCopy() {
@@ -3959,7 +4611,10 @@ function showCopyToast() {
 
 // Auto-copy on selection
 function setupAutoCopy(session) {
-    session.term.onSelectionChange(function () {
+    if (session._selectionDisposable && typeof session._selectionDisposable.dispose === 'function') {
+        try { session._selectionDisposable.dispose(); } catch (e) { }
+    }
+    session._selectionDisposable = session.term.onSelectionChange(function () {
         var sel = session.term.getSelection();
         if (sel && sel.length > 0) {
             navigator.clipboard.writeText(sel).then(function () {
@@ -4763,12 +5418,14 @@ function parseUrlLoginFragment(hash) {
 }
 
 function parseUrlLogin() {
-    return parseUrlLoginFragment(location.hash) || parseUrlLoginPath(location.pathname);
+    return parseUrlLoginFragment(location.hash) || (allowLegacyPathLogin ? parseUrlLoginPath(location.pathname) : null);
 }
 
 function tryAutoLogin() {
+    if (urlAutoLoginHandled) return;
     var info = parseUrlLogin();
     if (!info) return;
+    urlAutoLoginHandled = true;
 
     // Fill form
     document.getElementById('hostname').value = formatHostForInput(info.host);
@@ -4914,14 +5571,49 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
 
 // Fetch server config (footer visibility etc.), then dismiss splash
 (function () {
+    function applyPasswordStoragePolicy(enabled) {
+        savePasswords = enabled === true;
+        if (savePasswords) {
+            loadProxyConfig();
+            return;
+        }
+        var bookmarks = loadBM(CBK);
+        var changed = false;
+        bookmarks.forEach(function (bookmark) {
+            if (bookmark && Object.prototype.hasOwnProperty.call(bookmark, 'password')) {
+                delete bookmark.password;
+                changed = true;
+            }
+        });
+        if (changed) safeStorageSet(CBK, JSON.stringify(bookmarks));
+        try {
+            var proxyConfig = JSON.parse(safeStorageGet(PROXY_KEY, 'null'));
+            if (proxyConfig && Object.prototype.hasOwnProperty.call(proxyConfig, 'pass')) {
+                delete proxyConfig.pass;
+                safeStorageSet(PROXY_KEY, JSON.stringify(proxyConfig));
+            }
+        } catch (e) { }
+        var proxyPassword = document.getElementById('proxyPass');
+        if (proxyPassword) proxyPassword.value = '';
+    }
+
     function applyServerConfig(cfg) {
         allowRegistration = !!(cfg && cfg.allowRegistration);
+        allowLegacyPathLogin = !!(cfg && cfg.allowLegacyPathLogin === true);
+        requireGatewayAccount = !(cfg && cfg.requireAccount === false);
+        applyPasswordStoragePolicy(!!(cfg && cfg.savePass === true));
         var registerTab = document.getElementById('authRegisterTab');
         if (registerTab) registerTab.style.display = allowRegistration ? '' : 'none';
         if (!allowRegistration && authMode === 'register') switchAuthMode('login');
         if (cfg && cfg.showFooter === false) {
             var footer = document.querySelector('.global-footer');
             if (footer) footer.classList.add('server-hidden');
+        }
+        if (allowLegacyPathLogin) {
+            tryAutoLogin();
+        } else if (!urlAutoLoginHandled && parseUrlLoginPath(location.pathname)) {
+            history.replaceState(null, '', '/');
+            showToast('路径携带 SSH 凭据的旧式快速登录已禁用，请改用 #ssh= 片段格式', 'error');
         }
     }
 
@@ -4930,11 +5622,14 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
     req.timeout = 3000;
     req.onload = function () {
         if (req.status === 200) {
-            try { applyServerConfig(JSON.parse(req.responseText)); } catch (e) {}
+            try { applyServerConfig(JSON.parse(req.responseText)); } catch (e) { applyServerConfig(null); }
+        } else {
+            applyServerConfig(null);
         }
         if (window.__dismissSplash) window.__dismissSplash();
     };
     req.onerror = req.ontimeout = function () {
+        applyServerConfig(null);
         if (window.__dismissSplash) window.__dismissSplash();
     };
     req.send();

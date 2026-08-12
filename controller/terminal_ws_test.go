@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -32,6 +33,7 @@ type fakeSSHServer struct {
 	ptyRequested bool
 	resizes      [][2]uint32
 	stdin        []byte
+	closeDelay   time.Duration
 }
 
 func startFakeSSHServer(t *testing.T) *fakeSSHServer {
@@ -155,6 +157,12 @@ func (s *fakeSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 		case "shell":
 			_ = request.Reply(true, nil)
 			_, _ = channel.Write([]byte("ready\r\n"))
+			if s.closeDelay > 0 {
+				go func() {
+					time.Sleep(s.closeDelay)
+					_ = channel.Close()
+				}()
+			}
 		default:
 			if request.WantReply {
 				_ = request.Reply(false, nil)
@@ -184,6 +192,12 @@ func (s *fakeSSHServer) stdinText() string {
 	return string(s.stdin)
 }
 
+func (s *fakeSSHServer) stdinBytes() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.stdin...)
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -199,12 +213,16 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // dialTerminal opens a /term WebSocket against a live TermWs handler and
 // completes the SSH handshake against the fake server.
 func dialTerminal(t *testing.T, server *fakeSSHServer, query string) *websocket.Conn {
+	return dialTerminalWithTimeout(t, server, query, time.Minute)
+}
+
+func dialTerminalWithTimeout(t *testing.T, server *fakeSSHServer, query string, timeout time.Duration) *websocket.Conn {
 	t.Helper()
 	t.Setenv("WEBSSH_HOST_KEY_POLICY", "insecure")
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	router.GET("/term", func(c *gin.Context) { TermWs(c, time.Minute) })
+	router.GET("/term", func(c *gin.Context) { TermWs(c, timeout) })
 	httpServer := httptest.NewServer(router)
 	t.Cleanup(httpServer.Close)
 
@@ -333,4 +351,46 @@ func TestTerminalLegacyTextInputStillWorks(t *testing.T) {
 	waitFor(t, "legacy text input to reach stdin", func() bool {
 		return server.stdinText() == "ls -la\n"
 	})
+}
+
+func TestTerminalAcceptsPasteLargerThanInitialConfigLimit(t *testing.T) {
+	server := startFakeSSHServer(t)
+	conn := dialTerminal(t, server, "cols=100&rows=30")
+	payload := bytes.Repeat([]byte("large-paste-0123456789\n"), 12000)
+	if len(payload) <= websocketInitLimit {
+		t.Fatalf("test payload is only %d bytes", len(payload))
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatalf("send large paste: %v", err)
+	}
+	waitFor(t, "large paste to reach stdin", func() bool {
+		return len(server.stdinBytes()) == len(payload)
+	})
+	if got := server.stdinBytes(); !bytes.Equal(got, payload) {
+		t.Fatalf("large paste was corrupted: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+func TestTerminalRemoteExitClosesWebSocket(t *testing.T) {
+	server := startFakeSSHServer(t)
+	server.closeDelay = 25 * time.Millisecond
+	conn := dialTerminal(t, server, "cols=100&rows=30")
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+func TestTerminalTimeoutRacingRemoteExitDoesNotHang(t *testing.T) {
+	server := startFakeSSHServer(t)
+	server.closeDelay = 40 * time.Millisecond
+	conn := dialTerminalWithTimeout(t, server, "cols=100&rows=30", 40*time.Millisecond)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
 }

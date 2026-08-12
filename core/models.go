@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	WcMu   sync.Mutex
-	WcList []*WriteCounter
+	WcMu  sync.Mutex
+	WcMap = make(map[string]*WriteCounter)
 )
 
 type WriteCounter struct {
@@ -57,40 +57,44 @@ type SSHClient struct {
 	ProxyPass          string `json:"proxyPass"`
 	HostKeyAction      string `json:"hostKeyAction,omitempty"`
 	HostKeyFingerprint string `json:"hostKeyFingerprint,omitempty"`
+	TrustScope         string `json:"trustScope,omitempty"`
 	Client             *ssh.Client
 	Sftp               *sftp.Client
 	StdinPipe          io.WriteCloser
 	Session            *ssh.Session
 	wsWriteMu          *sync.Mutex
+	closeOnce          *sync.Once
 }
 
 func NewSSHClient() SSHClient {
 	client := SSHClient{}
 	client.Port = 22
 	client.wsWriteMu = &sync.Mutex{}
+	client.closeOnce = &sync.Once{}
 	return client
 }
 
 func (sclient *SSHClient) Close() {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Println("SSHClient Close recover from panic: ", err)
+	if sclient.closeOnce == nil {
+		sclient.closeOnce = &sync.Once{}
+	}
+	sclient.closeOnce.Do(func() {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Println("SSHClient Close recover from panic: ", err)
+			}
+		}()
+		if sclient.StdinPipe != nil {
+			_ = sclient.StdinPipe.Close()
 		}
-	}()
-	if sclient.StdinPipe != nil {
-		sclient.StdinPipe.Close()
-		sclient.StdinPipe = nil
-	}
-	if sclient.Session != nil {
-		sclient.Session.Close()
-		sclient.Session = nil
-	}
-	if sclient.Sftp != nil {
-		sclient.Sftp.Close()
-		sclient.Sftp = nil
-	}
-	if sclient.Client != nil {
-		sclient.Client.Close()
-		sclient.Client = nil
-	}
+		if sclient.Session != nil {
+			_ = sclient.Session.Close()
+		}
+		if sclient.Sftp != nil {
+			_ = sclient.Sftp.Close()
+		}
+		if sclient.Client != nil {
+			_ = sclient.Client.Close()
+		}
+	})
 }

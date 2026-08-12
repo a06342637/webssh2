@@ -9,4 +9,6 @@ tmp/
 data/
 
 .env
+.env.backup.*
 .webssh-update-backups/
+$cover

@@ -1,8 +1,13 @@
 package controller
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,9 +32,13 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	websocketInitLimit   = 128 << 10
-	websocketInitTimeout = 15 * time.Second
+	websocketInitLimit          = 128 << 10
+	websocketTerminalInputLimit = 4 << 20
+	websocketInitTimeout        = 15 * time.Second
 )
+
+const trustScopeCookieName = "webssh_trust_scope"
+const trustScopeContextKey = "webssh.trustScope"
 
 type sshInfoRequest struct {
 	SSHInfo string `json:"sshInfo" binding:"required"`
@@ -40,33 +49,188 @@ func websocketOriginAllowed(r *http.Request) bool {
 	if origin == "" {
 		return true
 	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	u, ok := parseHTTPOrigin(origin)
+	if !ok {
 		return false
 	}
-	if strings.EqualFold(u.Host, r.Host) {
+	if strings.EqualFold(u.Host, r.Host) && strings.EqualFold(u.Scheme, requestExternalScheme(r)) {
 		return true
 	}
-	for _, allowed := range strings.Split(os.Getenv("WEBSSH_ALLOWED_ORIGINS"), ",") {
-		allowed = strings.TrimSpace(strings.TrimRight(allowed, "/"))
-		if allowed != "" && strings.EqualFold(allowed, strings.TrimRight(origin, "/")) {
+	return configuredOriginAllowed(u)
+}
+
+func parseHTTPOrigin(raw string) (*url.URL, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return nil, false
+	}
+	return u, true
+}
+
+func normalizedOrigin(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+func configuredOriginAllowed(origin *url.URL) bool {
+	want := normalizedOrigin(origin)
+	for _, rawAllowed := range strings.Split(os.Getenv("WEBSSH_ALLOWED_ORIGINS"), ",") {
+		allowed, ok := parseHTTPOrigin(rawAllowed)
+		if ok && normalizedOrigin(allowed) == want {
 			return true
 		}
 	}
 	return false
 }
 
-func bindSSHInfoJSON(c *gin.Context) (string, error) {
-	var request sshInfoRequest
+func requestExternalScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if forwarded := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])); forwarded == "http" || forwarded == "https" {
+		return forwarded
+	}
+	if r.URL != nil && (r.URL.Scheme == "http" || r.URL.Scheme == "https") {
+		return r.URL.Scheme
+	}
+	return "http"
+}
+
+func sameOriginValueAllowed(r *http.Request, raw string) bool {
+	origin, ok := parseHTTPOrigin(raw)
+	if !ok {
+		return false
+	}
+	if strings.EqualFold(origin.Host, r.Host) && strings.EqualFold(origin.Scheme, requestExternalScheme(r)) {
+		return true
+	}
+	return configuredOriginAllowed(origin)
+}
+
+func stateChangingOriginAllowed(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		return sameOriginValueAllowed(r, origin)
+	}
+	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+		return sameOriginValueAllowed(r, referer)
+	}
+	// Keep non-browser/API clients compatible when they send neither header,
+	// while still rejecting browser requests that explicitly identify a
+	// cross-origin or same-site (different origin) initiator.
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))) {
+	case "cross-site", "same-site":
+		return false
+	default:
+		return true
+	}
+}
+
+func SameOriginOnly() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !stateChangingOriginAllowed(c.Request) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"ok": false, "msg": "请求来源不受信任"})
+			return
+		}
+		c.Next()
+	}
+}
+
+func bindStrictJSON(c *gin.Context, target any) error {
+	contentType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+	if err != nil || !strings.EqualFold(contentType, "application/json") {
+		return fmt.Errorf("content type must be application/json")
+	}
+	readTimer := time.AfterFunc(30*time.Second, func() { _ = c.Request.Body.Close() })
+	defer readTimer.Stop()
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
+}
+
+func bindSSHInfoJSON(c *gin.Context) (string, error) {
+	var request sshInfoRequest
+	if err := bindStrictJSON(c, &request); err != nil {
 		return "", fmt.Errorf("invalid request: %w", err)
 	}
 	if strings.TrimSpace(request.SSHInfo) == "" {
 		return "", fmt.Errorf("missing sshInfo")
 	}
 	return request.SSHInfo, nil
+}
+
+func newTrustScope() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(random), nil
+}
+
+func requestTrustScope(c *gin.Context) (string, error) {
+	if value, exists := c.Get(trustScopeContextKey); exists {
+		if normalized, err := core.NormalizeTrustScope(fmt.Sprint(value)); err == nil {
+			return normalized, nil
+		}
+	}
+	if value, err := c.Cookie(trustScopeCookieName); err == nil {
+		if normalized, normalizeErr := core.NormalizeTrustScope(value); normalizeErr == nil {
+			return normalized, nil
+		}
+	}
+	return newTrustScope()
+}
+
+func EnsureTrustScopeCookie() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if value, err := c.Cookie(trustScopeCookieName); err == nil {
+			if normalized, normalizeErr := core.NormalizeTrustScope(value); normalizeErr == nil {
+				c.Set(trustScopeContextKey, normalized)
+				c.Next()
+				return
+			}
+		}
+		scope, err := newTrustScope()
+		if err == nil {
+			c.Set(trustScopeContextKey, scope)
+			http.SetCookie(c.Writer, &http.Cookie{Name: trustScopeCookieName, Value: scope, Path: "/", MaxAge: 365 * 24 * 60 * 60, HttpOnly: true, Secure: requestExternalScheme(c.Request) == "https", SameSite: http.SameSiteStrictMode})
+		}
+		c.Next()
+	}
+}
+
+func decodeSSHClient(c *gin.Context, sshInfo string) (core.SSHClient, error) {
+	client, err := core.DecodedMsgToSSHClient(sshInfo)
+	if err != nil {
+		return client, err
+	}
+	if strings.TrimSpace(client.TrustScope) == "" {
+		client.TrustScope, err = requestTrustScope(c)
+		if err != nil {
+			return client, fmt.Errorf("create SSH trust scope: %w", err)
+		}
+	} else {
+		client.TrustScope, err = core.NormalizeTrustScope(client.TrustScope)
+		if err != nil {
+			return client, err
+		}
+	}
+	return client, nil
+}
+
+func closeSSHOnContextDone(ctx context.Context, client *core.SSHClient) func() {
+	if ctx == nil || client == nil {
+		return func() {}
+	}
+	stop := context.AfterFunc(ctx, client.Close)
+	return func() { stop() }
 }
 
 type ResponseBody struct {
@@ -87,7 +251,13 @@ func CheckSSH(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, sshInfo)
 	if err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()

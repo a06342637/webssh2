@@ -235,3 +235,38 @@ func TestInvalidHostKeyPolicyRejected(t *testing.T) {
 		t.Fatal("invalid host-key policy was accepted")
 	}
 }
+
+func TestTOFUTrustScopesAreIsolated(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("WEBSSH_DATA_DIR", dataDir)
+	t.Setenv("WEBSSH_HOST_KEY_POLICY", "tofu")
+	remote := &net.TCPAddr{IP: net.ParseIP("203.0.113.20"), Port: 22}
+	hostname := "scoped.test:22"
+	firstKey := testSSHKey(t)
+	secondKey := testSSHKey(t)
+
+	firstScope, err := hostKeyCallbackForScope(strings.Repeat("a", 32), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondScope, err := hostKeyCallbackForScope(strings.Repeat("b", 32), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstScope(hostname, remote, firstKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondScope(hostname, remote, secondKey); err != nil {
+		t.Fatalf("second trust scope inherited another user's key: %v", err)
+	}
+	if err := firstScope(hostname, remote, secondKey); err == nil {
+		t.Fatal("first trust scope accepted a changed key")
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "known_hosts.d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("scoped trust directory contains %d files, want 2", len(entries))
+	}
+}
