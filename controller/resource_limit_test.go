@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +43,40 @@ func TestSSHSlotLimiterEnforcesAndReleasesLimits(t *testing.T) {
 		t.Fatal("released SSH slot was not reusable")
 	}
 	thirdRelease()
+}
+
+func TestDownloadFileKeepsLimiterErrorResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("WEBSSH_MAX_CONCURRENT_SSH", "1")
+	t.Setenv("WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT", "1")
+	sshSlots.Lock()
+	sshSlots.Total = 0
+	sshSlots.Clients = make(map[string]int)
+	sshSlots.Unlock()
+
+	heldRecorder := httptest.NewRecorder()
+	heldContext, _ := gin.CreateTestContext(heldRecorder)
+	heldContext.Request = httptest.NewRequest(http.MethodPost, "/file/download", nil)
+	heldContext.Request.RemoteAddr = "198.51.100.30:1234"
+	release, ok := acquireSSHSlot(heldContext)
+	if !ok {
+		t.Fatal("failed to reserve the first SSH slot")
+	}
+	defer release()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/file/download", bytes.NewBufferString(`{"sshInfo":"encoded","path":"/tmp/file"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.RemoteAddr = "198.51.100.30:5678"
+	DownloadFile(ctx)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("download limiter status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, "SSH 连接任务过多") {
+		t.Fatalf("download limiter response = %q", body)
+	}
 }
 
 func TestUploadSlotLimiterEnforcesAndReleasesLimits(t *testing.T) {

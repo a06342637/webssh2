@@ -30,10 +30,12 @@ import (
 type File struct {
 	Name       string
 	Size       string
+	SizeBytes  int64
 	ModifyTime string
 	IsDir      bool
 	IsSymlink  bool
 	Editable   bool
+	EditReason string
 }
 
 type fileRequest struct {
@@ -159,6 +161,36 @@ func formatRemoteFileSize(size int64, isDir bool) string {
 		return strconv.FormatInt(size, 10)
 	}
 	return Bytefmt(uint64(size))
+}
+
+func statRemoteTarget(client *sftp.Client, remotePath string) (os.FileInfo, string, error) {
+	remotePath = pathpkg.Clean(strings.TrimSpace(remotePath))
+	if remotePath == "." || remotePath == "" {
+		return nil, "", fmt.Errorf("missing path")
+	}
+	seen := make(map[string]struct{})
+	for depth := 0; depth < 32; depth++ {
+		if _, exists := seen[remotePath]; exists {
+			return nil, remotePath, fmt.Errorf("symbolic link loop detected")
+		}
+		seen[remotePath] = struct{}{}
+		info, err := client.Lstat(remotePath)
+		if err != nil {
+			return nil, remotePath, err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return info, remotePath, nil
+		}
+		target, err := client.ReadLink(remotePath)
+		if err != nil {
+			return nil, remotePath, err
+		}
+		if !pathpkg.IsAbs(target) {
+			target = pathpkg.Join(pathpkg.Dir(remotePath), target)
+		}
+		remotePath = pathpkg.Clean(target)
+	}
+	return nil, remotePath, fmt.Errorf("too many symbolic link levels")
 }
 
 const defaultRemoteEditorMaxBytes = int64(2 << 20)
@@ -668,7 +700,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 	if path == "" {
 		path = detectHomeDir(sshClient.Sftp, sshClient.Username)
 	}
-	fileInfo, statErr := sshClient.Sftp.Stat(path)
+	fileInfo, resolvedPath, statErr := statRemoteTarget(sshClient.Sftp, path)
 	if statErr != nil {
 		responseBody.Msg = statErr.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
@@ -679,7 +711,15 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
-	if sftpFile, err := sshClient.Download(path); err != nil {
+	if !fileInfo.Mode().IsRegular() {
+		responseBody.Msg = "only regular files can be downloaded"
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	// Open the exact target that was measured above. Using the resolved path
+	// prevents the original link itself from being interpreted as a tiny file;
+	// the client also verifies the final byte count before committing locally.
+	if sftpFile, err := sshClient.Download(resolvedPath); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
@@ -692,8 +732,16 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
 		c.Header("Content-Type", "application/octet-stream")
 		c.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+		c.Header("Cache-Control", "no-store")
+		c.Header("Accept-Ranges", "none")
+		c.Header("X-WebSSH-File-Size", strconv.FormatInt(fileInfo.Size(), 10))
+		c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-File-Size")
 		c.Status(http.StatusOK)
-		if _, copyErr := io.Copy(c.Writer, sftpFile); copyErr != nil {
+		copied, copyErr := io.Copy(c.Writer, sftpFile)
+		if copyErr == nil && copied != fileInfo.Size() {
+			copyErr = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", copied, fileInfo.Size())
+		}
+		if copyErr != nil {
 			responseBody.Msg = copyErr.Error()
 			_ = c.Error(copyErr)
 			c.Abort()
@@ -1019,19 +1067,44 @@ func FileList(c *gin.Context) *ResponseBody {
 	for _, mFile := range files {
 		info := mFile
 		isSymlink := mFile.Mode()&os.ModeSymlink != 0
+		resolveErr := error(nil)
 		if isSymlink {
-			resolved, statErr := sshClient.Sftp.Stat(pathpkg.Join(path, mFile.Name()))
-			if statErr == nil {
+			resolved, _, statErr := statRemoteTarget(sshClient.Sftp, pathpkg.Join(path, mFile.Name()))
+			resolveErr = statErr
+			if resolveErr == nil {
 				info = resolved
 			}
 		}
-		isDir := info.IsDir()
+		isDir := resolveErr == nil && info.IsDir()
+		editable := !isSymlink && resolveErr == nil && info.Mode().IsRegular() && info.Size() <= editorMaxBytes
+		editReason := ""
+		if !isDir && !editable {
+			switch {
+			case resolveErr != nil:
+				editReason = "符号链接目标不可访问"
+			case isSymlink:
+				editReason = "符号链接不支持在线编辑"
+			case !info.Mode().IsRegular():
+				editReason = "仅支持普通文件"
+			case info.Size() > editorMaxBytes:
+				editReason = fmt.Sprintf("文件超过在线编辑上限 %s", Bytefmt(uint64(editorMaxBytes)))
+			}
+		}
+		sizeBytes := info.Size()
+		if resolveErr != nil {
+			sizeBytes = 0
+		}
+		if sizeBytes < 0 {
+			sizeBytes = 0
+		}
 		file := File{
 			Name:       mFile.Name(),
 			IsDir:      isDir,
 			IsSymlink:  isSymlink,
-			Editable:   !isSymlink && info.Mode().IsRegular() && info.Size() <= editorMaxBytes,
-			Size:       formatRemoteFileSize(info.Size(), isDir),
+			Editable:   editable,
+			EditReason: editReason,
+			SizeBytes:  sizeBytes,
+			Size:       formatRemoteFileSize(sizeBytes, isDir),
 			ModifyTime: info.ModTime().Format("2006-01-02 15:04:05"),
 		}
 		fileList = append(fileList, file)

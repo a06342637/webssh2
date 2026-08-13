@@ -56,13 +56,16 @@ func TestBasicAuthProtectsAllRoutesExceptHealth(t *testing.T) {
 }
 
 func TestRenderIndexHTMLVersionsMutableAssets(t *testing.T) {
-	input := []byte(`<link href="/static/css/style.css?v=__APP_VERSION__"><script src="/static/js/app.js?v=__APP_VERSION__"></script>`)
+	input := []byte(`<b>__APP_VERSION__</b><link href="/static/css/style.css?v=__APP_VERSION__"><script>window.version="__APP_VERSION__"</script><script src="/static/js/app.js?v=__APP_VERSION__"></script>`)
 	got := string(renderIndexHTML(input))
 	if strings.Contains(got, "__APP_VERSION__") {
 		t.Fatalf("asset version placeholder was not replaced: %s", got)
 	}
 	if count := strings.Count(got, "v="+version); count != 2 {
 		t.Fatalf("expected two versioned asset URLs, got %d in %s", count, got)
+	}
+	if !strings.Contains(got, `<b>`+version+`</b>`) || !strings.Contains(got, `window.version="`+version+`"`) {
+		t.Fatalf("visible/runtime version was not injected: %s", got)
 	}
 }
 func TestNormalizeTerminalWebSocketURL(t *testing.T) {
@@ -141,6 +144,9 @@ func TestRuntimeConfigIncludesPasswordPersistencePolicy(t *testing.T) {
 	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "false")
 
 	config := runtimeConfig()
+	if got, ok := config["appVersion"].(string); !ok || got != version {
+		t.Fatalf("runtime config appVersion = %#v, want %q", config["appVersion"], version)
+	}
 	if got, ok := config["savePass"].(bool); !ok || got {
 		t.Fatalf("runtime config savePass = %#v, want false", config["savePass"])
 	}

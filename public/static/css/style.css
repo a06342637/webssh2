@@ -237,6 +237,24 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .sftp-path-input{flex:1;padding:5px 8px;background:var(--inp);border:1px solid var(--brd);border-radius:var(--rx);color:var(--t1);font-size:11px;font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace;outline:none;min-width:0}
 .sftp-path-input:focus{border-color:var(--brf)}
 .sftp-actions{display:flex;gap:4px;flex-shrink:0}
+.sftp-transfer-panel{display:none;flex-shrink:0;max-height:215px;overflow-y:auto;padding:0 6px;border-bottom:1px solid var(--brd);background:rgba(0,0,0,.12)}
+.sftp-transfer-panel.show{display:block}
+.sftp-transfer-item{margin:6px 0;padding:8px;border:1px solid rgba(0,212,255,.2);border-radius:8px;background:rgba(0,212,255,.045)}
+.sftp-transfer-item.completed{border-color:rgba(0,255,136,.26);background:rgba(0,255,136,.04)}
+.sftp-transfer-item.error{border-color:rgba(255,72,103,.3);background:rgba(255,72,103,.05)}
+.sftp-transfer-head,.sftp-transfer-detail{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sftp-transfer-head>div:first-child{min-width:0;display:flex;align-items:center;gap:7px}
+.sftp-transfer-head b{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t1);font-size:10px}
+.sftp-transfer-head span{color:var(--c1);font-size:9px;white-space:nowrap}
+.sftp-transfer-actions{display:flex;gap:4px;flex-shrink:0}
+.sftp-transfer-actions button{height:22px;padding:0 7px;border:1px solid var(--brd);border-radius:5px;background:var(--inp);color:var(--t2);font-size:9px;cursor:pointer}
+.sftp-transfer-actions button:hover{border-color:var(--c1);color:var(--c1)}
+.sftp-transfer-actions button.danger:hover{border-color:var(--err);color:var(--err)}
+.sftp-transfer-progress{height:5px;margin:7px 0 5px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.1)}
+.sftp-transfer-progress i{display:block;height:100%;min-width:2px;border-radius:inherit;background:linear-gradient(90deg,var(--c1),var(--ok));transition:width .18s ease}
+.sftp-transfer-detail{color:var(--t3);font-size:8px;font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace}
+.sftp-transfer-detail span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sftp-transfer-detail b{color:var(--t2);white-space:nowrap}
 .sftp-body{flex:1;overflow-y:auto;padding:4px}
 .sftp-body::-webkit-scrollbar{width:3px}
 .sftp-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
@@ -248,12 +266,14 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .sftp-icon.file{color:var(--t3)}
 .sftp-name{flex:1;font-size:11px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sftp-meta{font-size:9px;color:var(--t3);white-space:nowrap}
-.sftp-dl,.sftp-edit{width:20px;height:20px;border:none;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:3px;transition:all var(--tr);opacity:0;flex-shrink:0}
+.sftp-dl,.sftp-edit{width:22px;height:22px;border:1px solid transparent;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:5px;transition:all var(--tr);opacity:.72;flex-shrink:0}
 .sftp-row:hover .sftp-dl,.sftp-row:focus-within .sftp-dl{opacity:1}
 .sftp-dl:hover{color:var(--c1);background:rgba(0,212,255,.1)}
 .sftp-row:hover .sftp-edit,.sftp-row:focus-within .sftp-edit{opacity:1}
 .sftp-edit{color:var(--t2)}
 .sftp-edit:hover{color:var(--ok);background:rgba(0,255,136,.1)}
+.sftp-edit.disabled,.sftp-dl.disabled{opacity:.28;cursor:help}
+.sftp-edit.disabled:hover,.sftp-dl.disabled:hover{color:var(--t3);background:transparent;border-color:transparent}
 .sftp-link-mark{display:inline-flex;align-items:center;color:var(--t3);margin-left:-4px}
 .sftp-link-mark svg{width:10px;height:10px}
 
@@ -313,6 +333,20 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .remote-editor-close-body p{margin-top:5px;color:var(--t3);font-size:11px;line-height:1.6}
 .remote-editor-close-actions{grid-column:1/-1;display:grid;grid-template-columns:1.2fr 1fr .75fr;gap:8px;margin-top:4px}
 .remote-editor-close-actions .drawer-add{margin:0}
+.sftp-download-confirm-overlay{z-index:1210}
+.sftp-download-confirm-card{width:min(560px,94vw)}
+.sftp-download-confirm-body{display:grid;grid-template-columns:48px minmax(0,1fr);gap:13px;padding:18px}
+.sftp-download-confirm-icon{width:48px;height:48px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,212,255,.28);border-radius:13px;background:rgba(0,212,255,.08);color:var(--c1)}
+.sftp-download-confirm-icon svg{width:23px;height:23px}
+.sftp-download-confirm-copy b{display:block;color:var(--t1);font-size:14px;word-break:break-all}
+.sftp-download-confirm-copy p{margin-top:5px;color:var(--t3);font-size:11px}
+.sftp-download-confirm-details{grid-column:1/-1;display:flex;flex-direction:column;gap:8px;padding:11px;border:1px solid var(--brd);border-radius:8px;background:var(--inp)}
+.sftp-download-confirm-details div{display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;font-size:10px}
+.sftp-download-confirm-details dt{color:var(--t3)}
+.sftp-download-confirm-details dd{margin:0;color:var(--t1);font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace;word-break:break-all}
+.sftp-download-confirm-hint{grid-column:1/-1;color:var(--t3);font-size:10px;line-height:1.55}
+.sftp-download-confirm-actions{grid-column:1/-1;display:grid;grid-template-columns:1.2fr .8fr;gap:8px}
+.sftp-download-confirm-actions .drawer-add{margin:0}
 
 /* The editor uses its own tokens so the code area remains readable in both
    themes while still matching the surrounding SSH workspace. */
@@ -333,6 +367,9 @@ html[data-theme="light"] .remote-editor-loading{background:rgba(255,255,255,.78)
 html[data-theme="light"] .remote-editor-footer{border-top-color:rgba(15,23,42,.1);background:#eef4f8;color:rgba(15,23,42,.58)}
 html[data-theme="light"] .remote-editor-dock-item{border-color:rgba(0,112,168,.28);background:#f8fafc;color:#0f172a;box-shadow:0 8px 24px rgba(15,23,42,.16)}
 html[data-theme="light"] .remote-editor-dock-item:hover{border-color:#0284c7;background:#e0f2fe;color:#0f172a}
+html[data-theme="light"] .sftp-transfer-panel{background:rgba(15,23,42,.025)}
+html[data-theme="light"] .sftp-transfer-item{background:#f0f9ff;border-color:rgba(2,132,199,.2)}
+html[data-theme="light"] .sftp-transfer-progress{background:rgba(15,23,42,.1)}
 @media(prefers-color-scheme:light){
     html:not([data-theme]) .remote-editor-window{border-color:rgba(0,112,168,.28);background:#f8fafc;color:#0f172a;box-shadow:0 24px 70px rgba(15,23,42,.2),0 0 0 1px rgba(15,23,42,.05) inset}
     html:not([data-theme]) .remote-editor-header{border-bottom-color:rgba(15,23,42,.12);background:#eaf1f8}
@@ -358,6 +395,7 @@ html[data-theme="light"] .remote-editor-dock-item:hover{border-color:#0284c7;bac
     .remote-editor-textarea{padding:11px 10px 16px;font-size:11px}
     .remote-editor-footer{height:27px;padding:0 8px;font-size:8px}
     .remote-editor-close-actions{grid-template-columns:1fr;}
+    .sftp-download-confirm-actions{grid-template-columns:1fr}
 }
 @media(hover:none),(pointer:coarse){
     .sftp-edit,.sftp-dl{opacity:.78}

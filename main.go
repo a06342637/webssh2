@@ -174,6 +174,7 @@ func terminalPreconnectHTML() string {
 
 func runtimeConfig() gin.H {
 	return gin.H{
+		"appVersion":           version,
 		"showFooter":           showFooter,
 		"allowRegistration":    controller.AllowRegistration(),
 		"savePass":             savePass,
@@ -215,7 +216,9 @@ func main() {
 	server.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	server.GET("/config", func(c *gin.Context) {
+	server.GET("/config", noStoreResponses(), func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
 		c.JSON(http.StatusOK, runtimeConfig())
 	})
 	gatewayAuth := controller.GatewayAuth()

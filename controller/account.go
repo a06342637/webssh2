@@ -1432,11 +1432,10 @@ func cleanAppVersion(value, fallback string) string {
 }
 
 func localAppVersion(dir string) string {
-	if dir != "" {
-		if data, err := os.ReadFile(filepath.Join(dir, "VERSION")); err == nil {
-			return cleanAppVersion(string(data), AppVersion)
-		}
-	}
+	// The running binary is the authoritative current version.  A mounted
+	// source directory can already contain newer files while the old container
+	// is still serving traffic; reading VERSION from that directory would make
+	// the UI claim an update is active before the new binary has started.
 	return cleanAppVersion(AppVersion, "0.0.0")
 }
 

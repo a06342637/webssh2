@@ -187,8 +187,8 @@
             <div class="set-group admin-update-group">
                 <div class="set-group-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>版本更新</div>
                 <div class="update-version-card" id="updateVersionInfo">
-                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">0.5.43</b></div>
-                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">0.5.43</b></div>
+                    <div class="update-version-line"><span>当前版本</span><b id="currentVersionLabel">__APP_VERSION__</b></div>
+                    <div class="update-version-line"><span>远端版本</span><b id="remoteVersionLabel">__APP_VERSION__</b></div>
                     <div class="update-version-status" id="updateVersionStatus">只有管理员账号可以检测和更新版本。</div>
                 </div>
                 <label class="checkbox-field" for="forceUpdateVersion" style="padding:0">
@@ -479,6 +479,7 @@
                         <button class="tb-btn sm" onclick="toggleSftp()" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                     </div>
                 </div>
+                <div class="sftp-transfer-panel" id="sftpTransferPanel" aria-live="polite"></div>
                 <div class="sftp-body" id="sftpBody">
                     <div class="sftp-loading">加载中...</div>
                 </div>
@@ -486,6 +487,31 @@
             <!-- Remote file editor windows live inside the SSH workspace. -->
             <div class="remote-editor-layer" id="remoteEditorLayer" aria-live="polite"></div>
             <div class="remote-editor-dock" id="remoteEditorDock" aria-label="已最小化的在线编辑器"></div>
+        </div>
+    </div>
+
+    <div class="modal-overlay sftp-download-confirm-overlay" id="sftpDownloadConfirmModal">
+        <div class="glass-card modal-card sftp-download-confirm-card" role="dialog" aria-modal="true" aria-labelledby="sftpDownloadConfirmTitle">
+            <div class="drawer-hd auth-hd">
+                <span id="sftpDownloadConfirmTitle">确认下载文件</span>
+                <button class="settings-close" type="button" onclick="hideSftpDownloadConfirm()" title="取消下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="sftp-download-confirm-body">
+                <div class="sftp-download-confirm-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+                <div class="sftp-download-confirm-copy">
+                    <b id="sftpDownloadConfirmName">-</b>
+                    <p>确认后开始从远端服务器下载此文件。</p>
+                </div>
+                <dl class="sftp-download-confirm-details">
+                    <div><dt>远端路径</dt><dd id="sftpDownloadConfirmPath">-</dd></div>
+                    <div><dt>文件大小</dt><dd id="sftpDownloadConfirmSize">-</dd></div>
+                </dl>
+                <div class="sftp-download-confirm-hint" id="sftpDownloadConfirmHint">下载进度会显示在 SFTP 侧边栏顶部，可暂停、继续或取消。</div>
+                <div class="sftp-download-confirm-actions">
+                    <button class="drawer-add primary-action" id="sftpDownloadConfirmButton" type="button" onclick="confirmSftpDownload()">确认下载</button>
+                    <button class="drawer-add" type="button" onclick="hideSftpDownloadConfirm()">取消</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -995,7 +1021,7 @@
     <script src="/static/vendor/xterm/xterm.min.js?v=5.3.0"></script>
     <script src="/static/vendor/xterm/xterm-addon-fit.min.js?v=0.8.0"></script>
     <script src="/static/vendor/xterm/xterm-addon-web-links.min.js?v=0.9.0"></script>
-    <script>window.__WEBSSH_TERMINAL_WS_URL__ = __TERMINAL_WEBSOCKET_URL__;</script>
+    <script>window.__WEBSSH_APP_VERSION__ = "__APP_VERSION__"; window.__WEBSSH_TERMINAL_WS_URL__ = __TERMINAL_WEBSOCKET_URL__;</script>
     <script src="/static/js/app.js?v=__APP_VERSION__"></script>
 </body>
 </html>

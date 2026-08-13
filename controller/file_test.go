@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	pathpkg "path"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +45,46 @@ func TestFormatRemoteFileSize(t *testing.T) {
 				t.Fatalf("formatRemoteFileSize(%d, %t) = %q, want %q", test.size, test.isDir, got, test.want)
 			}
 		})
+	}
+}
+
+func TestStatRemoteTargetResolvesRelativeSymlinkChains(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := dir + string(os.PathSeparator) + "target.bin"
+	firstLink := dir + string(os.PathSeparator) + "first.link"
+	secondLink := dir + string(os.PathSeparator) + "second.link"
+	content := strings.Repeat("download-size-check\n", 4096)
+	if err := os.WriteFile(targetPath, []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{readlinks: map[string]string{
+		cleanEditorTestPath(editorTestRemotePath(firstLink)):  "target.bin",
+		cleanEditorTestPath(editorTestRemotePath(secondLink)): "first.link",
+	}})
+
+	info, resolved, err := statRemoteTarget(client, editorTestRemotePath(secondLink))
+	if err != nil {
+		t.Fatalf("statRemoteTarget() error = %v", err)
+	}
+	if info.Size() != int64(len(content)) {
+		t.Fatalf("resolved size = %d, want %d", info.Size(), len(content))
+	}
+	if pathpkg.Base(resolved) != "target.bin" {
+		t.Fatalf("resolved path = %q, want target.bin", resolved)
+	}
+}
+
+func TestStatRemoteTargetRejectsSymlinkLoopWithoutOSPrivileges(t *testing.T) {
+	dir := t.TempDir()
+	firstLink := dir + string(os.PathSeparator) + "first.link"
+	secondLink := dir + string(os.PathSeparator) + "second.link"
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{readlinks: map[string]string{
+		cleanEditorTestPath(editorTestRemotePath(firstLink)):  "second.link",
+		cleanEditorTestPath(editorTestRemotePath(secondLink)): "first.link",
+	}})
+
+	if _, _, err := statRemoteTarget(client, editorTestRemotePath(firstLink)); err == nil || !strings.Contains(err.Error(), "loop") {
+		t.Fatalf("statRemoteTarget() loop error = %v", err)
 	}
 }
 
@@ -113,7 +154,21 @@ func (l editorTestLister) ListAt(dst []os.FileInfo, offset int64) (int, error) {
 	return n, nil
 }
 
-type editorTestHandler struct{}
+type editorTestSymlinkInfo struct {
+	name   string
+	target string
+}
+
+func (f editorTestSymlinkInfo) Name() string       { return f.name }
+func (f editorTestSymlinkInfo) Size() int64        { return int64(len(f.target)) }
+func (f editorTestSymlinkInfo) Mode() os.FileMode  { return os.ModeSymlink | 0o777 }
+func (f editorTestSymlinkInfo) ModTime() time.Time { return time.Unix(123, 0) }
+func (f editorTestSymlinkInfo) IsDir() bool        { return false }
+func (f editorTestSymlinkInfo) Sys() any           { return nil }
+
+type editorTestHandler struct {
+	readlinks map[string]string
+}
 
 func cleanEditorTestPath(name string) string {
 	name = strings.TrimSpace(name)
@@ -139,8 +194,8 @@ func (editorTestHandler) Fileread(request *sftp.Request) (io.ReaderAt, error) {
 	return os.Open(cleanEditorTestPath(request.Filepath))
 }
 
-func (editorTestHandler) Filewrite(request *sftp.Request) (io.WriterAt, error) {
-	return editorTestHandler{}.OpenFile(request)
+func (h editorTestHandler) Filewrite(request *sftp.Request) (io.WriterAt, error) {
+	return h.OpenFile(request)
 }
 
 func (editorTestHandler) OpenFile(request *sftp.Request) (sftp.WriterAtReaderAt, error) {
@@ -236,15 +291,31 @@ func (editorTestHandler) Filelist(request *sftp.Request) (sftp.ListerAt, error) 
 	return nil, os.ErrInvalid
 }
 
-func (editorTestHandler) Lstat(request *sftp.Request) (sftp.ListerAt, error) {
-	info, err := os.Lstat(cleanEditorTestPath(request.Filepath))
+func (h editorTestHandler) Lstat(request *sftp.Request) (sftp.ListerAt, error) {
+	name := cleanEditorTestPath(request.Filepath)
+	if target, ok := h.readlinks[name]; ok {
+		return editorTestLister{editorTestSymlinkInfo{name: pathpkg.Base(request.Filepath), target: target}}, nil
+	}
+	info, err := os.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
 	return editorTestLister{info}, nil
 }
 
+func (h editorTestHandler) Readlink(name string) (string, error) {
+	name = cleanEditorTestPath(name)
+	if target, ok := h.readlinks[name]; ok {
+		return target, nil
+	}
+	return os.Readlink(name)
+}
+
 func newEditorTestSFTPClient(t *testing.T) *sftp.Client {
+	return newEditorTestSFTPClientWithHandler(t, editorTestHandler{})
+}
+
+func newEditorTestSFTPClientWithHandler(t *testing.T, handler editorTestHandler) *sftp.Client {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -275,10 +346,10 @@ func newEditorTestSFTPClient(t *testing.T) *sftp.Client {
 	}
 	_ = listener.Close()
 	server := sftp.NewRequestServer(serverConn, sftp.Handlers{
-		FileGet:  editorTestHandler{},
-		FilePut:  editorTestHandler{},
-		FileCmd:  editorTestHandler{},
-		FileList: editorTestHandler{},
+		FileGet:  handler,
+		FilePut:  handler,
+		FileCmd:  handler,
+		FileList: handler,
 	})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve() }()
@@ -462,7 +533,6 @@ func TestRemoteEditorTargetLockWaitCanBeCancelled(t *testing.T) {
 }
 
 func TestRemoteEditorRejectsSymlinkAndBinaryFile(t *testing.T) {
-	client := newEditorTestSFTPClient(t)
 	dir := t.TempDir()
 	textLocalPath := dir + string(os.PathSeparator) + "text.txt"
 	linkLocalPath := dir + string(os.PathSeparator) + "link.txt"
@@ -472,10 +542,11 @@ func TestRemoteEditorRejectsSymlinkAndBinaryFile(t *testing.T) {
 	if err := os.WriteFile(textLocalPath, []byte("text"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(textLocalPath, linkLocalPath); err == nil {
-		if _, readErr := readRemoteTextFile(client, linkPath, defaultRemoteEditorMaxBytes); readErr == nil || !strings.Contains(readErr.Error(), "symbolic links") {
-			t.Fatalf("symlink read error = %v", readErr)
-		}
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{readlinks: map[string]string{
+		cleanEditorTestPath(linkPath): textLocalPath,
+	}})
+	if _, readErr := readRemoteTextFile(client, linkPath, defaultRemoteEditorMaxBytes); readErr == nil || !strings.Contains(readErr.Error(), "symbolic links") {
+		t.Fatalf("symlink read error = %v", readErr)
 	}
 	if err := os.WriteFile(binaryLocalPath, []byte{'a', 0, 'b'}, 0o600); err != nil {
 		t.Fatal(err)

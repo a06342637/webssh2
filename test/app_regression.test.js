@@ -440,11 +440,23 @@ test('login and new-tab entry points authenticate before creating sessions', () 
     assert.match(addTabSource, /^function addNewTab\(\) \{\s*if \(!ensureGatewayAccount\(\)\) return;/);
 });
 
-test('SFTP download never removes its iframe on an unreliable load event', () => {
-    const source = extractFunction('sftpDownload');
-    assert.doesNotMatch(source, /iframe\.addEventListener\(['"]load['"]/);
-    assert.ok(source.indexOf('form.submit()') < source.indexOf('iframe._websshCleanupTimer = setTimeout'));
-    assert.match(source, /24 \* 60 \* 60 \* 1000/);
+test('SFTP download asks for confirmation and uses a cancellable streamed response', () => {
+    const openSource = extractFunction('sftpDownload');
+    const runSource = extractFunction('runSftpDownload');
+    assert.match(openSource, /sftpDownloadConfirmRequest = \{/);
+    assert.match(openSource, /sftpDownloadConfirmModal/);
+    assert.match(runSource, /signal: download\.controller\.signal/);
+    assert.match(runSource, /response\.body && response\.body\.getReader/);
+    assert.match(runSource, /download\.received \+= result\.value\.byteLength/);
+});
+
+test('SFTP transfer controls support pause, resume and cancellation', () => {
+    const pauseSource = extractFunction('pauseSftpDownload');
+    const resumeSource = extractFunction('resumeSftpDownload');
+    const cancelSource = extractFunction('cancelSftpDownload');
+    assert.match(pauseSource, /download\.status = 'paused'/);
+    assert.match(resumeSource, /download\.status = 'running'/);
+    assert.match(cancelSource, /download\.controller\.abort\(\)/);
 });
 
 test('terminal disconnect does not cancel an independent SFTP download', () => {
@@ -571,6 +583,82 @@ test('new remote files are created in the active SFTP directory without overwrit
     assert.match(saveSource, /var creating = !!editor\.isNew;/);
     assert.match(saveSource, /create: creating/);
     assert.match(saveSource, /editor\.isNew = false/);
+});
+
+test('recommended scripts persist usage and sort recently used entries first', () => {
+    const sortSource = extractFunction('sortedPresetScripts');
+    const runSource = extractFunction('runPresetScript');
+    assert.match(sortSource, /b\.lastUsed !== a\.lastUsed/);
+    assert.match(sortSource, /b\.useCount !== a\.useCount/);
+    assert.match(runSource, /recordPresetUsage\(preset\)/);
+});
+
+test('version labels use the embedded build version instead of a stale hard-coded release', () => {
+    const source = extractFunction('setVersionLabels');
+    assert.match(source, /window\.__WEBSSH_APP_VERSION__/);
+    assert.doesNotMatch(source, /0\.5\.43/);
+    assert.match(appSource, /loadVersionCache/);
+});
+
+test('a cached remote version cannot stay below the running release after an update', () => {
+    const labels = {
+        currentVersionLabel: { textContent: '' },
+        remoteVersionLabel: { textContent: '' },
+    };
+    const sandbox = loadFunctions(
+        ['compareAppVersions', 'setVersionLabels'],
+        {
+            window: { __WEBSSH_APP_VERSION__: '0.5.60' },
+            document: { getElementById: (id) => labels[id] || null },
+            parseInt, Math,
+        },
+    );
+
+    sandbox.setVersionLabels({ currentVersion: '0.5.60', latestVersion: '0.5.43' });
+    assert.equal(labels.currentVersionLabel.textContent, '0.5.60');
+    assert.equal(labels.remoteVersionLabel.textContent, '0.5.60');
+    assert.equal(sandbox.compareAppVersions('0.5.60', '0.5.9'), 1);
+    assert.equal(sandbox.compareAppVersions('0.5.60', '0.5.60'), 0);
+});
+
+test('runtime config keeps a newer cached remote release while refreshing current version', () => {
+    const labels = {
+        currentVersionLabel: { textContent: '' },
+        remoteVersionLabel: { textContent: '' },
+    };
+    const sandbox = loadFunctions(
+        ['compareAppVersions', 'setVersionLabels', 'applyRunningAppVersion'],
+        {
+            VERSION_CACHE_KEY: 'version-cache',
+            window: { __WEBSSH_APP_VERSION__: '0.5.59' },
+            document: { getElementById: (id) => labels[id] || null },
+            safeStorageGet: () => JSON.stringify({ latestVersion: '0.5.61' }),
+            JSON, parseInt, Math,
+        },
+    );
+
+    sandbox.applyRunningAppVersion('0.5.60');
+    assert.equal(sandbox.window.__WEBSSH_APP_VERSION__, '0.5.60');
+    assert.equal(labels.currentVersionLabel.textContent, '0.5.60');
+    assert.equal(labels.remoteVersionLabel.textContent, '0.5.61');
+});
+
+test('large SFTP downloads use the native save picker and verify bytes before committing', () => {
+    const confirmSource = extractFunction('confirmSftpDownload');
+    const writerSource = extractFunction('sftpDownloadWriter');
+    const runSource = extractFunction('runSftpDownload');
+    assert.match(confirmSource, /window\.showSaveFilePicker/);
+    assert.match(confirmSource, /startSftpDownload\(session, request\.path, request\.size, request\.name, fileHandle\)/);
+    assert.match(writerSource, /fileHandle\.createWritable/);
+    assert.ok(runSource.indexOf('verifySftpDownloadSize(download);') < runSource.indexOf('writer.close()'));
+    assert.match(runSource, /abortSftpDownloadWriter\(download/);
+});
+
+test('native save picker cancellation keeps download confirmation open for retry', () => {
+    const source = extractFunction('confirmSftpDownload');
+    assert.match(source, /if \(err && err\.name === 'AbortError'\) return;/);
+    assert.match(source, /confirmButton\.disabled = false/);
+    assert.ok(source.indexOf("err.name === 'AbortError'") < source.indexOf('hideSftpDownloadConfirm();', source.indexOf('.catch')));
 });
 
 test('new remote files reveal the editor when SFTP covers a narrow workspace', () => {
