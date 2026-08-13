@@ -67,13 +67,14 @@ while :; do
 done
 
 echo ""
-echo "  默认只监听 127.0.0.1，适合放在 Nginx/Caddy HTTPS 反向代理后。"
-printf "是否允许通过服务器 IP 直接访问？(y=监听所有网卡  [回车]=仅本机): "
+echo "  默认监听 0.0.0.0，安装后可直接通过服务器 IP 或指向服务器的域名访问。"
+echo "  公网使用建议尽快配置 HTTPS/WSS；裸 HTTP 会明文传输 Web 登录和 SSH 凭据。"
+printf "是否仅允许本机反向代理访问？(y=仅监听 127.0.0.1  [回车]=监听所有网卡): "
 IFS= read -r PUBLIC_BIND_INPUT
 if [ "$PUBLIC_BIND_INPUT" = "y" ] || [ "$PUBLIC_BIND_INPUT" = "Y" ]; then
-    BIND_ADDRESS=0.0.0.0
-else
     BIND_ADDRESS=127.0.0.1
+else
+    BIND_ADDRESS=0.0.0.0
 fi
 
 # ── 2. 页脚 ──────────────────────────────────────────────────────────────────

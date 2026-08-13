@@ -64,15 +64,21 @@ docker compose up -d --build
 docker compose ps
 ```
 
-默认端口为 `8008`，并且只绑定 `127.0.0.1`。普通 Compose **不会挂载源码目录和 Docker socket**，页面内更新默认关闭，攻击面更小。建议通过 Nginx/Caddy 暴露 HTTPS/WSS。
+默认端口为 `8008`，并绑定 `0.0.0.0`。安装后可以直接访问 `http://服务器IP:8008`，指向该服务器的域名也可以使用相同端口访问。普通 Compose **不会挂载源码目录和 Docker socket**，页面内更新默认关闭。
+
+公网裸 HTTP 会明文传输 Web 登录信息、SSH 密码/私钥和终端数据，建议开放测试完成后尽快配置 HTTPS/WSS，并通过防火墙限制不需要的来源。
 
 自定义端口：
 
 ```bash
-BIND_ADDRESS=127.0.0.1 PORT=3000 docker compose up -d --build
+PORT=3000 docker compose up -d --build
 ```
 
-确实需要直接监听所有网卡时显式设置 `BIND_ADDRESS=0.0.0.0`。不要在公网长期使用裸 HTTP：Web 页面 Basic Auth、SSH 密码/私钥和终端数据都会经过该连接。
+如果只允许同机 Nginx/Caddy/其他反向代理访问，可显式绑定本机回环地址：
+
+```bash
+BIND_ADDRESS=127.0.0.1 docker compose up -d --build
+```
 
 停止服务：
 
@@ -445,7 +451,7 @@ go run . -a admin:password
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `PORT` / `port` | 8008 | HTTP 服务端口 |
-| `BIND_ADDRESS` | 127.0.0.1（Compose） | Docker 发布端口的监听地址；公网直连需显式设为 `0.0.0.0` |
+| `BIND_ADDRESS` | 0.0.0.0（Compose） | Docker 发布端口的监听地址；仅允许同机反代访问时设为 `127.0.0.1` |
 | `AUTH_INFO` / `authInfo` | 空 | 页面 Basic Auth，格式 `user:pass` |
 | `SAVE_PASS` / `savePass` | true | 是否在浏览器保存 SSH/SOCKS5 密码；设为 false 时不再写入并清除旧字段 |
 | `SHOW_FOOTER` / `showFooter` | true | 是否显示页脚 |

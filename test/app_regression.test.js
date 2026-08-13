@@ -5,6 +5,8 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'app.js'), 'utf8');
+const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+const setupSource = fs.readFileSync(path.join(__dirname, '..', 'setup.sh'), 'utf8');
 
 function extractFunction(name) {
     const start = appSource.indexOf('function ' + name + '(');
@@ -74,6 +76,12 @@ function deferred() {
 function flushPromises() {
     return new Promise((resolve) => setImmediate(resolve));
 }
+
+test('Docker deployment defaults to a publicly reachable bind address', () => {
+    assert.match(composeSource, /\$\{BIND_ADDRESS:-0\.0\.0\.0\}:\$\{PORT:-8008\}/);
+    assert.match(setupSource, /\[回车\]=监听所有网卡/);
+    assert.match(setupSource, /else\s+\n?\s*BIND_ADDRESS=0\.0\.0\.0/);
+});
 
 test('local script timestamps stay monotonic even when the wall clock is behind', () => {
     const storage = new Map([['updated', '5000']]);

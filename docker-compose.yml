@@ -4,7 +4,7 @@ services:
     container_name: webssh
     restart: unless-stopped
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8008}:${PORT:-8008}"
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-8008}:${PORT:-8008}"
     environment:
       - port=${PORT:-8008}
       - savePass=${SAVE_PASS:-true}
