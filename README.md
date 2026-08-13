@@ -7,6 +7,7 @@
 - IPv4、域名和 IPv6 SSH 登录；裸 IPv6 与带方括号 IPv6 均可识别
 - 密码、私钥及带口令私钥认证
 - SOCKS5 代理、多标签终端、SFTP 文件管理和系统信息监控
+- SFTP 文件新建、在线编辑、保存、流式上传与带进度的流式下载
 - 脚本名称/命令片段即时搜索
 - 彩色 Emoji 分类、分类筛选和分类增删改查
 - 脚本及分类导入、导出和账号云同步
@@ -29,9 +30,10 @@ sh setup.sh
 
 ```text
 服务端口 [默认 8008，直接回车跳过]
-是否允许通过服务器 IP 直接访问？(y=监听所有网卡  [回车]=仅本机)
+是否仅允许本机反向代理访问？(y=仅监听 127.0.0.1  [回车]=监听所有网卡)
 是否显示底部版权页脚？([回车]=显示  n=不显示)
 是否启用 Web 登录验证？(y=启用  [回车]=不启用)
+是否禁止游客直接连接 SSH/SFTP？(y=必须登录  [回车]=允许游客)
 书签管理员用户名 [默认 admin]
 书签管理员密码 [回车=自动随机生成；至少 7 个字符，最多 72 UTF-8 字节]
 是否启用页面内版本更新？(y=启用  [回车]=禁用)
@@ -146,7 +148,7 @@ JSON 可使用这些字段：
 }
 ```
 
-兼容字段：`host/hostname`、`user/username`、`pass/password`、`logintype/loginType`。Fragment 不会包含在浏览器发送给 WebSSH 服务端的 HTTP 请求或访问日志中，解析后页面也会清理地址栏；但它仍可能出现在浏览器历史、书签、剪贴板或截图中，不应把生产凭据发给不可信的人。
+兼容字段：`host/hostname`、`user/username`、`pass/password`、`logintype/loginType`。Fragment 不会包含在浏览器发送给 WebSSH 服务端的 HTTP 请求或访问日志中，解析后页面也会清理地址栏；但它仍可能出现在浏览器历史、书签、剪贴板或截图中，不应把生产凭据发给不可信的人。默认配置允许未登录 WebSSH 书签账号的游客打开这类分享链接并建立 SSH；如果管理员启用了 `WEBSSH_REQUIRE_ACCOUNT=true`，访客需先登录书签账号。
 
 在浏览器控制台生成 Base64URL：
 
@@ -194,7 +196,13 @@ WebSSH 中可能同时存在三类密码：
 | Web 页面验证 `authInfo` | 打开页面前的 Basic Auth 门禁 | 修改 `.env` 后重建容器 |
 | SSH 密码/私钥 | 登录目标服务器 | 在目标 SSH 服务器上管理 |
 
-默认 `WEBSSH_REQUIRE_ACCOUNT=true`，未登录书签账号时不能发起 SSH、SFTP、系统信息或文件任务；页面会先打开账号登录窗口。若配置了页面 Basic Auth，通过 Basic Auth 的请求也可访问网关，但脚本云同步和账号管理仍必须登录书签账号。只有确实需要兼容旧版匿名网关时才设置 `WEBSSH_REQUIRE_ACCOUNT=false`。
+默认允许游客发起 SSH、SFTP、系统信息和文件任务，因此分享链接可以直接连接。如果要禁止游客，在 `.env` 中配置：
+
+```env
+WEBSSH_REQUIRE_ACCOUNT=true
+```
+
+启用后，未登录书签账号时页面会先打开账号登录窗口。若同时配置了页面 Basic Auth，已通过 Basic Auth 的请求也可访问 SSH/SFTP 网关；脚本云同步和账号管理始终仍需要登录书签账号。要恢复游客连接，设置 `WEBSSH_REQUIRE_ACCOUNT=false` 或删除该配置。
 
 ### 用户修改自己的密码
 
@@ -312,7 +320,20 @@ docker compose exec webssh sh -c 'find /app/data/known_hosts.d -maxdepth 1 -type
 WEBSSH_ALLOW_LEGACY_CIPHERS=true
 ```
 
-## SFTP 上传和远程下载安全
+## SFTP 数据链路、在线编辑和传输安全
+
+SFTP 不是浏览器直接连接目标 SSH 服务器。浏览器本身也不支持直接建立 SSH/SFTP TCP 连接。实际数据路径是：
+
+```text
+浏览器
+  → HTTPS/WSS 访问 WebSSH 网站服务器
+  → WebSSH 服务器建立 SSH/SFTP 连接
+  → SSH 目标服务器:22
+```
+
+因此，SFTP 目录列表、新建文件、在线编辑/保存、上传和下载的数据都会经过 WebSSH 网站服务器。目标 SSH 服务器看到的连接来源通常是 WebSSH 服务器的 IP；如果配置了 SOCKS5，则路径是 `WebSSH → SOCKS5 代理 → SSH 目标`，目标看到的是代理出口 IP。可选的终端专用 WSS 直连只改变“浏览器 → WebSSH”的终端输入/输出路径，不会让 SFTP 变成浏览器直连目标机。
+
+在 SFTP 列表中可以在当前目录新建文件，或打开现有 UTF-8 文本文件进行在线编辑。编辑器支持保存、最小化、最大化和未保存关闭确认；服务端使用文件版本校验防止无声覆盖已被其他人修改的内容。
 
 默认限制：
 
@@ -419,7 +440,7 @@ xterm.js、FitAddon、WebLinksAddon、Noto Sans SC、JetBrains Mono、应用 Jav
 
 实际按键延迟仍受“浏览器 → WebSSH 服务器 → SSH 目标服务器”的网络往返时间、反向代理和目标服务器负载影响。若两台服务器跨洲或线路丢包，应用无法消除物理网络延迟，建议将 WebSSH 部署在靠近 SSH 目标服务器的地区。
 
-### 终端 WebSocket 直连（可选）
+### 终端专用 WebSocket 地址（可选）
 
 如果页面域名经过高延迟 CDN、跨洲反向代理或远程 Worker，可以只让终端 WebSocket 使用一个靠近 WebSSH 建站机的直连 HTTPS/WSS 入口：
 
@@ -428,7 +449,9 @@ WEBSSH_TERMINAL_WS_URL=wss://direct-webssh.example.com/term
 WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com
 ```
 
-`WEBSSH_TERMINAL_WS_URL` 为空时仍使用页面同源 `/term`，不改变普通部署。配置后只有 SSH 终端输入/输出改走该地址，页面、API 和静态资源仍使用原域名。直连入口必须具备浏览器信任的 TLS 证书、支持 WebSocket Upgrade，并反向代理到 WebSSH 的 `/term`；跨域时还必须把页面 Origin 加入 `WEBSSH_ALLOWED_ORIGINS`。
+`WEBSSH_TERMINAL_WS_URL` 为空时使用页面同源 `/term`，普通部署不需要配置它。这里的“终端专用直连地址”不是浏览器直连 SSH 目标机，而是为终端 WebSocket 另外指定一个更直接的 WebSSH 入口，用来避开页面域名前面可能较慢的 CDN/Worker/跨洲反代。配置后只有 SSH 终端输入/输出改走该地址，页面、API、SFTP 和静态资源仍使用当前网站。
+
+专用入口不可用或 4 秒内无法建立 WebSocket 时，页面会自动改用当前网站同源的 `/term`；这就是界面提示“正在改用当前网站连接”的含义，不需要手动操作。专用入口必须具备浏览器信任的 TLS 证书、支持 WebSocket Upgrade，并反向代理到 WebSSH 的 `/term`；跨域时还必须把页面 Origin 加入 `WEBSSH_ALLOWED_ORIGINS`。
 
 该方式减少的是反向代理绕路延迟，不能消除 WebSSH 建站机到 SSH 目标机之间的物理 RTT。项目没有使用不安全的“本地假回显”，因此不会重复字符、破坏 Vim/nano，也不会在远端关闭回显时泄露密码输入。
 
@@ -461,7 +484,7 @@ go run . -a admin:password
 | `WEBSSH_ALLOW_REGISTRATION` | false | 是否开放自助注册 |
 | `WEBSSH_MAX_ACCOUNTS` | 200 | 最大账号数 |
 | `WEBSSH_MAX_SESSIONS_PER_USER` | 20 | 每用户活动会话上限 |
-| `WEBSSH_REQUIRE_ACCOUNT` | true | SSH/SFTP 网关是否要求书签账号会话或已通过页面 Basic Auth |
+| `WEBSSH_REQUIRE_ACCOUNT` | false | 是否禁止游客使用 SSH/SFTP；设为 true 后要求书签账号会话或已通过页面 Basic Auth |
 | `WEBSSH_MAX_CONCURRENT_SSH` | 64 | 全局同时进行的终端、SFTP、检查和系统信息 SSH 任务上限 |
 | `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` | 8 | 同一来源客户端的 SSH 任务上限 |
 | `WEBSSH_MAX_CONCURRENT_UPLOADS` | 4 | 全局并发上传任务上限 |
@@ -474,7 +497,7 @@ go run . -a admin:password
 | `WEBSSH_ALLOW_PRIVATE_DOWNLOADS` | false | 是否允许远程下载访问私网/本机 |
 | `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 与登录 Cookie 写接口额外允许来源 |
 | `WEBSSH_TRUSTED_PROXIES` | 空 | 可读取转发客户端 IP 的可信反向代理 CIDR/IP 列表 |
-| `WEBSSH_TERMINAL_WS_URL` | 空（同源 `/term`） | 可选的终端直连 `ws://` / `wss://` 完整地址，用于绕过高延迟代理 |
+| `WEBSSH_TERMINAL_WS_URL` | 空（同源 `/term`） | 可选的终端专用 `ws://` / `wss://` WebSSH 入口，用于绕过高延迟页面代理；不是浏览器直连 SSH 目标 |
 | `WEBSSH_ALLOW_LEGACY_PATH_LOGIN` | false | 是否兼容会进入服务器日志的旧路径凭据快速登录 |
 | `WEBSSH_ENABLE_SELF_UPDATE` | false | 是否启用页面内更新；启用会挂载源码和 Docker socket |
 | `WEBSSH_SOURCE_DIR` | /app/source | 容器内源码目录 |

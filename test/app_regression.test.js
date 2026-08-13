@@ -83,6 +83,14 @@ test('Docker deployment defaults to a publicly reachable bind address', () => {
     assert.match(setupSource, /else\s+\n?\s*BIND_ADDRESS=0\.0\.0\.0/);
 });
 
+test('guest SSH and SFTP access is the deployment default but remains configurable', () => {
+    assert.match(composeSource, /WEBSSH_REQUIRE_ACCOUNT=\$\{WEBSSH_REQUIRE_ACCOUNT:-false\}/);
+    assert.match(setupSource, /是否禁止游客直接连接 SSH\/SFTP/);
+    assert.match(setupSource, /WEBSSH_REQUIRE_ACCOUNT=%s/);
+    assert.match(appSource, /var requireGatewayAccount = false;/);
+    assert.match(appSource, /requireGatewayAccount = !!\(cfg && cfg\.requireAccount === true\);/);
+});
+
 test('local script timestamps stay monotonic even when the wall clock is behind', () => {
     const storage = new Map([['updated', '5000']]);
     const sandbox = loadFunctions(
@@ -439,6 +447,71 @@ test('gateway-required deployments stop before opening a terminal socket', () =>
     assert.equal(sandbox.startSessionConnection(session), false);
     assert.equal(modalOpened, 1);
     assert.equal(connected, 0);
+});
+
+test('guest-enabled deployments open the terminal without a bookmark account', () => {
+    let modalOpened = 0;
+    let connected = 0;
+    const sandbox = loadFunctions(
+        ['ensureGatewayAccount', 'startSessionConnection'],
+        {
+            requireGatewayAccount: false, currentAccount: null,
+            openAuthModal: () => { modalOpened++; }, showToast: () => {},
+            connectSession: () => { connected++; },
+            document: { visibilityState: 'hidden' }, setTimeout: (fn) => fn(),
+        },
+    );
+    const session = { fitAddon: { fit: () => {} } };
+    assert.equal(sandbox.startSessionConnection(session), true);
+    assert.equal(modalOpened, 0);
+    assert.equal(connected, 1);
+});
+
+test('script bookmarks and SFTP panels close each other when opened', () => {
+    function panel(open) {
+        const state = new Set(open ? ['open'] : []);
+        return {
+            classList: {
+                contains: (name) => state.has(name),
+                remove: (name) => state.delete(name),
+                toggle: (name) => state.has(name) ? (state.delete(name), false) : (state.add(name), true),
+            },
+            isOpen: () => state.has('open'),
+        };
+    }
+    const scriptDrawer = panel(true);
+    const sftpPanel = panel(false);
+    let sftpLoads = 0;
+    const sandbox = loadFunctions(
+        ['toggleScriptDrawer', 'toggleSftp'],
+        {
+            document: { getElementById: (id) => id === 'scriptDrawer' ? scriptDrawer : sftpPanel },
+            sessions: [{ sftpPath: '/tmp' }], activeIdx: 0,
+            sftpLoad: () => { sftpLoads++; }, remoteEditorLayerWidth: () => {}, syncTermSize: () => {},
+            setTimeout: (fn) => fn(),
+        },
+    );
+
+    sandbox.toggleSftp();
+    assert.equal(scriptDrawer.isOpen(), false);
+    assert.equal(sftpPanel.isOpen(), true);
+    assert.equal(sftpLoads, 1);
+
+    sandbox.toggleScriptDrawer();
+    assert.equal(scriptDrawer.isOpen(), true);
+    assert.equal(sftpPanel.isOpen(), false);
+});
+
+test('returning from script category management also closes SFTP', () => {
+    const source = extractFunction('preserveScriptDrawerAfterCategoryChange');
+    assert.match(source, /sftpPanel\.classList\.remove\('open'\)/);
+    assert.ok(source.indexOf("sftpPanel.classList.remove('open')") < source.indexOf("drawer.classList.add('open')"));
+});
+
+test('terminal direct endpoint fallback tells users it is using the current website', () => {
+    assert.doesNotMatch(appSource, /直连通道|兼容线路/);
+    assert.match(appSource, /终端专用直连地址不可用，正在改用当前网站连接/);
+    assert.match(appSource, /终端专用直连地址响应超时，正在改用当前网站连接/);
 });
 
 test('login and new-tab entry points authenticate before creating sessions', () => {

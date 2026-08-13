@@ -123,7 +123,18 @@ if [ "$AUTH_INPUT" = "y" ] || [ "$AUTH_INPUT" = "Y" ]; then
     done
 fi
 
-# ── 4. 脚本书签/账号同步管理员 ────────────────────────────────────────────────
+# ── 4. 游客策略与书签管理员 ────────────────────────────────────────────────────────────────
+echo ""
+echo "  [游客连接说明] 默认允许未登录书签账号的访客使用 SSH/SFTP 和分享链接。"
+echo "  禁止后，必须先登录 WebSSH 书签账号，或通过已配置的 Web 页面 Basic Auth。"
+printf "是否禁止游客直接连接 SSH/SFTP？(y=必须登录  [回车]=允许游客): "
+IFS= read -r REQUIRE_ACCOUNT_INPUT
+if [ "$REQUIRE_ACCOUNT_INPUT" = "y" ] || [ "$REQUIRE_ACCOUNT_INPUT" = "Y" ]; then
+    REQUIRE_ACCOUNT=true
+else
+    REQUIRE_ACCOUNT=false
+fi
+
 echo ""
 echo "  [脚本书签管理员说明]"
 echo "  该账号用于登录账号同步、同步脚本书签和 Emoji 分类，"
@@ -200,13 +211,14 @@ fi
 {
     if [ -f .env ]; then
         awk '
-            /^[[:space:]]*(PORT|BIND_ADDRESS|SHOW_FOOTER|WEBSSH_ADMIN_USER|WEBSSH_ADMIN_PASSWORD|WEBSSH_ENABLE_SELF_UPDATE|WEBSSH_HOST_PROJECT_DIR|COMPOSE_FILE|AUTH_INFO)[[:space:]]*=/ { next }
+            /^[[:space:]]*(PORT|BIND_ADDRESS|SHOW_FOOTER|WEBSSH_REQUIRE_ACCOUNT|WEBSSH_ADMIN_USER|WEBSSH_ADMIN_PASSWORD|WEBSSH_ENABLE_SELF_UPDATE|WEBSSH_HOST_PROJECT_DIR|COMPOSE_FILE|AUTH_INFO)[[:space:]]*=/ { next }
             { print }
         ' .env
     fi
     printf 'PORT=%s\n' "$PORT_INPUT"
     printf 'BIND_ADDRESS=%s\n' "$BIND_ADDRESS"
     printf 'SHOW_FOOTER=%s\n' "$SHOW_FOOTER"
+    printf 'WEBSSH_REQUIRE_ACCOUNT=%s\n' "$REQUIRE_ACCOUNT"
     printf "WEBSSH_ADMIN_USER='%s'\n" "$(escape_dotenv_value "$ADMIN_USER")"
     printf "WEBSSH_ADMIN_PASSWORD='%s'\n" "$(escape_dotenv_value "$ADMIN_PASS")"
     printf 'WEBSSH_ENABLE_SELF_UPDATE=%s\n' "$ENABLE_SELF_UPDATE"

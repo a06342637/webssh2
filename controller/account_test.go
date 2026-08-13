@@ -249,6 +249,17 @@ func TestGatewayAuthPolicy(t *testing.T) {
 		return recorder, allowed
 	}
 
+	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "")
+	if err := os.Unsetenv("WEBSSH_REQUIRE_ACCOUNT"); err != nil {
+		t.Fatalf("unset account policy: %v", err)
+	}
+	if RequireAccount() {
+		t.Fatal("missing account policy did not keep guest access enabled")
+	}
+	if _, allowed := request(false, false); !allowed {
+		t.Fatal("default guest gateway request was rejected")
+	}
+
 	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "true")
 	if recorder, allowed := request(false, false); allowed || recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous gateway request returned %d", recorder.Code)
@@ -267,7 +278,7 @@ func TestGatewayAuthPolicy(t *testing.T) {
 
 	t.Setenv("WEBSSH_REQUIRE_ACCOUNT", "invalid")
 	if !RequireAccount() {
-		t.Fatal("invalid account policy weakened the secure default")
+		t.Fatal("invalid account policy unexpectedly enabled guest access")
 	}
 }
 

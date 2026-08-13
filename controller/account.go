@@ -595,23 +595,24 @@ func MarkBasicAuthAuthenticated(c *gin.Context) {
 }
 
 // RequireAccount reports whether outbound SSH/SFTP gateway operations require
-// either a bookmark-account session or the optional outer Basic Auth. The
-// safer policy is the default; legacy anonymous gateway access is opt-in.
+// either a bookmark-account session or the optional outer Basic Auth. Guest
+// access is the default; deployments can explicitly require an account.
 func RequireAccount() bool {
 	raw, exists := os.LookupEnv("WEBSSH_REQUIRE_ACCOUNT")
 	if !exists {
-		return true
+		return false
 	}
 	parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
+		// An explicitly configured but malformed policy should not accidentally
+		// expose the SSH gateway. Only a missing value keeps the guest default.
 		return true
 	}
 	return parsed
 }
 
-// GatewayAuth protects operations that can open an outbound SSH/SFTP channel.
-// Account authentication is enabled by default; deployments that deliberately
-// need the legacy anonymous gateway can opt out explicitly.
+// GatewayAuth protects operations that can open an outbound SSH/SFTP channel
+// when the deployment explicitly enables the account requirement.
 func GatewayAuth() func(*gin.Context) bool {
 	return func(c *gin.Context) bool {
 		if !RequireAccount() {

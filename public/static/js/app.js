@@ -1033,7 +1033,7 @@ function connectSession(session) {
             ws = new WebSocket(wsUrl);
         } catch (e) {
             if (!isFallback && canFallback) {
-                showToast('直连通道不可用，正在切换兼容线路…', 'info');
+                showToast('终端专用直连地址不可用，正在改用当前网站连接…', 'info');
                 openSocket(fallbackWsUrl, true);
                 return;
             }
@@ -1045,7 +1045,7 @@ function connectSession(session) {
         var transportTimer = !isFallback && canFallback ? setTimeout(function () {
             if (!isCurrentConnection() || session.ws !== ws || ws.readyState !== 0) return;
             try { ws.close(); } catch (e) { }
-            showToast('直连通道响应超时，正在切换兼容线路…', 'info');
+            showToast('终端专用直连地址响应超时，正在改用当前网站连接…', 'info');
             openSocket(fallbackWsUrl, true);
         }, 4000) : null;
 
@@ -1122,7 +1122,7 @@ function connectSession(session) {
             if (session.heartbeat) { clearInterval(session.heartbeat); session.heartbeat = null; }
             stopTopbarMetricsPolling(session);
             if (!session._connected && !failedBeforeConnect && !isFallback && canFallback) {
-                showToast('直连通道不可用，正在切换兼容线路…', 'info');
+                showToast('终端专用直连地址不可用，正在改用当前网站连接…', 'info');
                 openSocket(fallbackWsUrl, true);
                 return;
             }
@@ -2229,13 +2229,23 @@ function renderServerInfo(d, session) {
 // ==================== Drawers ====================
 function toggleConnDrawer() { document.getElementById('connDrawer').classList.toggle('open'); }
 function toggleScriptDrawer() {
-    document.getElementById('scriptDrawer').classList.toggle('open');
+    var drawer = document.getElementById('scriptDrawer');
+    var opening = !drawer.classList.contains('open');
+    if (opening) {
+        var sftpPanel = document.getElementById('sftpPanel');
+        if (sftpPanel) sftpPanel.classList.remove('open');
+    }
+    drawer.classList.toggle('open');
     remoteEditorLayerWidth();
     setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 function toggleSftp() {
     var p = document.getElementById('sftpPanel');
     var wasOpen = p.classList.contains('open');
+    if (!wasOpen) {
+        var scriptDrawer = document.getElementById('scriptDrawer');
+        if (scriptDrawer) scriptDrawer.classList.remove('open');
+    }
     p.classList.toggle('open');
     if (!wasOpen && activeIdx >= 0 && sessions[activeIdx]) sftpLoad(sessions[activeIdx].sftpPath || '/', sessions[activeIdx]);
     remoteEditorLayerWidth();
@@ -2264,7 +2274,9 @@ var currentAccount = null;
 var authMode = 'login';
 var allowRegistration = false;
 var allowLegacyPathLogin = false;
-var requireGatewayAccount = true;
+// Guest SSH/SFTP access is the server default. /config can explicitly require
+// a bookmark account for deployments that want to disable guest connections.
+var requireGatewayAccount = false;
 var remoteEditorDefaultMaxBytes = 2 * 1024 * 1024;
 var urlAutoLoginHandled = false;
 // Default to the safer policy until /config explicitly enables password
@@ -4166,7 +4178,11 @@ function resetCategoryEditor() {
 function preserveScriptDrawerAfterCategoryChange() {
     if (!scriptManagerPreserveDrawer) return;
     var drawer = document.getElementById('scriptDrawer');
-    if (drawer) drawer.classList.add('open');
+    if (drawer) {
+        var sftpPanel = document.getElementById('sftpPanel');
+        if (sftpPanel) sftpPanel.classList.remove('open');
+        drawer.classList.add('open');
+    }
 }
 
 function updateVisibleScriptCategoryBadges(categoryId, category) {
@@ -6763,7 +6779,7 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
         }
         allowRegistration = !!(cfg && cfg.allowRegistration);
         allowLegacyPathLogin = !!(cfg && cfg.allowLegacyPathLogin === true);
-        requireGatewayAccount = !(cfg && cfg.requireAccount === false);
+        requireGatewayAccount = !!(cfg && cfg.requireAccount === true);
         var configuredEditorLimit = parseInt(cfg && cfg.remoteEditorMaxBytes, 10);
         if (configuredEditorLimit >= 1024) remoteEditorDefaultMaxBytes = configuredEditorLimit;
         applyPasswordStoragePolicy(!!(cfg && cfg.savePass === true));

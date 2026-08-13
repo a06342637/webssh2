@@ -12,7 +12,7 @@ services:
       - key: WEBSSH_ADMIN_PASSWORD
         sync: false
       - key: WEBSSH_REQUIRE_ACCOUNT
-        value: "true"
+        value: "false"
     disk:
       name: webssh-data
       mountPath: /app/data
