@@ -230,6 +230,8 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoModal && serverInfoModal.classList.contains('show')) { hideServerInfoModal(); return; }
         var addTabModal = document.getElementById('addTabModal');
         if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
+        var remoteEditorCloseModal = document.getElementById('remoteEditorCloseModal');
+        if (remoteEditorCloseModal && remoteEditorCloseModal.classList.contains('show')) { cancelRemoteEditorClose(); return; }
     }
 });
 
@@ -249,6 +251,10 @@ document.addEventListener('click', function (e) {
     var categoryDeleteModal = document.getElementById('categoryDeleteModal');
     if (categoryDeleteModal && categoryDeleteModal.classList.contains('show') && e.target === categoryDeleteModal) {
         hideCategoryDeleteModal();
+    }
+    var remoteEditorCloseModal = document.getElementById('remoteEditorCloseModal');
+    if (remoteEditorCloseModal && remoteEditorCloseModal.classList.contains('show') && e.target === remoteEditorCloseModal) {
+        cancelRemoteEditorClose();
     }
 });
 
@@ -4562,6 +4568,19 @@ function scheduleRemoteEditorInitialLoad(editor, session) {
     }, 50);
 }
 
+function prepareRemoteEditorWorkspace() {
+    ensureRemoteEditorBoundsObserver();
+    var panel = document.getElementById('sftpPanel');
+    var termMain = document.querySelector('.term-main');
+    if (panel && panel.classList.contains('open') && termMain && panel.getBoundingClientRect().width >= termMain.getBoundingClientRect().width * .9) {
+        // On phones and very narrow workspaces the SFTP panel covers the whole
+        // terminal. Hide it before opening either an existing or a new file so
+        // the requested editor is immediately visible.
+        panel.classList.remove('open');
+    }
+    remoteEditorLayerWidth();
+}
+
 function createRemoteEditorElement(editor) {
     var layer = document.getElementById('remoteEditorLayer');
     if (!layer) return false;
@@ -4812,15 +4831,7 @@ function openRemoteEditor(path, session) {
     path = normalizeRemoteFilePath(path);
     if (!session || sessions.indexOf(session) < 0 || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     if (!path) { showToast('文件路径无效', 'error'); return; }
-    ensureRemoteEditorBoundsObserver();
-    var panel = document.getElementById('sftpPanel');
-    var termMain = document.querySelector('.term-main');
-    if (panel && panel.classList.contains('open') && termMain && panel.getBoundingClientRect().width >= termMain.getBoundingClientRect().width * .9) {
-        // On phones the SFTP panel occupies the whole workspace.  Closing it
-        // after the pencil click leaves room for the editor the user requested.
-        panel.classList.remove('open');
-    }
-    remoteEditorLayerWidth();
+    prepareRemoteEditorWorkspace();
     var existing = remoteEditorFor(session, path);
     if (existing) {
         existing.minimized = false;
@@ -4864,7 +4875,7 @@ function joinRemoteFilePath(directory, name) {
 function openNewRemoteFile() {
     var session = getActiveSession();
     if (!session || sessions.indexOf(session) < 0 || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
-    ensureRemoteEditorBoundsObserver();
+    prepareRemoteEditorWorkspace();
     var parentPath = normalizeSftpDir(session.sftpPath || document.getElementById('sftpPath').value || '/');
     var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: '', name: '新建文件.txt', parentPath: parentPath, isNew: true, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: true, restoreRect: null };
     editor.path = joinRemoteFilePath(parentPath, editor.name);

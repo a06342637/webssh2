@@ -573,6 +573,17 @@ test('new remote files are created in the active SFTP directory without overwrit
     assert.match(saveSource, /editor\.isNew = false/);
 });
 
+test('new remote files reveal the editor when SFTP covers a narrow workspace', () => {
+    const prepareSource = extractFunction('prepareRemoteEditorWorkspace');
+    const newFileSource = extractFunction('openNewRemoteFile');
+    const existingFileSource = extractFunction('openRemoteEditor');
+    assert.match(prepareSource, /panel\.getBoundingClientRect\(\)\.width >= termMain\.getBoundingClientRect\(\)\.width \* \.9/);
+    assert.match(prepareSource, /panel\.classList\.remove\('open'\)/);
+    assert.match(prepareSource, /remoteEditorLayerWidth\(\)/);
+    assert.match(newFileSource, /prepareRemoteEditorWorkspace\(\)/);
+    assert.match(existingFileSource, /prepareRemoteEditorWorkspace\(\)/);
+});
+
 test('an untouched new-file draft is still treated as unsaved', () => {
     const sandbox = loadFunctions(['remoteEditorIsDirty'], {});
     assert.equal(sandbox.remoteEditorIsDirty({ isNew: true, originalContent: '', textarea: { value: '' } }), true);
@@ -676,6 +687,11 @@ test('remote editor workspace reserves the command input bar and SFTP panel', ()
 
 test('dirty remote editors install a browser close warning', () => {
     assert.match(appSource, /addEventListener\('beforeunload',[\s\S]*remoteEditors\.some\(remoteEditorIsDirty\)[\s\S]*event\.returnValue = '';/);
+});
+
+test('the unsaved editor prompt can be cancelled with Escape or its backdrop', () => {
+    assert.match(appSource, /e\.key === 'Escape'[\s\S]*remoteEditorCloseModal\.classList\.contains\('show'\)[\s\S]*cancelRemoteEditorClose\(\)/);
+    assert.match(appSource, /e\.target === remoteEditorCloseModal[\s\S]*cancelRemoteEditorClose\(\)/);
 });
 
 test('remote editor retries an unfinished initial load after SSH reconnects', () => {
