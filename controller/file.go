@@ -1,9 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -14,8 +17,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 	"webssh/core"
 
 	"github.com/gin-gonic/gin"
@@ -27,11 +32,50 @@ type File struct {
 	Size       string
 	ModifyTime string
 	IsDir      bool
+	IsSymlink  bool
+	Editable   bool
 }
 
 type fileRequest struct {
 	SSHInfo string `json:"sshInfo"`
 	Path    string `json:"path"`
+}
+
+type fileSaveRequest struct {
+	SSHInfo string `json:"sshInfo"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Version string `json:"version"`
+	Create  bool   `json:"create"`
+}
+
+type remoteFileSnapshot struct {
+	Content  string
+	Version  string
+	Size     int64
+	Mode     os.FileMode
+	Modified time.Time
+	Stat     *sftp.FileStat
+}
+
+type remoteEditorTargetLock struct {
+	token chan struct{}
+	refs  int
+}
+
+var remoteEditorTargetLocks = struct {
+	sync.Mutex
+	entries map[string]*remoteEditorTargetLock
+}{entries: make(map[string]*remoteEditorTargetLock)}
+
+func validateRemoteTextContent(content []byte, maxBytes int64, action, pastAction string) error {
+	if int64(len(content)) > maxBytes {
+		return fmt.Errorf("file is too large to %s (maximum %s)", action, Bytefmt(uint64(maxBytes)))
+	}
+	if bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
+		return fmt.Errorf("only UTF-8 text files can be %s", pastAction)
+	}
+	return nil
 }
 
 func bindFileRequest(c *gin.Context) (fileRequest, error) {
@@ -115,6 +159,395 @@ func formatRemoteFileSize(size int64, isDir bool) string {
 		return strconv.FormatInt(size, 10)
 	}
 	return Bytefmt(uint64(size))
+}
+
+const defaultRemoteEditorMaxBytes = int64(2 << 20)
+
+func remoteEditorMaxBytes() int64 {
+	const maxRemoteEditorBytes = int64(64 << 20)
+	raw := strings.TrimSpace(os.Getenv("WEBSSH_EDITOR_MAX_BYTES"))
+	if raw == "" {
+		return defaultRemoteEditorMaxBytes
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1024 || value > maxRemoteEditorBytes {
+		return defaultRemoteEditorMaxBytes
+	}
+	return value
+}
+
+func RemoteEditorMaxBytes() int64 {
+	return remoteEditorMaxBytes()
+}
+
+func RemoteEditorRequestBodyLimit() int64 {
+	// JSON.stringify may escape one input byte into as many as six ASCII bytes
+	// (for example '<' or a control character).  Leave additional room for the
+	// SSH payload, field names and JSON framing so the advertised editor limit
+	// remains usable for all valid UTF-8 text.
+	const (
+		jsonExpansion = int64(6)
+		overhead      = int64(4 << 20)
+		maxInt64      = int64(1<<63 - 1)
+	)
+	maxBytes := remoteEditorMaxBytes()
+	if maxBytes > (maxInt64-overhead)/jsonExpansion {
+		return maxInt64
+	}
+	return maxBytes*jsonExpansion + overhead
+}
+
+func remoteEditorTargetKey(client core.SSHClient, path string) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(client.Hostname)),
+		strconv.Itoa(client.Port),
+		strings.TrimSpace(client.Username),
+		pathpkg.Clean(strings.TrimSpace(path)),
+	}, "\x00")
+}
+
+func acquireRemoteEditorTarget(ctx context.Context, key string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	remoteEditorTargetLocks.Lock()
+	entry := remoteEditorTargetLocks.entries[key]
+	if entry == nil {
+		entry = &remoteEditorTargetLock{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
+		remoteEditorTargetLocks.entries[key] = entry
+	}
+	entry.refs++
+	remoteEditorTargetLocks.Unlock()
+
+	releaseReference := func() {
+		remoteEditorTargetLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 && remoteEditorTargetLocks.entries[key] == entry {
+			delete(remoteEditorTargetLocks.entries, key)
+		}
+		remoteEditorTargetLocks.Unlock()
+	}
+
+	select {
+	case <-entry.token:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				entry.token <- struct{}{}
+				releaseReference()
+			})
+		}, nil
+	case <-ctx.Done():
+		releaseReference()
+		return nil, ctx.Err()
+	}
+}
+
+func remoteFileVersion(info os.FileInfo, content []byte) string {
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "%d\n%d\n%o\n", info.Size(), info.ModTime().UnixNano(), info.Mode())
+	_, _ = hash.Write(content)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func readRemoteTextFile(client *sftp.Client, path string, maxBytes int64) (remoteFileSnapshot, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return remoteFileSnapshot{}, fmt.Errorf("missing path")
+	}
+	// Stat follows symbolic links.  Editing through a link would make the
+	// temporary-file rename replace the link itself (or, depending on the
+	// server, unexpectedly modify a different target).  Keep the editor
+	// deliberately limited to a concrete regular file.
+	lstat, err := client.Lstat(path)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		return remoteFileSnapshot{}, fmt.Errorf("symbolic links cannot be edited")
+	}
+	info, err := client.Stat(path)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return remoteFileSnapshot{}, fmt.Errorf("only regular files can be edited")
+	}
+	if info.Size() > maxBytes {
+		return remoteFileSnapshot{}, fmt.Errorf("file is too large to edit (maximum %s)", Bytefmt(uint64(maxBytes)))
+	}
+	file, err := client.Open(path)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if err := validateRemoteTextContent(content, maxBytes, "edit", "edited"); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	return remoteFileSnapshot{
+		Content:  string(content),
+		Version:  remoteFileVersion(info, content),
+		Size:     int64(len(content)),
+		Mode:     info.Mode(),
+		Modified: info.ModTime(),
+		Stat:     cloneSFTPFileStat(info),
+	}, nil
+}
+
+func cloneSFTPFileStat(info os.FileInfo) *sftp.FileStat {
+	stat, ok := info.Sys().(*sftp.FileStat)
+	if !ok || stat == nil {
+		return nil
+	}
+	cloned := *stat
+	return &cloned
+}
+
+func writeRemoteTextFile(client *sftp.Client, path string, content []byte, expectedVersion string, maxBytes int64) (remoteFileSnapshot, error) {
+	if err := validateRemoteTextContent(content, maxBytes, "save", "saved"); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	current, err := readRemoteTextFile(client, path, maxBytes)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if strings.TrimSpace(expectedVersion) == "" {
+		return remoteFileSnapshot{}, fmt.Errorf("missing file version")
+	}
+	expectedVersion = strings.TrimSpace(expectedVersion)
+	if current.Version != expectedVersion {
+		return remoteFileSnapshot{}, fmt.Errorf("the remote file changed after it was opened; reload it before saving")
+	}
+	randomBytes := make([]byte, 12)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return remoteFileSnapshot{}, fmt.Errorf("create editor temp name: %w", err)
+	}
+	tmpPath := pathpkg.Join(pathpkg.Dir(path), ".webssh-edit-"+hex.EncodeToString(randomBytes)+".tmp")
+	tmpFile, err := client.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	committed := false
+	defer func() {
+		_ = tmpFile.Close()
+		if !committed {
+			_ = client.Remove(tmpPath)
+		}
+	}()
+	// Keep the random temporary file private while it is incomplete.  Apply
+	// the original mode only after writes/chown, because either operation may
+	// clear setuid/setgid bits on Unix servers.
+	if err := tmpFile.Chmod(0o600); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if _, err := io.Copy(tmpFile, bytes.NewReader(content)); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if current.Stat != nil {
+		// The temporary file normally has the same owner because it is created
+		// by the logged-in SSH account.  When elevated SFTP accounts edit files
+		// owned by another uid/gid, preserve that metadata as well.  A permission
+		// denial is surfaced instead of silently changing ownership.
+		if tmpInfo, statErr := tmpFile.Stat(); statErr != nil {
+			return remoteFileSnapshot{}, statErr
+		} else if tmpStat := cloneSFTPFileStat(tmpInfo); tmpStat != nil && (tmpStat.UID != current.Stat.UID || tmpStat.GID != current.Stat.GID) {
+			if err := tmpFile.Chown(int(current.Stat.UID), int(current.Stat.GID)); err != nil {
+				return remoteFileSnapshot{}, err
+			}
+		}
+	}
+	if err := tmpFile.Chmod(current.Mode); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if err := tmpFile.Sync(); err != nil && !isSFTPUnsupported(err) {
+		return remoteFileSnapshot{}, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	latest, err := readRemoteTextFile(client, path, maxBytes)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if latest.Version != expectedVersion {
+		return remoteFileSnapshot{}, fmt.Errorf("the remote file changed while it was being saved; reload it before trying again")
+	}
+	// Re-check the link type immediately before the commit.  This closes the
+	// most important replace-via-link race without weakening the optimistic
+	// version check above.
+	latestLstat, err := client.Lstat(path)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if latestLstat.Mode()&os.ModeSymlink != 0 || !latestLstat.Mode().IsRegular() {
+		return remoteFileSnapshot{}, fmt.Errorf("the remote file is no longer a regular file")
+	}
+	if err := replaceRemoteFile(client, tmpPath, path); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	committed = true
+	return readRemoteTextFile(client, path, maxBytes)
+}
+
+func createRemoteTextFile(client *sftp.Client, path string, content []byte, maxBytes int64) (remoteFileSnapshot, error) {
+	path = strings.TrimSpace(path)
+	name := pathpkg.Base(path)
+	if path == "" || path == "/" || name == "." || name == ".." || name == "/" || len([]byte(name)) > 255 || strings.IndexFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return remoteFileSnapshot{}, fmt.Errorf("invalid file path")
+	}
+	if err := validateRemoteTextContent(content, maxBytes, "save", "saved"); err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	parentInfo, err := client.Stat(pathpkg.Dir(path))
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	if !parentInfo.IsDir() {
+		return remoteFileSnapshot{}, fmt.Errorf("parent path is not a directory")
+	}
+	file, err := client.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	if err != nil {
+		if _, statErr := client.Lstat(path); statErr == nil {
+			return remoteFileSnapshot{}, fmt.Errorf("a file or directory with this name already exists")
+		}
+		return remoteFileSnapshot{}, err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
+	if _, err := io.Copy(file, bytes.NewReader(content)); err != nil {
+		return remoteFileSnapshot{}, fmt.Errorf("create file write failed; an incomplete file may remain: %w", err)
+	}
+	if err := file.Sync(); err != nil && !isSFTPUnsupported(err) {
+		return remoteFileSnapshot{}, fmt.Errorf("create file sync failed; an incomplete file may remain: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return remoteFileSnapshot{}, fmt.Errorf("create file close failed; verify the remote file before retrying: %w", err)
+	}
+	closed = true
+	// Re-read after close because some SFTP servers finalize size or mtime only
+	// when the handle is closed. Returning a pre-close fingerprint would make
+	// the very next editor save look like an external conflict.
+	snapshot, err := readRemoteTextFile(client, path, maxBytes)
+	if err != nil {
+		return remoteFileSnapshot{}, fmt.Errorf("file was created but verification failed; reopen it before retrying: %w", err)
+	}
+	return snapshot, nil
+}
+
+func saveRemoteTextFileWithLock(ctx context.Context, lockKey string, client *sftp.Client, request fileSaveRequest, maxBytes int64) (remoteFileSnapshot, error) {
+	release, err := acquireRemoteEditorTarget(ctx, lockKey)
+	if err != nil {
+		return remoteFileSnapshot{}, err
+	}
+	defer release()
+	if request.Create {
+		if strings.TrimSpace(request.Version) != "" {
+			return remoteFileSnapshot{}, fmt.Errorf("new files must not include an existing version")
+		}
+		return createRemoteTextFile(client, request.Path, []byte(request.Content), maxBytes)
+	}
+	return writeRemoteTextFile(client, request.Path, []byte(request.Content), request.Version, maxBytes)
+}
+
+func remoteSnapshotData(path string, snapshot remoteFileSnapshot, maxBytes int64) gin.H {
+	return gin.H{
+		"path":       path,
+		"name":       pathpkg.Base(path),
+		"content":    snapshot.Content,
+		"version":    snapshot.Version,
+		"size":       snapshot.Size,
+		"mode":       fmt.Sprintf("%04o", snapshot.Mode.Perm()),
+		"modifiedAt": snapshot.Modified.Format(time.RFC3339),
+		"maxBytes":   maxBytes,
+	}
+}
+
+func OpenFileForEdit(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	request, err := bindFileRequest(c)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
+	path := strings.TrimSpace(request.Path)
+	maxBytes := remoteEditorMaxBytes()
+	snapshot, err := readRemoteTextFile(sshClient.Sftp, path, maxBytes)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	responseBody.Data = remoteSnapshotData(path, snapshot, maxBytes)
+	return &responseBody
+}
+
+func SaveEditedFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	var request fileSaveRequest
+	if err := bindStrictJSON(c, &request); err != nil {
+		responseBody.Msg = fmt.Errorf("invalid request: %w", err).Error()
+		return &responseBody
+	}
+	if strings.TrimSpace(request.SSHInfo) == "" {
+		responseBody.Msg = "missing sshInfo"
+		return &responseBody
+	}
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
+	path := strings.TrimSpace(request.Path)
+	request.Path = path
+	maxBytes := remoteEditorMaxBytes()
+	snapshot, err := saveRemoteTextFileWithLock(c.Request.Context(), remoteEditorTargetKey(sshClient, path), sshClient.Sftp, request, maxBytes)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	responseBody.Data = remoteSnapshotData(path, snapshot, maxBytes)
+	return &responseBody
 }
 
 type fileSplice []File
@@ -394,10 +827,25 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 }
 
 func replaceRemoteFile(client *sftp.Client, oldPath, newPath string) error {
-	if err := client.PosixRename(oldPath, newPath); err == nil {
-		return nil
+	if _, supported := client.HasExtension("posix-rename@openssh.com"); supported {
+		if err := client.PosixRename(oldPath, newPath); err == nil {
+			return nil
+		} else if !isSFTPUnsupported(err) {
+			return err
+		}
 	}
+	// Older SFTP servers do not advertise posix-rename.  Fall back only when
+	// that extension is absent/unsupported. Some v3 servers replace an existing
+	// destination with the standard RENAME packet, while stricter ones reject
+	// it. We deliberately keep the destination intact on rejection instead of
+	// deleting/truncating it first: atomic replacement is required for editor
+	// saves and remote downloads, so failure is safer than a data-loss window.
 	return client.Rename(oldPath, newPath)
+}
+
+func isSFTPUnsupported(err error) bool {
+	var statusErr *sftp.StatusError
+	return errors.As(err, &statusErr) && statusErr.FxCode() == sftp.ErrSSHFxOpUnsupported
 }
 
 func newRemoteDownloadRequest(ctx context.Context, rawURL string) (*http.Request, error) {
@@ -565,12 +1013,27 @@ func FileList(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	var (
-		fileList fileSplice
-		fileSize string
+		fileList       fileSplice
+		editorMaxBytes = remoteEditorMaxBytes()
 	)
 	for _, mFile := range files {
-		fileSize = formatRemoteFileSize(mFile.Size(), mFile.IsDir())
-		file := File{Name: mFile.Name(), IsDir: mFile.IsDir(), Size: fileSize, ModifyTime: mFile.ModTime().Format("2006-01-02 15:04:05")}
+		info := mFile
+		isSymlink := mFile.Mode()&os.ModeSymlink != 0
+		if isSymlink {
+			resolved, statErr := sshClient.Sftp.Stat(pathpkg.Join(path, mFile.Name()))
+			if statErr == nil {
+				info = resolved
+			}
+		}
+		isDir := info.IsDir()
+		file := File{
+			Name:       mFile.Name(),
+			IsDir:      isDir,
+			IsSymlink:  isSymlink,
+			Editable:   !isSymlink && info.Mode().IsRegular() && info.Size() <= editorMaxBytes,
+			Size:       formatRemoteFileSize(info.Size(), isDir),
+			ModifyTime: info.ModTime().Format("2006-01-02 15:04:05"),
+		}
 		fileList = append(fileList, file)
 	}
 	sort.Stable(fileList)

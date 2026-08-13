@@ -336,10 +336,12 @@ test('an SFTP response from another tab cannot repaint the active tab', async ()
     assert.match(elements.sftpBody.innerHTML, /空目录/);
 });
 
-test('successful connection consumes every one-shot host-key decision', () => {
+test('one-time host-key trust remains available only for the live SSH tab', () => {
     const connectSource = extractFunction('connectSession');
-    assert.match(connectSource, /if \(session\.hostKeyDecision\) clearHostKeyDecision\(session\);/);
-    assert.doesNotMatch(connectSource, /hostKeyDecision === ['"]replace['"]/);
+    const reconnectSource = extractFunction('reconnectTab');
+    assert.match(connectSource, /if \(session\.hostKeyDecision === ['"]replace['"]\) clearHostKeyDecision\(session\);/);
+    assert.match(connectSource, /if \(wasConnected && session\.hostKeyDecision\) clearHostKeyDecision\(session\);/);
+    assert.match(reconnectSource, /if \(s\.hostKeyDecision\) clearHostKeyDecision\(s\);/);
 });
 
 test('terminal close marks the session offline and cancels dependent work', () => {
@@ -347,7 +349,7 @@ test('terminal close marks the session offline and cancels dependent work', () =
     assert.match(connectSource, /session\._connected = false;/);
     assert.match(connectSource, /session\.ws = null;/);
     assert.match(connectSource, /stopServerInfoNetStream\(session\);/);
-    assert.match(connectSource, /cancelSessionSftpRequests\(session\);/);
+    assert.match(connectSource, /cancelSessionSftpRequests\(session, false\);/);
 });
 
 test('credential-bearing path login is gated behind an explicit server flag', () => {
@@ -438,9 +440,269 @@ test('login and new-tab entry points authenticate before creating sessions', () 
     assert.match(addTabSource, /^function addNewTab\(\) \{\s*if \(!ensureGatewayAccount\(\)\) return;/);
 });
 
-test('SFTP download installs cleanup before form submission', () => {
+test('SFTP download never removes its iframe on an unreliable load event', () => {
     const source = extractFunction('sftpDownload');
-    assert.ok(source.indexOf("iframe.addEventListener('load'") < source.indexOf('form.submit()'));
+    assert.doesNotMatch(source, /iframe\.addEventListener\(['"]load['"]/);
+    assert.ok(source.indexOf('form.submit()') < source.indexOf('iframe._websshCleanupTimer = setTimeout'));
+    assert.match(source, /24 \* 60 \* 60 \* 1000/);
+});
+
+test('terminal disconnect does not cancel an independent SFTP download', () => {
+    const closeHandler = extractFunction('connectSession');
+    const cancelSource = extractFunction('cancelSessionSftpRequests');
+    assert.match(closeHandler, /cancelSessionSftpRequests\(session, false\)/);
+    assert.match(cancelSource, /if \(cancelDownloads\) \{/);
+});
+
+test('a minimized remote editor refreshes its dock dirty state after save', () => {
+    const source = extractFunction('remoteEditorUpdateMetrics');
+    assert.match(source, /if \(editor\.minimized\) renderRemoteEditorDock\(getActiveSession\(\)\);/);
+});
+
+test('saving a remote editor refreshes metadata in the normalized visible SFTP directory', async () => {
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '', _remoteEditorControllers: [] };
+    const editor = {
+        sessionId: session.id, parentPath: '/', path: '/test.txt', name: 'test.txt', version: 'v1',
+        originalContent: 'old', saving: false, textarea: { value: 'new' },
+    };
+    let refreshedPath = '';
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        {
+            sessions: [session], remoteEditors: [editor],
+            getSessionById: (id) => id === session.id ? session : null,
+            remoteEditorRequest: () => Promise.resolve({ version: 'v2' }),
+            remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
+            sftpLoad: (path, target) => { refreshedPath = path; assert.equal(target, session); },
+            AbortController, Promise,
+        },
+    );
+
+    assert.equal(await sandbox.saveRemoteEditor(editor, false), true);
+    assert.equal(refreshedPath, '/');
+});
+
+test('remote editor identity is scoped to the SSH session and normalized path', () => {
+    const first = { id: 'first' };
+    const second = { id: 'second' };
+    const sandbox = loadFunctions(
+        ['normalizeRemoteFilePath', 'remoteEditorFor'],
+        {
+            remoteEditors: [
+                { sessionId: 'first', path: '/etc/app.conf' },
+                { sessionId: 'second', path: '/etc/app.conf' },
+            ],
+        },
+    );
+
+    assert.equal(sandbox.normalizeRemoteFilePath('\\etc\\app.conf/'), '/etc/app.conf');
+    assert.equal(sandbox.remoteEditorFor(first, '//etc//app.conf/').sessionId, 'first');
+    assert.equal(sandbox.remoteEditorFor(second, '/etc/app.conf').sessionId, 'second');
+});
+
+test('closing an SSH tab is deferred while one of its editors is dirty', () => {
+    const session = { id: 'session-1' };
+    const clean = { sessionId: 'session-1', originalContent: 'same', textarea: { value: 'same' } };
+    const dirty = { sessionId: 'session-1', originalContent: 'old', textarea: { value: 'new' } };
+    let prompted;
+    const sandbox = loadFunctions(
+        ['remoteEditorIsDirty', 'requestCloseRemoteEditorsForSession'],
+        {
+            remoteEditors: [clean, dirty, { sessionId: 'other', originalContent: 'x', textarea: { value: 'y' } }],
+            showRemoteEditorClosePrompt: (queue, onComplete) => { prompted = { queue, onComplete }; },
+        },
+    );
+    const afterClose = () => {};
+
+    assert.equal(sandbox.requestCloseRemoteEditorsForSession(session, afterClose), true);
+    assert.deepEqual(Array.from(prompted.queue), [dirty]);
+    assert.equal(prompted.onComplete, afterClose);
+});
+
+test('deferred SSH tab close resolves the original session after tab order changes', () => {
+    const source = extractFunction('closeTab');
+    assert.match(source, /var requestedSession = sessions\[idx\];/);
+    assert.match(source, /var currentIndex = sessions\.indexOf\(requestedSession\);/);
+    assert.doesNotMatch(source, /function \(\) \{ closeTab\(idx, true\); \}/);
+});
+
+test('saving an editor keeps modifications typed while the request is in flight', async () => {
+    const request = deferred();
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', _remoteEditorControllers: [] };
+    const editor = {
+        sessionId: session.id,
+        path: '/tmp/test.txt', version: 'v1', originalContent: 'old', saving: false,
+        textarea: { value: 'sent content' },
+    };
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        {
+            sessions: [session], remoteEditors: [editor],
+            getSessionById: (id) => id === session.id ? session : null,
+            remoteEditorRequest: () => request.promise,
+            remoteEditorUpdateMetrics: () => {}, showToast: () => {},
+            requestWasAborted: () => false, AbortController, Promise,
+        },
+    );
+
+    const saving = sandbox.saveRemoteEditor(editor, false);
+    editor.textarea.value = 'newer content typed during save';
+    request.resolve({ version: 'v2' });
+    assert.equal(await saving, true);
+    assert.equal(editor.originalContent, 'sent content');
+    assert.equal(editor.version, 'v2');
+    assert.equal(sandbox.remoteEditorIsDirty(editor), true);
+});
+
+test('remote editor save endpoint carries the opened version fingerprint', () => {
+    const source = extractFunction('saveRemoteEditor');
+    assert.match(source, /var sentVersion = editor\.version;/);
+    assert.match(source, /version: sentVersion/);
+    assert.match(source, /var creating = !!editor\.isNew;/);
+    assert.match(source, /create: creating/);
+});
+
+test('new remote files are created in the active SFTP directory without overwriting', () => {
+    const openSource = extractFunction('openNewRemoteFile');
+    const saveSource = extractFunction('saveRemoteEditor');
+    assert.match(openSource, /normalizeSftpDir\(session\.sftpPath/);
+    assert.match(openSource, /isNew: true/);
+    assert.match(saveSource, /sanitizeRemoteFileName/);
+    assert.match(saveSource, /var creating = !!editor\.isNew;/);
+    assert.match(saveSource, /create: creating/);
+    assert.match(saveSource, /editor\.isNew = false/);
+});
+
+test('an untouched new-file draft is still treated as unsaved', () => {
+    const sandbox = loadFunctions(['remoteEditorIsDirty'], {});
+    assert.equal(sandbox.remoteEditorIsDirty({ isNew: true, originalContent: '', textarea: { value: '' } }), true);
+});
+
+test('saving an empty new-file draft creates it and turns it into a normal editor', async () => {
+    const request = deferred();
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '/tmp', _remoteEditorControllers: [] };
+    const removedClasses = [];
+    const editor = {
+        sessionId: session.id, parentPath: '/tmp', path: '/tmp/new.txt', name: 'new.txt', isNew: true,
+        version: '', originalContent: '', saving: false, maxBytes: 1024,
+        nameInput: { value: 'new.txt', readOnly: false, focus: () => {} }, subtitle: { textContent: '' },
+        textarea: { value: '' }, el: { classList: { remove: (value) => removedClasses.push(value) } },
+    };
+    let sentBody;
+    let refreshedPath = '';
+    const sandbox = loadFunctions(
+        ['utf8ByteLength', 'normalizeSftpDir', 'sanitizeRemoteFileName', 'joinRemoteFilePath', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        {
+            sessions: [session], remoteEditors: [editor],
+            getSessionById: (id) => id === session.id ? session : null,
+            remoteEditorRequest: (url, body) => { sentBody = body; return request.promise; },
+            remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
+            sftpLoad: (path) => { refreshedPath = path; }, TextEncoder, AbortController, Promise,
+        },
+    );
+
+    const saving = sandbox.saveRemoteEditor(editor, false);
+    assert.equal(sentBody.path, '/tmp/new.txt');
+    assert.equal(sentBody.create, true);
+    assert.equal(editor.nameInput.readOnly, true);
+    request.resolve({ version: 'created-v1' });
+    assert.equal(await saving, true);
+    assert.equal(editor.isNew, false);
+    assert.equal(editor.version, 'created-v1');
+    assert.equal(editor.nameInput.readOnly, true);
+    assert.equal(refreshedPath, '/tmp');
+    assert.deepEqual(removedClasses, ['is-new']);
+});
+
+test('remote editor blocks oversized content before sending a save request', () => {
+    const source = extractFunction('saveRemoteEditor');
+    assert.match(source, /sentBytes > editor\.maxBytes/);
+    assert.match(source, /return Promise\.resolve\(false\);/);
+});
+
+test('remote editor indents selected lines without replacing selected content', () => {
+    const sandbox = loadFunctions(
+        ['replaceRemoteEditorText', 'indentRemoteEditorSelection'],
+        {},
+    );
+    const textarea = {
+        value: 'alpha\nbeta\ngamma',
+        selectionStart: 2,
+        selectionEnd: 8,
+    };
+
+    assert.equal(sandbox.indentRemoteEditorSelection(textarea, false), true);
+    assert.equal(textarea.value, '    alpha\n    beta\ngamma');
+    assert.equal(textarea.selectionStart, 6);
+    assert.equal(textarea.selectionEnd, 16);
+
+    assert.equal(sandbox.indentRemoteEditorSelection(textarea, true), true);
+    assert.equal(textarea.value, 'alpha\nbeta\ngamma');
+    assert.equal(textarea.selectionStart, 2);
+    assert.equal(textarea.selectionEnd, 8);
+});
+
+test('remote editor keeps windows inside the resized workspace', () => {
+    const layer = { clientWidth: 500, clientHeight: 300 };
+    const style = {};
+    const el = {
+        style,
+    };
+    Object.defineProperties(el, {
+        offsetWidth: { get: () => parseInt(style.width, 10) || 600 },
+        offsetHeight: { get: () => parseInt(style.height, 10) || 400 },
+        offsetLeft: { get: () => parseInt(style.left, 10) || 120 },
+        offsetTop: { get: () => parseInt(style.top, 10) || 80 },
+    });
+    const sandbox = loadFunctions(
+        ['clampRemoteEditorToLayer'],
+        { document: { getElementById: () => layer } },
+    );
+
+    sandbox.clampRemoteEditorToLayer({ el, maximized: false });
+    assert.equal(style.width, '500px');
+    assert.equal(style.height, '300px');
+    assert.equal(style.left, '0px');
+    assert.equal(style.top, '0px');
+});
+
+test('remote editor workspace reserves the command input bar and SFTP panel', () => {
+    const source = extractFunction('remoteEditorLayerWidth');
+    assert.match(source, /commandBar\.getBoundingClientRect\(\)\.height/);
+    assert.match(source, /layer\.style\.bottom/);
+    assert.match(source, /panel\.getBoundingClientRect\(\)\.width/);
+    assert.match(source, /layer\.style\.right/);
+});
+
+test('dirty remote editors install a browser close warning', () => {
+    assert.match(appSource, /addEventListener\('beforeunload',[\s\S]*remoteEditors\.some\(remoteEditorIsDirty\)[\s\S]*event\.returnValue = '';/);
+});
+
+test('remote editor retries an unfinished initial load after SSH reconnects', () => {
+    const source = extractFunction('handleRemoteEditorsSessionConnected');
+    assert.match(source, /!editor\.loaded && !remoteEditorIsDirty\(editor\)/);
+    assert.match(source, /scheduleRemoteEditorInitialLoad\(editor, session\)/);
+});
+
+test('reopening a failed remote editor retries its initial load', () => {
+    const source = extractFunction('openRemoteEditor');
+    assert.match(source, /if \(!existing\.loaded && !existing\.controller && !remoteEditorIsDirty\(existing\)\)/);
+    assert.match(source, /loadRemoteEditor\(existing\)/);
+});
+
+test('remote editor stays read-only until the remote file loads successfully', () => {
+    const createSource = extractFunction('createRemoteEditorElement');
+    const loadSource = extractFunction('loadRemoteEditor');
+    assert.match(createSource, /editor\.textarea\.readOnly = true;/);
+    assert.match(loadSource, /editor\.textarea\.readOnly = true;/);
+    assert.match(loadSource, /editor\.textarea\.readOnly = false;/);
+    assert.match(loadSource, /再次点击编辑按钮重试/);
+});
+
+test('aborted initial loads are retried while the SSH session remains connected', () => {
+    const loadSource = extractFunction('loadRemoteEditor');
+    assert.match(loadSource, /editor\.retryInitialLoad = aborted;/);
+    assert.match(loadSource, /scheduleRemoteEditorInitialLoad\(editor, session\)/);
 });
 
 test('duplicate imported script IDs are made unique', () => {

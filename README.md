@@ -464,6 +464,7 @@ go run . -a admin:password
 | `WEBSSH_ALLOW_LEGACY_CIPHERS` | false | 是否加入老旧 CBC cipher |
 | `WEBSSH_UPLOAD_MAX_BYTES` | 1073741824 | 单次上传请求上限 |
 | `WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES` | 1073741824 | 远程下载文件上限 |
+| `WEBSSH_EDITOR_MAX_BYTES` | 2097152 | SFTP 在线编辑器可打开和保存的 UTF-8 文本大小上限（1024 字节至 64 MiB） |
 | `WEBSSH_ALLOW_PRIVATE_DOWNLOADS` | false | 是否允许远程下载访问私网/本机 |
 | `WEBSSH_ALLOWED_ORIGINS` | 空 | WebSocket 与登录 Cookie 写接口额外允许来源 |
 | `WEBSSH_TRUSTED_PROXIES` | 空 | 可读取转发客户端 IP 的可信反向代理 CIDR/IP 列表 |

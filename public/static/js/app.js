@@ -7,6 +7,13 @@ var sessions = [];
 var activeIdx = -1;
 var sftpRemoteSessionId = '';
 var sftpDirPickerSessionId = '';
+// Online remote editors are kept in the page while their SSH tab is alive.
+// Each editor carries its session id, so a response can never be applied to
+// whichever tab happens to be active when it arrives.
+var remoteEditors = [];
+var remoteEditorCloseRequest = null;
+var remoteEditorZIndex = 40;
+var remoteEditorBoundsObserver = null;
 var serverInfoModalIdx = -1;
 var serverInfoTimer = null;
 var serverInfoSelectedIface = {};
@@ -534,7 +541,8 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _sftpDirController: null,
         _sftpRemoteController: null,
         _sftpUploadControllers: [],
-        _sftpDownloadFrames: []
+        _sftpDownloadFrames: [],
+        _remoteEditorControllers: []
     };
 
     session.resizeObs = new ResizeObserver(function () { scheduleTermSizeSync(session); });
@@ -560,6 +568,7 @@ function switchTab(idx, userActivated) {
     if (sftpRemoteSessionId && (!sessions[idx] || sessions[idx].id !== sftpRemoteSessionId)) hideSftpRemoteModal();
     if (sftpDirPickerSessionId && (!sessions[idx] || sessions[idx].id !== sftpDirPickerSessionId)) hideSftpDirPicker();
     activeIdx = idx;
+    syncRemoteEditorVisibility();
     sessions.forEach(function (s, i) {
         if (i === idx) { s.termDiv.classList.add('active'); }
         else { s.termDiv.classList.remove('active'); stopTopbarMetricsPolling(s); }
@@ -1033,7 +1042,12 @@ function connectSession(session) {
         function markConnected() {
             if (session._connected) return;
             session._connected = true;
-            if (session.hostKeyDecision) clearHostKeyDecision(session);
+            // A persisted replacement can be removed from the payload as soon
+            // as the terminal handshake succeeds.  A one-time decision must
+            // remain available to SFTP/editor/sysinfo connections opened by
+            // this live SSH tab, then be consumed when the terminal disconnects
+            // or the user explicitly reconnects.
+            if (session.hostKeyDecision === 'replace') clearHostKeyDecision(session);
             session.hostKeyMismatch = null;
             session.authRetry = null;
             updateSSHAuthRetryModalForActive();
@@ -1048,6 +1062,7 @@ function connectSession(session) {
                 startServerInfoNetStream(session);
             }
             syncTermSize(session, true);
+            handleRemoteEditorsSessionConnected(session);
         }
 
         ws.onopen = function () {
@@ -1104,8 +1119,10 @@ function connectSession(session) {
             var wasConnected = session._connected;
             session._connected = false;
             session.ws = null;
+            if (wasConnected && session.hostKeyDecision) clearHostKeyDecision(session);
             stopServerInfoNetStream(session);
-            cancelSessionSftpRequests(session);
+            cancelSessionSftpRequests(session, false);
+            handleRemoteEditorsSessionDisconnected(session);
             if (wasConnected && sessions.indexOf(session) !== -1) {
                 showToast(session.hostname + ' 连接已关闭', 'info');
                 var sftpPanel = document.getElementById('sftpPanel');
@@ -1199,12 +1216,18 @@ function maybeShowFirstServerInfoGuide(session) {
 // ==================== Tab Actions ====================
 function closeTab(idx) {
     if (idx < 0 || idx >= sessions.length) return;
+    var requestedSession = sessions[idx];
+    if (!arguments[1] && requestCloseRemoteEditorsForSession(requestedSession, function () {
+        var currentIndex = sessions.indexOf(requestedSession);
+        if (currentIndex >= 0) closeTab(currentIndex, true);
+    })) return;
     var activeSession = activeIdx >= 0 ? sessions[activeIdx] : null;
     if (serverInfoModalIdx === idx) hideServerInfoModal();
     var s = sessions[idx];
+    closeRemoteEditorsForSession(s, true);
     if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
     if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
-    cancelSessionSftpRequests(s);
+    cancelSessionSftpRequests(s, true);
     invalidateSessionConnection(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) clearInterval(s.heartbeat);
@@ -1245,8 +1268,10 @@ function reconnectTab() {
     var s = sessions[activeIdx];
     if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
     if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
-    cancelSessionSftpRequests(s);
+    if (s.hostKeyDecision) clearHostKeyDecision(s);
+    cancelSessionSftpRequests(s, false);
     invalidateSessionConnection(s);
+    handleRemoteEditorsSessionDisconnected(s);
     if (s.ws) s.ws.close();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
     stopTopbarMetricsPolling(s);
@@ -2195,6 +2220,7 @@ function renderServerInfo(d, session) {
 function toggleConnDrawer() { document.getElementById('connDrawer').classList.toggle('open'); }
 function toggleScriptDrawer() {
     document.getElementById('scriptDrawer').classList.toggle('open');
+    remoteEditorLayerWidth();
     setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 function toggleSftp() {
@@ -2202,6 +2228,7 @@ function toggleSftp() {
     var wasOpen = p.classList.contains('open');
     p.classList.toggle('open');
     if (!wasOpen && activeIdx >= 0 && sessions[activeIdx]) sftpLoad(sessions[activeIdx].sftpPath || '/', sessions[activeIdx]);
+    remoteEditorLayerWidth();
     setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
 
@@ -2226,6 +2253,7 @@ var authMode = 'login';
 var allowRegistration = false;
 var allowLegacyPathLogin = false;
 var requireGatewayAccount = true;
+var remoteEditorDefaultMaxBytes = 2 * 1024 * 1024;
 var urlAutoLoginHandled = false;
 // Default to the safer policy until /config explicitly enables password
 // persistence. This also prevents a failed config request from leaking a
@@ -4233,18 +4261,28 @@ function cancelSessionSftpBrowsing(session) {
     abortSessionController(session, '_sftpDirController');
 }
 
-function cancelSessionSftpRequests(session) {
+function cancelSessionSftpRequests(session, cancelDownloads) {
     if (!session) return;
     cancelSessionSftpBrowsing(session);
     abortSessionController(session, '_sftpRemoteController');
+    (session._remoteEditorControllers || []).forEach(function (controller) {
+        try { controller.abort(); } catch (e) { }
+    });
+    session._remoteEditorControllers = [];
     (session._sftpUploadControllers || []).forEach(function (controller) {
         try { controller.abort(); } catch (e) { }
     });
     session._sftpUploadControllers = [];
-    (session._sftpDownloadFrames || []).forEach(function (frame) {
-        if (frame && frame.parentNode) frame.remove();
-    });
-    session._sftpDownloadFrames = [];
+    if (cancelDownloads) {
+        (session._sftpDownloadFrames || []).forEach(function (frame) {
+            if (frame && frame._websshCleanupTimer) {
+                clearTimeout(frame._websshCleanupTimer);
+                frame._websshCleanupTimer = null;
+            }
+            if (frame && frame.parentNode) frame.remove();
+        });
+        session._sftpDownloadFrames = [];
+    }
 }
 
 function requestWasAborted(err) {
@@ -4291,8 +4329,10 @@ function sftpLoad(path, session) {
                 var fpArg = escAttr(JSON.stringify(fp));
                 var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
                 var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : 'onclick="sftpDownload(' + fpArg + ')"';
-                var dl = isDir ? '' : '<button class="sftp-dl" onclick="event.stopPropagation();sftpDownload(' + fpArg + ')" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
-                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span><span class="sftp-meta">' + esc(f.Size) + '</span>' + dl + '</div>';
+                var edit = (!isDir && f.Editable) ? '<button class="sftp-edit" onclick="event.stopPropagation();openRemoteEditor(' + fpArg + ')" title="在线编辑" aria-label="在线编辑 ' + escAttr(f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>' : '';
+                var dl = isDir ? '' : '<button class="sftp-dl" onclick="event.stopPropagation();sftpDownload(' + fpArg + ')" title="下载" aria-label="下载 ' + escAttr(f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+                var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
+                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + edit + dl + '</div>';
             }).join('');
         })
         .catch(function (err) {
@@ -4337,15 +4377,22 @@ function sftpDownload(path) {
     session._sftpDownloadFrames.push(iframe);
     document.body.appendChild(form);
     var cleanup = function () {
+        if (iframe._websshCleanupTimer) {
+            clearTimeout(iframe._websshCleanupTimer);
+            iframe._websshCleanupTimer = null;
+        }
         if (iframe.parentNode) iframe.remove();
         var pos = session._sftpDownloadFrames.indexOf(iframe);
         if (pos >= 0) session._sftpDownloadFrames.splice(pos, 1);
     };
-    iframe.addEventListener('load', function () { setTimeout(cleanup, 1000); }, { once: true });
     showToast('下载已交给浏览器处理', 'info');
     form.submit();
     form.remove();
-    setTimeout(cleanup, 10 * 60 * 1000);
+    // There is no reliable browser event for completion of an attachment sent
+    // to an iframe. In particular, the iframe's initial about:blank load can
+    // fire before the SSH response starts. Keep it alive so a slow/large file
+    // is never cancelled; session/page cleanup removes it earlier when safe.
+    iframe._websshCleanupTimer = setTimeout(cleanup, 24 * 60 * 60 * 1000);
 }
 
 function normalizeSftpDir(path) {
@@ -4355,6 +4402,698 @@ function normalizeSftpDir(path) {
     if (path[0] !== '/') path = '/' + path;
     if (path.length > 1) path = path.replace(/\/+$/, '');
     return path || '/';
+}
+
+// ==================== Remote File Editor ====================
+function normalizeRemoteFilePath(path) {
+    path = String(path || '').trim().replace(/\\/g, '/').replace(/\/+/g, '/');
+    if (!path) return '';
+    if (path.charAt(0) !== '/') path = '/' + path;
+    return path.length > 1 ? path.replace(/\/+$/, '') : path;
+}
+
+function remoteEditorFor(session, path) {
+    var normalized = normalizeRemoteFilePath(path);
+    for (var i = 0; i < remoteEditors.length; i++) {
+        if (remoteEditors[i].sessionId === session.id && remoteEditors[i].path === normalized) return remoteEditors[i];
+    }
+    return null;
+}
+
+function remoteEditorSession(editor) {
+    return editor ? getSessionById(editor.sessionId) : null;
+}
+
+function remoteEditorIsDirty(editor) {
+    return !!editor && editor.textarea && (!!editor.isNew || editor.textarea.value !== editor.originalContent);
+}
+
+function remoteEditorSetStatus(editor, text, type) {
+    if (!editor || !editor.status) return;
+    editor.status.textContent = text || '';
+    editor.status.className = 'remote-editor-status ' + (type || '');
+}
+
+function remoteEditorUpdateMetrics(editor) {
+    if (!editor || !editor.textarea) return false;
+    var value = editor.textarea.value || '';
+    var lines = 1;
+    for (var lineIndex = 0; lineIndex < value.length; lineIndex++) {
+        if (value.charCodeAt(lineIndex) === 10) lines++;
+    }
+    var bytes = 0;
+    try { bytes = new TextEncoder().encode(value).length; } catch (e) { bytes = value.length; }
+    var hideLineNumbers = lines > 50000;
+    if (editor.metrics) editor.metrics.textContent = lines + ' 行 · ' + bytes + ' 字节' + (editor.maxBytes ? ' / ' + fmtB(editor.maxBytes) : '') + (hideLineNumbers ? ' · 行号已隐藏' : '');
+    if (editor.gutter) {
+        editor.gutter.hidden = hideLineNumbers;
+        if (hideLineNumbers) {
+            editor.gutter.textContent = '';
+        } else {
+            var gutterLines = [];
+            for (var i = 1; i <= lines; i++) gutterLines.push(String(i));
+            editor.gutter.textContent = gutterLines.join('\n');
+            editor.gutter.scrollTop = editor.textarea.scrollTop;
+        }
+    }
+    editor.el.classList.toggle('is-dirty', remoteEditorIsDirty(editor));
+    var session = remoteEditorSession(editor);
+    var tooLarge = !!editor.maxBytes && bytes > editor.maxBytes;
+    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !remoteEditorIsDirty(editor) || !session || !session._connected;
+    if (tooLarge && !editor.saving) remoteEditorSetStatus(editor, '内容超过在线编辑上限 ' + fmtB(editor.maxBytes), 'error');
+    if (editor.minimized) renderRemoteEditorDock(getActiveSession());
+    return tooLarge;
+}
+
+function replaceRemoteEditorText(textarea, replacement, start, end, selectionStart, selectionEnd) {
+    if (typeof textarea.setRangeText === 'function') {
+        textarea.setRangeText(replacement, start, end, 'start');
+    } else {
+        textarea.value = textarea.value.slice(0, start) + replacement + textarea.value.slice(end);
+    }
+    textarea.selectionStart = selectionStart;
+    textarea.selectionEnd = selectionEnd;
+}
+
+function indentRemoteEditorSelection(textarea, outdent) {
+    if (!textarea) return false;
+    var value = textarea.value || '';
+    var start = Math.max(0, textarea.selectionStart || 0);
+    var end = Math.max(start, textarea.selectionEnd || 0);
+
+    if (start === end && !outdent) {
+        replaceRemoteEditorText(textarea, '    ', start, end, start + 4, start + 4);
+        return true;
+    }
+
+    var lineStart = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+    if (start === end) {
+        var indentation = value.slice(lineStart, lineStart + 4).match(/^(?:\t| {1,4})/);
+        if (!indentation) return false;
+        var removed = indentation[0].length;
+        var caret = Math.max(lineStart, start - Math.min(removed, start - lineStart));
+        replaceRemoteEditorText(textarea, '', lineStart, lineStart + removed, caret, caret);
+        return true;
+    }
+
+    var blockEnd;
+    if (value.charAt(end - 1) === '\n') {
+        blockEnd = end - 1;
+    } else {
+        var nextBreak = value.indexOf('\n', end);
+        blockEnd = nextBreak < 0 ? value.length : nextBreak;
+    }
+    var block = value.slice(lineStart, blockEnd);
+    var blockLines = block.split('\n');
+    var totalChange = 0;
+    var firstLineChange = 0;
+    var replacement;
+
+    if (outdent) {
+        replacement = blockLines.map(function (line, index) {
+            var match = line.match(/^(?:\t| {1,4})/);
+            var count = match ? match[0].length : 0;
+            if (index === 0) firstLineChange = Math.min(count, start - lineStart);
+            totalChange += count;
+            return line.slice(count);
+        }).join('\n');
+        if (!totalChange) return false;
+        replaceRemoteEditorText(textarea, replacement, lineStart, blockEnd, Math.max(lineStart, start - firstLineChange), Math.max(lineStart, end - totalChange));
+        return true;
+    }
+
+    replacement = blockLines.map(function (line) { return '    ' + line; }).join('\n');
+    totalChange = blockLines.length * 4;
+    replaceRemoteEditorText(textarea, replacement, lineStart, blockEnd, start + 4, end + totalChange);
+    return true;
+}
+
+function remoteEditorRequest(url, body, signal) {
+    return fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: signal
+    }).then(function (response) {
+        return response.text().then(function (text) {
+            var data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch (e) { throw { msg: '服务器返回了无效响应', status: response.status }; }
+            if (!response.ok || data.Msg !== 'success') throw { msg: data.Msg || '请求失败', status: response.status, data: data.Data };
+            return data.Data || {};
+        });
+    });
+}
+
+function removeRemoteEditorController(session, controller) {
+    if (!session || !controller) return;
+    var list = session._remoteEditorControllers || [];
+    var index = list.indexOf(controller);
+    if (index >= 0) list.splice(index, 1);
+}
+
+function scheduleRemoteEditorInitialLoad(editor, session) {
+    if (!editor || !session || editor._loadRetryTimer) return;
+    editor._loadRetryTimer = setTimeout(function () {
+        editor._loadRetryTimer = null;
+        if (remoteEditors.indexOf(editor) < 0 || !session._connected || editor.controller || editor.loaded || remoteEditorIsDirty(editor)) return;
+        editor.el.classList.add('is-loading');
+        loadRemoteEditor(editor);
+    }, 50);
+}
+
+function createRemoteEditorElement(editor) {
+    var layer = document.getElementById('remoteEditorLayer');
+    if (!layer) return false;
+    var win = document.createElement('section');
+    win.className = 'remote-editor-window' + (editor.isNew ? ' is-new' : ' is-loading');
+    win.setAttribute('role', 'dialog');
+    win.setAttribute('aria-label', '在线编辑文件');
+    win.dataset.editorId = editor.id;
+    win.innerHTML = '<div class="remote-editor-header" data-editor-drag="1">' +
+        '<button type="button" class="remote-editor-btn primary remote-editor-save" data-editor-action="save" title="保存 (Ctrl+S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>保存</span></button>' +
+        '<div class="remote-editor-heading"><span class="remote-editor-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg></span><span class="remote-editor-title"><input class="remote-editor-name" type="text" maxlength="255" autocomplete="off" spellcheck="false" aria-label="文件名"><small></small></span><i class="remote-editor-dirty" aria-label="有未保存修改"></i></div>' +
+        '<div class="remote-editor-actions"><button type="button" class="remote-editor-btn" data-editor-action="minimize" title="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg></button><button type="button" class="remote-editor-btn" data-editor-action="maximize" title="最大化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button><button type="button" class="remote-editor-btn close" data-editor-action="close" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>' +
+        '<div class="remote-editor-body"><pre class="remote-editor-gutter" aria-hidden="true"></pre><textarea class="remote-editor-textarea" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="文件内容"></textarea><div class="remote-editor-loading">正在读取远程文件…</div></div>' +
+        '<div class="remote-editor-footer"><span class="remote-editor-status info">正在连接…</span><span class="remote-editor-metrics">1 行 · 0 字节</span></div>';
+    layer.appendChild(win);
+    editor.el = win;
+    editor.header = win.querySelector('.remote-editor-header');
+    editor.nameInput = win.querySelector('.remote-editor-name');
+    editor.subtitle = win.querySelector('.remote-editor-title small');
+    editor.textarea = win.querySelector('.remote-editor-textarea');
+    editor.gutter = win.querySelector('.remote-editor-gutter');
+    editor.status = win.querySelector('.remote-editor-status');
+    editor.metrics = win.querySelector('.remote-editor-metrics');
+    editor.saveBtn = win.querySelector('[data-editor-action="save"]');
+    editor.maxBtn = win.querySelector('[data-editor-action="maximize"]');
+    editor.textarea.readOnly = true;
+    editor.nameInput.value = editor.name;
+    editor.nameInput.readOnly = !editor.isNew;
+    editor.subtitle.textContent = editor.path;
+    editor.nameInput.addEventListener('input', function () {
+        if (!editor.isNew) return;
+        editor.name = editor.nameInput.value.trim();
+        editor.path = joinRemoteFilePath(editor.parentPath, editor.name);
+        editor.subtitle.textContent = editor.path || normalizeSftpDir(editor.parentPath);
+        remoteEditorUpdateMetrics(editor);
+    });
+    editor.nameInput.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') { event.preventDefault(); editor.textarea.focus(); }
+    });
+    editor.textarea.addEventListener('input', function () {
+        var tooLarge = remoteEditorUpdateMetrics(editor);
+        if (!editor.saving && !tooLarge) remoteEditorSetStatus(editor, remoteEditorIsDirty(editor) ? '有未保存修改' : '已保存', remoteEditorIsDirty(editor) ? 'warn' : 'success');
+    });
+    editor.textarea.addEventListener('scroll', function () {
+        if (editor.gutter) editor.gutter.scrollTop = editor.textarea.scrollTop;
+    });
+    editor.textarea.addEventListener('keydown', function (event) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+            event.preventDefault();
+            saveRemoteEditor(editor);
+            return;
+        }
+        if (event.key === 'Tab') {
+            event.preventDefault();
+            if (indentRemoteEditorSelection(editor.textarea, event.shiftKey)) {
+                editor.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+    });
+    win.querySelectorAll('[data-editor-action]').forEach(function (button) {
+        button.addEventListener('click', function (event) {
+            event.stopPropagation();
+            var action = button.dataset.editorAction;
+            if (action === 'save') saveRemoteEditor(editor);
+            else if (action === 'minimize') minimizeRemoteEditor(editor);
+            else if (action === 'maximize') toggleMaximizeRemoteEditor(editor);
+            else if (action === 'close') requestCloseRemoteEditor(editor);
+        });
+    });
+    win.addEventListener('pointerdown', function () { activateRemoteEditor(editor); });
+    setupRemoteEditorDragging(editor);
+    if (typeof ResizeObserver === 'function') {
+        editor.resizeObserver = new ResizeObserver(function () { scheduleRemoteEditorClamp(editor); });
+        editor.resizeObserver.observe(win);
+    }
+    remoteEditorUpdateMetrics(editor);
+    return true;
+}
+
+function setupRemoteEditorDragging(editor) {
+    if (!editor || !editor.header) return;
+    var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    editor.header.addEventListener('pointerdown', function (event) {
+        if (editor.maximized || event.target.closest('button,input,textarea')) return;
+        dragging = true;
+        startX = event.clientX; startY = event.clientY;
+        startLeft = editor.el.offsetLeft; startTop = editor.el.offsetTop;
+        try { editor.header.setPointerCapture(event.pointerId); } catch (e) { }
+        event.preventDefault();
+    });
+    editor.header.addEventListener('pointermove', function (event) {
+        if (!dragging || editor.maximized) return;
+        var layer = document.getElementById('remoteEditorLayer');
+        if (!layer) return;
+        var maxLeft = Math.max(0, layer.clientWidth - editor.el.offsetWidth);
+        var maxTop = Math.max(0, layer.clientHeight - editor.el.offsetHeight);
+        editor.el.style.left = Math.max(0, Math.min(maxLeft, startLeft + event.clientX - startX)) + 'px';
+        editor.el.style.top = Math.max(0, Math.min(maxTop, startTop + event.clientY - startY)) + 'px';
+    });
+    editor.header.addEventListener('pointerup', function () { dragging = false; });
+    editor.header.addEventListener('pointercancel', function () { dragging = false; });
+}
+
+function activateRemoteEditor(editor) {
+    if (!editor || !editor.el) return;
+    remoteEditorZIndex += 1;
+    editor.el.style.zIndex = remoteEditorZIndex;
+}
+
+function clampRemoteEditorToLayer(editor) {
+    var layer = document.getElementById('remoteEditorLayer');
+    if (!editor || !editor.el || !layer || editor.maximized) return;
+    var layerWidth = layer.clientWidth;
+    var layerHeight = layer.clientHeight;
+    if (layerWidth <= 0 || layerHeight <= 0) return;
+
+    if (editor.el.offsetWidth > layerWidth) editor.el.style.width = layerWidth + 'px';
+    if (editor.el.offsetHeight > layerHeight) editor.el.style.height = layerHeight + 'px';
+    var maxLeft = Math.max(0, layerWidth - editor.el.offsetWidth);
+    var maxTop = Math.max(0, layerHeight - editor.el.offsetHeight);
+    var left = Math.max(0, Math.min(maxLeft, editor.el.offsetLeft));
+    var top = Math.max(0, Math.min(maxTop, editor.el.offsetTop));
+    if (editor.el.offsetLeft !== left) editor.el.style.left = left + 'px';
+    if (editor.el.offsetTop !== top) editor.el.style.top = top + 'px';
+}
+
+function scheduleRemoteEditorClamp(editor) {
+    if (!editor || editor._clampFrame) return;
+    editor._clampFrame = requestAnimationFrame(function () {
+        editor._clampFrame = 0;
+        clampRemoteEditorToLayer(editor);
+    });
+}
+
+function remoteEditorLayerWidth() {
+    var layer = document.getElementById('remoteEditorLayer');
+    var dock = document.getElementById('remoteEditorDock');
+    var panel = document.getElementById('sftpPanel');
+    var scriptDrawer = document.getElementById('scriptDrawer');
+    if (!layer) return;
+    var sftpRight = panel && panel.classList.contains('open') ? panel.getBoundingClientRect().width : 0;
+    var scriptRight = scriptDrawer && scriptDrawer.classList.contains('open') ? scriptDrawer.getBoundingClientRect().width : 0;
+    var right = Math.max(sftpRight, scriptRight);
+    var commandBar = document.querySelector('.cmd-bar');
+    var bottom = commandBar ? commandBar.getBoundingClientRect().height : 0;
+    layer.style.right = Math.max(0, Math.round(right)) + 'px';
+    layer.style.bottom = Math.max(0, Math.round(bottom)) + 'px';
+    if (dock) {
+        dock.style.right = Math.max(0, Math.round(right)) + 'px';
+        dock.style.bottom = Math.max(7, Math.round(bottom) + 7) + 'px';
+    }
+    remoteEditors.forEach(scheduleRemoteEditorClamp);
+}
+
+function ensureRemoteEditorBoundsObserver() {
+    if (remoteEditorBoundsObserver) return;
+    var panel = document.getElementById('sftpPanel');
+    var scriptDrawer = document.getElementById('scriptDrawer');
+    var commandBar = document.querySelector('.cmd-bar');
+    if (typeof ResizeObserver === 'function' && panel) {
+        remoteEditorBoundsObserver = new ResizeObserver(remoteEditorLayerWidth);
+        remoteEditorBoundsObserver.observe(panel);
+        if (scriptDrawer) remoteEditorBoundsObserver.observe(scriptDrawer);
+        if (commandBar) remoteEditorBoundsObserver.observe(commandBar);
+    } else {
+        remoteEditorBoundsObserver = { fallback: true };
+    }
+    if (panel) panel.addEventListener('transitionend', remoteEditorLayerWidth);
+    if (scriptDrawer) scriptDrawer.addEventListener('transitionend', remoteEditorLayerWidth);
+    addEventListener('resize', remoteEditorLayerWidth);
+    remoteEditorLayerWidth();
+}
+
+function syncRemoteEditorVisibility() {
+    var active = getActiveSession();
+    remoteEditors.forEach(function (editor) {
+        if (!editor.el) return;
+        editor.el.classList.toggle('is-inactive', !active || editor.sessionId !== active.id || editor.minimized);
+    });
+    renderRemoteEditorDock(active);
+    remoteEditorLayerWidth();
+}
+
+function renderRemoteEditorDock(activeSession) {
+    var dock = document.getElementById('remoteEditorDock');
+    if (!dock) return;
+    dock.innerHTML = '';
+    if (!activeSession) return;
+    remoteEditors.forEach(function (editor) {
+        if (editor.sessionId !== activeSession.id || !editor.minimized) return;
+        var item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'remote-editor-dock-item' + (remoteEditorIsDirty(editor) ? ' is-dirty' : '');
+        item.title = editor.path;
+        item.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg><span></span>';
+        item.querySelector('span').textContent = editor.name + (remoteEditorIsDirty(editor) ? ' · 未保存' : '');
+        item.addEventListener('click', function () { restoreRemoteEditor(editor); });
+        dock.appendChild(item);
+    });
+}
+
+function loadRemoteEditor(editor) {
+    var session = remoteEditorSession(editor);
+    if (!session || !session._connected) {
+        remoteEditorSetStatus(editor, 'SSH 连接尚未就绪', 'error');
+        editor.el.classList.remove('is-loading');
+        remoteEditorUpdateMetrics(editor);
+        return;
+    }
+    editor.retryInitialLoad = false;
+    editor.textarea.readOnly = true;
+    var controller = new AbortController();
+    editor.controller = controller;
+    (session._remoteEditorControllers || (session._remoteEditorControllers = [])).push(controller);
+    remoteEditorRequest('/file/edit/open', { sshInfo: session.sshInfo, path: editor.path }, controller.signal)
+        .then(function (data) {
+            if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return;
+            editor.originalContent = String(data.content || '');
+            editor.textarea.value = editor.originalContent;
+            editor.version = String(data.version || '');
+            editor.loaded = true;
+            editor.retryInitialLoad = false;
+            editor.maxBytes = parseInt(data.maxBytes, 10) || remoteEditorDefaultMaxBytes;
+            editor.el.classList.remove('is-loading');
+            editor.textarea.readOnly = false;
+            remoteEditorSetStatus(editor, '已加载 · Ctrl+S 保存', 'success');
+            remoteEditorUpdateMetrics(editor);
+            editor.textarea.focus();
+        })
+        .catch(function (err) {
+            if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return;
+            editor.el.classList.remove('is-loading');
+            var aborted = requestWasAborted(err);
+            editor.retryInitialLoad = aborted;
+            if (!aborted) remoteEditorSetStatus(editor, (err.msg || '读取失败') + ' · 再次点击编辑按钮重试', 'error');
+            else remoteEditorSetStatus(editor, session._connected ? '读取已取消，正在重试' : 'SSH 已断开，等待重连', 'warn');
+            remoteEditorUpdateMetrics(editor);
+        })
+        .finally(function () {
+            removeRemoteEditorController(session, controller);
+            if (editor.controller === controller) editor.controller = null;
+            if (editor.retryInitialLoad && session._connected) scheduleRemoteEditorInitialLoad(editor, session);
+        });
+}
+
+function openRemoteEditor(path, session) {
+    session = session || getActiveSession();
+    path = normalizeRemoteFilePath(path);
+    if (!session || sessions.indexOf(session) < 0 || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    if (!path) { showToast('文件路径无效', 'error'); return; }
+    ensureRemoteEditorBoundsObserver();
+    var panel = document.getElementById('sftpPanel');
+    var termMain = document.querySelector('.term-main');
+    if (panel && panel.classList.contains('open') && termMain && panel.getBoundingClientRect().width >= termMain.getBoundingClientRect().width * .9) {
+        // On phones the SFTP panel occupies the whole workspace.  Closing it
+        // after the pencil click leaves room for the editor the user requested.
+        panel.classList.remove('open');
+    }
+    remoteEditorLayerWidth();
+    var existing = remoteEditorFor(session, path);
+    if (existing) {
+        existing.minimized = false;
+        existing.el.classList.remove('is-inactive');
+        activateRemoteEditor(existing);
+        restoreRemoteEditor(existing);
+        if (!existing.loaded && !existing.controller && !remoteEditorIsDirty(existing)) {
+            existing.el.classList.add('is-loading');
+            loadRemoteEditor(existing);
+        }
+        return;
+    }
+    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: path.split('/').pop() || path, parentPath: normalizeSftpDir(path.substring(0, path.lastIndexOf('/')) || '/'), isNew: false, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: false, restoreRect: null };
+    remoteEditors.push(editor);
+    if (!createRemoteEditorElement(editor)) { remoteEditors.pop(); return; }
+    var layer = document.getElementById('remoteEditorLayer');
+    if (layer && layer.clientWidth >= 700) {
+        var openCount = remoteEditors.filter(function (item) { return item.sessionId === session.id && item !== editor; }).length;
+        var offset = (openCount % 7) * 22;
+        editor.el.style.left = (28 + offset) + 'px';
+        editor.el.style.top = (22 + offset) + 'px';
+    }
+    activateRemoteEditor(editor);
+    syncRemoteEditorVisibility();
+    loadRemoteEditor(editor);
+}
+
+function sanitizeRemoteFileName(name) {
+    name = String(name || '').trim();
+    if (!name || name === '.' || name === '..' || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || /[\u0000-\u001f\u007f]/.test(name)) return '';
+    if (utf8ByteLength(name) > 255) return '';
+    return name;
+}
+
+function joinRemoteFilePath(directory, name) {
+    directory = normalizeSftpDir(directory);
+    name = sanitizeRemoteFileName(name);
+    return name ? (directory === '/' ? '/' + name : directory + '/' + name) : '';
+}
+
+function openNewRemoteFile() {
+    var session = getActiveSession();
+    if (!session || sessions.indexOf(session) < 0 || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    ensureRemoteEditorBoundsObserver();
+    var parentPath = normalizeSftpDir(session.sftpPath || document.getElementById('sftpPath').value || '/');
+    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: '', name: '新建文件.txt', parentPath: parentPath, isNew: true, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: true, restoreRect: null };
+    editor.path = joinRemoteFilePath(parentPath, editor.name);
+    remoteEditors.push(editor);
+    if (!createRemoteEditorElement(editor)) { remoteEditors.pop(); return; }
+    editor.el.classList.remove('is-loading');
+    editor.textarea.readOnly = false;
+    editor.subtitle.textContent = editor.path;
+    remoteEditorSetStatus(editor, '新建文件 · 首次保存不会覆盖同名文件', 'info');
+    remoteEditorUpdateMetrics(editor);
+    activateRemoteEditor(editor);
+    syncRemoteEditorVisibility();
+    setTimeout(function () { editor.nameInput.focus(); editor.nameInput.select(); }, 0);
+}
+
+function minimizeRemoteEditor(editor) {
+    if (!editor) return;
+    editor.minimized = true;
+    editor.el.classList.add('is-inactive');
+    renderRemoteEditorDock(getActiveSession());
+}
+
+function restoreRemoteEditor(editor) {
+    if (!editor || !editor.el) return;
+    editor.minimized = false;
+    editor.el.classList.remove('is-inactive');
+    activateRemoteEditor(editor);
+    renderRemoteEditorDock(getActiveSession());
+    setTimeout(function () { try { editor.textarea.focus(); } catch (e) { } }, 0);
+}
+
+function toggleMaximizeRemoteEditor(editor) {
+    if (!editor || !editor.el) return;
+    if (!editor.maximized) {
+        editor.restoreRect = { left: editor.el.offsetLeft, top: editor.el.offsetTop, width: editor.el.offsetWidth, height: editor.el.offsetHeight };
+        editor.maximized = true;
+        editor.el.classList.add('is-maximized');
+        editor.maxBtn.title = '还原窗口';
+    } else {
+        editor.maximized = false;
+        editor.el.classList.remove('is-maximized');
+        editor.maxBtn.title = '最大化';
+        var rect = editor.restoreRect;
+        if (rect) { editor.el.style.left = rect.left + 'px'; editor.el.style.top = rect.top + 'px'; editor.el.style.width = rect.width + 'px'; editor.el.style.height = rect.height + 'px'; }
+    }
+    activateRemoteEditor(editor);
+    remoteEditorLayerWidth();
+    setTimeout(function () { try { editor.textarea.focus(); } catch (e) { } }, 0);
+}
+
+function destroyRemoteEditor(editor) {
+    if (!editor) return;
+    if (editor.controller) { try { editor.controller.abort(); } catch (e) { } }
+    if (editor._clampFrame) { cancelAnimationFrame(editor._clampFrame); editor._clampFrame = 0; }
+    if (editor._loadRetryTimer) { clearTimeout(editor._loadRetryTimer); editor._loadRetryTimer = null; }
+    if (editor.resizeObserver) { editor.resizeObserver.disconnect(); editor.resizeObserver = null; }
+    var session = remoteEditorSession(editor);
+    if (session) removeRemoteEditorController(session, editor.controller);
+    if (editor.el && editor.el.parentNode) editor.el.parentNode.removeChild(editor.el);
+    var index = remoteEditors.indexOf(editor);
+    if (index >= 0) remoteEditors.splice(index, 1);
+    renderRemoteEditorDock(getActiveSession());
+}
+
+function requestCloseRemoteEditor(editor) {
+    if (!editor) return;
+    if (!remoteEditorIsDirty(editor)) { destroyRemoteEditor(editor); return; }
+    showRemoteEditorClosePrompt([editor], null);
+}
+
+function showRemoteEditorClosePrompt(queue, onComplete) {
+    if (!queue || !queue.length) { if (typeof onComplete === 'function') onComplete(); return; }
+    remoteEditorCloseRequest = { queue: queue.slice(), onComplete: onComplete || null, editor: queue[0] };
+    var name = document.getElementById('remoteEditorCloseName');
+    if (name) name.textContent = queue[0].name + ' 有未保存的修改';
+    var modal = document.getElementById('remoteEditorCloseModal');
+    if (modal) modal.classList.add('show');
+    var save = document.getElementById('remoteEditorSaveCloseBtn');
+    if (save) save.disabled = false;
+}
+
+function continueRemoteEditorClose() {
+    if (!remoteEditorCloseRequest) return;
+    var request = remoteEditorCloseRequest;
+    request.queue.shift();
+    if (request.queue.length) {
+        request.editor = request.queue[0];
+        var name = document.getElementById('remoteEditorCloseName');
+        if (name) name.textContent = request.editor.name + ' 有未保存的修改';
+        return;
+    }
+    remoteEditorCloseRequest = null;
+    var modal = document.getElementById('remoteEditorCloseModal');
+    if (modal) modal.classList.remove('show');
+    if (typeof request.onComplete === 'function') request.onComplete();
+}
+
+function cancelRemoteEditorClose() {
+    remoteEditorCloseRequest = null;
+    var modal = document.getElementById('remoteEditorCloseModal');
+    if (modal) modal.classList.remove('show');
+}
+
+function confirmRemoteEditorDiscardAndClose() {
+    if (!remoteEditorCloseRequest || !remoteEditorCloseRequest.editor) return;
+    destroyRemoteEditor(remoteEditorCloseRequest.editor);
+    continueRemoteEditorClose();
+}
+
+function confirmRemoteEditorSaveAndClose() {
+    if (!remoteEditorCloseRequest || !remoteEditorCloseRequest.editor) return;
+    var closeRequest = remoteEditorCloseRequest;
+    var editor = remoteEditorCloseRequest.editor;
+    var save = document.getElementById('remoteEditorSaveCloseBtn');
+    if (save) save.disabled = true;
+    saveRemoteEditor(editor, false).then(function (ok) {
+        if (remoteEditorCloseRequest !== closeRequest || closeRequest.editor !== editor) return;
+        if (ok && !remoteEditorIsDirty(editor)) { destroyRemoteEditor(editor); continueRemoteEditorClose(); }
+        if (ok && remoteEditorIsDirty(editor)) {
+            remoteEditorSetStatus(editor, '保存了旧内容，仍有新修改', 'warn');
+        }
+        if (save) save.disabled = false;
+    });
+}
+
+function saveRemoteEditor(editor, closeAfter) {
+    if (!editor || editor.saving) return Promise.resolve(false);
+    var session = remoteEditorSession(editor);
+    if (!session || !session._connected) { remoteEditorSetStatus(editor, 'SSH 已断开，无法保存', 'error'); return Promise.resolve(false); }
+    if (!remoteEditorIsDirty(editor)) { if (closeAfter) destroyRemoteEditor(editor); return Promise.resolve(true); }
+    if (editor.isNew) {
+        var newName = sanitizeRemoteFileName(editor.nameInput ? editor.nameInput.value : editor.name);
+        if (!newName) { remoteEditorSetStatus(editor, '请输入有效文件名，不能包含 / 或 \\', 'error'); if (editor.nameInput) editor.nameInput.focus(); return Promise.resolve(false); }
+        var newPath = joinRemoteFilePath(editor.parentPath, newName);
+        var duplicate = remoteEditors.some(function (item) { return item !== editor && item.sessionId === session.id && item.path === newPath; });
+        if (duplicate) { remoteEditorSetStatus(editor, '同名文件已在编辑器中打开', 'error'); return Promise.resolve(false); }
+        editor.name = newName;
+        editor.path = newPath;
+        editor.nameInput.value = newName;
+        editor.subtitle.textContent = newPath;
+    }
+    var creating = !!editor.isNew;
+    var sentPath = editor.path;
+    var sentName = editor.name;
+    var sentContent = editor.textarea.value;
+    var sentBytes = 0;
+    try { sentBytes = new TextEncoder().encode(sentContent).length; } catch (e) { sentBytes = sentContent.length; }
+    if (editor.maxBytes && sentBytes > editor.maxBytes) {
+        remoteEditorSetStatus(editor, '内容超过在线编辑上限 ' + fmtB(editor.maxBytes), 'error');
+        remoteEditorUpdateMetrics(editor);
+        return Promise.resolve(false);
+    }
+    var sentVersion = editor.version;
+    editor.saving = true;
+    if (creating && editor.nameInput) editor.nameInput.readOnly = true;
+    remoteEditorSetStatus(editor, '正在保存…', 'info');
+    remoteEditorUpdateMetrics(editor);
+    var controller = new AbortController();
+    editor.controller = controller;
+    (session._remoteEditorControllers || (session._remoteEditorControllers = [])).push(controller);
+    return remoteEditorRequest('/file/edit/save', { sshInfo: session.sshInfo, path: sentPath, content: sentContent, version: sentVersion, create: creating }, controller.signal)
+        .then(function (data) {
+            if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return false;
+            editor.originalContent = sentContent;
+            editor.version = String(data.version || editor.version);
+            if (creating) {
+                editor.isNew = false;
+                editor.path = sentPath;
+                editor.name = sentName;
+                editor.el.classList.remove('is-new');
+                if (editor.nameInput) editor.nameInput.readOnly = true;
+            }
+            if (editor.parentPath) {
+                var editorDirectory = normalizeSftpDir(editor.parentPath);
+                if (normalizeSftpDir(session.sftpPath || '/') === editorDirectory) sftpLoad(editorDirectory, session);
+            }
+            editor.saving = false;
+            remoteEditorSetStatus(editor, editor.textarea.value === sentContent ? '保存成功' : '已保存，仍有新修改', editor.textarea.value === sentContent ? 'success' : 'warn');
+            remoteEditorUpdateMetrics(editor);
+            showToast(editor.name + ' 已保存', 'success');
+            return true;
+        })
+        .catch(function (err) {
+            if (remoteEditors.indexOf(editor) >= 0) {
+                editor.saving = false;
+                if (creating && editor.isNew && editor.nameInput) editor.nameInput.readOnly = false;
+                remoteEditorSetStatus(editor, requestWasAborted(err) ? '保存已取消' : (err.msg || '保存失败'), 'error');
+                remoteEditorUpdateMetrics(editor);
+            }
+            return false;
+        })
+        .finally(function () {
+            removeRemoteEditorController(session, controller);
+            if (editor.controller === controller) editor.controller = null;
+        });
+}
+
+function requestCloseRemoteEditorsForSession(session, onComplete) {
+    var dirty = remoteEditors.filter(function (editor) { return editor.sessionId === session.id && remoteEditorIsDirty(editor); });
+    if (!dirty.length) return false;
+    showRemoteEditorClosePrompt(dirty, onComplete);
+    return true;
+}
+
+function closeRemoteEditorsForSession(session, force) {
+    remoteEditors.slice().forEach(function (editor) {
+        if (editor.sessionId === session.id && (force || !remoteEditorIsDirty(editor))) destroyRemoteEditor(editor);
+    });
+}
+
+function handleRemoteEditorsSessionDisconnected(session) {
+    remoteEditors.forEach(function (editor) {
+        if (editor.sessionId !== session.id || !editor.el) return;
+        editor.el.classList.add('is-disconnected');
+        if (!editor.saving) remoteEditorSetStatus(editor, remoteEditorIsDirty(editor) ? 'SSH 已断开，未保存内容已保留' : 'SSH 已断开', 'warn');
+        remoteEditorUpdateMetrics(editor);
+    });
+}
+
+function handleRemoteEditorsSessionConnected(session) {
+    remoteEditors.forEach(function (editor) {
+        if (editor.sessionId !== session.id || !editor.el) return;
+        editor.el.classList.remove('is-disconnected');
+        remoteEditorUpdateMetrics(editor);
+        if (!editor.saving) remoteEditorSetStatus(editor, remoteEditorIsDirty(editor) ? '有未保存修改' : '已连接', remoteEditorIsDirty(editor) ? 'warn' : 'success');
+        if (!editor.loaded && !remoteEditorIsDirty(editor)) {
+            scheduleRemoteEditorInitialLoad(editor, session);
+        }
+    });
 }
 
 function showSftpRemoteModal() {
@@ -4550,7 +5289,20 @@ function sftpUpload() {
 document.getElementById('sftpPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') sftpGo(); });
 document.getElementById('sftpDirPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') sftpDirGo(); });
 addEventListener('pagehide', function () {
-    sessions.forEach(cancelSessionSftpRequests);
+    var dirty = remoteEditors.filter(remoteEditorIsDirty);
+    if (dirty.length) {
+        // Browsers do not allow a custom asynchronous dialog during pagehide;
+        // keep the editor model alive for session restoration and only abort
+        // network work here.  The explicit window/tab close path still shows
+        // the three-way save/discard dialog.
+        dirty.forEach(function (editor) { if (editor.controller) { try { editor.controller.abort(); } catch (e) { } } });
+    }
+    sessions.forEach(function (session) { cancelSessionSftpRequests(session, true); });
+});
+addEventListener('beforeunload', function (event) {
+    if (!remoteEditors.some(remoteEditorIsDirty)) return;
+    event.preventDefault();
+    event.returnValue = '';
 });
 
 // ==================== Copy / Paste / Context Menu ====================
@@ -4987,6 +5739,7 @@ document.addEventListener('click', function (e) {
     if (scriptDrawer && scriptDrawer.classList.contains('open')) {
         if (!startedInsideScriptDrawer && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
             scriptDrawer.classList.remove('open');
+            remoteEditorLayerWidth();
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
         }
     }
@@ -4995,6 +5748,7 @@ document.addEventListener('click', function (e) {
     if (sftpPanel && sftpPanel.classList.contains('open')) {
         if (!sftpPanel.contains(e.target) && !(termEdge && termEdge.contains(e.target)) && e.target.closest('.term-body')) {
             sftpPanel.classList.remove('open');
+            remoteEditorLayerWidth();
             setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
         }
     }
@@ -5601,6 +6355,8 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
         allowRegistration = !!(cfg && cfg.allowRegistration);
         allowLegacyPathLogin = !!(cfg && cfg.allowLegacyPathLogin === true);
         requireGatewayAccount = !(cfg && cfg.requireAccount === false);
+        var configuredEditorLimit = parseInt(cfg && cfg.remoteEditorMaxBytes, 10);
+        if (configuredEditorLimit >= 1024) remoteEditorDefaultMaxBytes = configuredEditorLimit;
         applyPasswordStoragePolicy(!!(cfg && cfg.savePass === true));
         var registerTab = document.getElementById('authRegisterTab');
         if (registerTab) registerTab.style.display = allowRegistration ? '' : 'none';

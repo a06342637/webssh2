@@ -179,6 +179,7 @@ func runtimeConfig() gin.H {
 		"savePass":             savePass,
 		"requireAccount":       controller.RequireAccount(),
 		"allowLegacyPathLogin": envBool("WEBSSH_ALLOW_LEGACY_PATH_LOGIN", false),
+		"remoteEditorMaxBytes": controller.RemoteEditorMaxBytes(),
 	}
 }
 
@@ -204,7 +205,7 @@ func main() {
 	server.Use(controller.EnsureTrustScopeCookie())
 	server.Use(requestBodyLimit(4 << 20))
 	server.Use(basicAuthMiddleware())
-	server.Use(gzip.Gzip(gzip.DefaultCompression))
+	server.Use(compressionMiddleware())
 
 	if err := controller.InitAccountStore(""); err != nil {
 		fmt.Println("账号数据库初始化失败:", err)
@@ -293,6 +294,26 @@ func main() {
 			}
 			controller.DownloadFile(c)
 		})
+		file.POST("/edit/open", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			c.Header("Cache-Control", "no-store")
+			responseBody := controller.OpenFileForEdit(c)
+			if !c.IsAborted() {
+				c.JSON(http.StatusOK, responseBody)
+			}
+		})
+		file.POST("/edit/save", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			c.Header("Cache-Control", "no-store")
+			responseBody := controller.SaveEditedFile(c)
+			if !c.IsAborted() {
+				c.JSON(http.StatusOK, responseBody)
+			}
+		})
 		file.POST("/upload", func(c *gin.Context) {
 			if !gatewayAuth(c) {
 				return
@@ -349,6 +370,15 @@ func main() {
 	}
 }
 
+func compressionMiddleware() gin.HandlerFunc {
+	// SFTP downloads are already an arbitrary byte stream. Compressing them
+	// changes/removes Content-Length and makes the hidden POST target own an
+	// extra streaming layer, which can turn interrupted downloads into empty or
+	// corrupt files. Keep normal pages/API responses compressed, but pass the
+	// attachment response through unchanged.
+	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download"}))
+}
+
 func securityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -365,6 +395,8 @@ func requestBodyLimit(limit int64) gin.HandlerFunc {
 			requestLimit := limit
 			if c.Request.URL.Path == "/api/scripts/sync" {
 				requestLimit = 16 << 20
+			} else if c.Request.URL.Path == "/file/edit/save" {
+				requestLimit = controller.RemoteEditorRequestBodyLimit()
 			}
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 		}

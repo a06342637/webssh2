@@ -3,10 +3,12 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"webssh/controller"
 )
 
 func TestBasicAuthProtectsAllRoutesExceptHealth(t *testing.T) {
@@ -151,6 +153,9 @@ func TestRuntimeConfigIncludesPasswordPersistencePolicy(t *testing.T) {
 	if got, ok := config["requireAccount"].(bool); !ok || got {
 		t.Fatalf("runtime config requireAccount = %#v, want false", config["requireAccount"])
 	}
+	if got, ok := config["remoteEditorMaxBytes"].(int64); !ok || got != controller.RemoteEditorMaxBytes() {
+		t.Fatalf("runtime config remoteEditorMaxBytes = %#v", config["remoteEditorMaxBytes"])
+	}
 }
 
 func TestNoStoreResponsesMiddleware(t *testing.T) {
@@ -162,5 +167,32 @@ func TestNoStoreResponsesMiddleware(t *testing.T) {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/test", nil))
 	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+func TestCompressionMiddlewareLeavesSFTPDownloadsUncompressed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	payload := []byte("remote file bytes\x00\xff")
+	router := gin.New()
+	router.Use(compressionMiddleware())
+	router.POST("/file/download", func(c *gin.Context) {
+		c.Header("Content-Disposition", `attachment; filename="file.bin"`)
+		c.Header("Content-Length", strconv.Itoa(len(payload)))
+		c.Data(http.StatusOK, "application/octet-stream", payload)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/file/download", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("download Content-Encoding = %q, want uncompressed response", got)
+	}
+	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("download Content-Length = %q, want %d", got, len(payload))
+	}
+	if got := recorder.Body.Bytes(); string(got) != string(payload) {
+		t.Fatalf("download body = %q, want exact payload %q", got, payload)
 	}
 }

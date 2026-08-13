@@ -473,6 +473,7 @@
                         <button class="tb-btn sm" onclick="sftpUp()" title="上级"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M18 15l-6-6-6 6"/></svg></button>
                     </div>
                     <div class="sftp-actions">
+                        <button class="tb-btn sm sftp-new-file" onclick="openNewRemoteFile()" title="在当前目录新建文件" aria-label="新建文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg></button>
                         <button class="tb-btn sm" onclick="showSftpRemoteModal()" title="远程下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M16 16l-4 4-4-4M12 20V10"/><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/></svg></button>
                         <label class="tb-btn sm upload-label" title="上传文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg><input type="file" id="sftpUploadInput" onchange="sftpUpload()" hidden multiple></label>
                         <button class="tb-btn sm" onclick="toggleSftp()" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -480,6 +481,30 @@
                 </div>
                 <div class="sftp-body" id="sftpBody">
                     <div class="sftp-loading">加载中...</div>
+                </div>
+            </div>
+            <!-- Remote file editor windows live inside the SSH workspace. -->
+            <div class="remote-editor-layer" id="remoteEditorLayer" aria-live="polite"></div>
+            <div class="remote-editor-dock" id="remoteEditorDock" aria-label="已最小化的在线编辑器"></div>
+        </div>
+    </div>
+
+    <div class="modal-overlay remote-editor-close-overlay" id="remoteEditorCloseModal">
+        <div class="glass-card modal-card remote-editor-close-card" role="dialog" aria-modal="true" aria-labelledby="remoteEditorCloseTitle">
+            <div class="drawer-hd auth-hd">
+                <span id="remoteEditorCloseTitle">文件尚未保存</span>
+                <button class="settings-close" type="button" onclick="cancelRemoteEditorClose()" title="取消关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="remote-editor-close-body">
+                <div class="remote-editor-close-icon">!</div>
+                <div>
+                    <b id="remoteEditorCloseName">当前文件有未保存的修改</b>
+                    <p>关闭编辑器前请选择如何处理这些修改。</p>
+                </div>
+                <div class="remote-editor-close-actions">
+                    <button class="drawer-add primary-action" id="remoteEditorSaveCloseBtn" type="button" onclick="confirmRemoteEditorSaveAndClose()">保存并关闭</button>
+                    <button class="drawer-add danger-confirm" type="button" onclick="confirmRemoteEditorDiscardAndClose()">不保存关闭</button>
+                    <button class="drawer-add" type="button" onclick="cancelRemoteEditorClose()">取消</button>
                 </div>
             </div>
         </div>
