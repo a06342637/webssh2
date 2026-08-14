@@ -77,10 +77,11 @@ type ScriptCategory struct {
 }
 
 type StoredScripts struct {
-	Items      []ScriptBookmark `json:"items"`
-	Categories []ScriptCategory `json:"categories,omitempty"`
-	UpdatedAt  int64            `json:"updatedAt"`
-	Revision   int64            `json:"revision"`
+	Items         []ScriptBookmark `json:"items"`
+	Categories    []ScriptCategory `json:"categories,omitempty"`
+	UpdatedAt     int64            `json:"updatedAt"`
+	Revision      int64            `json:"revision"`
+	ResetRevision int64            `json:"resetRevision,omitempty"`
 }
 
 type accountSummary struct {
@@ -148,6 +149,12 @@ func (s *AccountStore) migrateScriptRevisionsLocked() {
 		}
 		if scripts.Revision == 0 && (scripts.UpdatedAt > 0 || len(scripts.Items) > 0 || len(scripts.Categories) > 0) {
 			scripts.Revision = 1
+		}
+		if scripts.ResetRevision < 0 {
+			scripts.ResetRevision = 0
+		}
+		if scripts.ResetRevision > scripts.Revision {
+			scripts.ResetRevision = scripts.Revision
 		}
 		s.db.Scripts[username] = scripts
 	}
@@ -1339,6 +1346,10 @@ func SyncScriptBookmarks(c *gin.Context) {
 	cloud.Items = sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(cloud.Items), cloud.Categories)
 	cloud.UpdatedAt = sanitizeScriptUpdatedAt(cloud.UpdatedAt, serverNow)
 	cloud.Revision = sanitizeScriptRevision(cloud.Revision)
+	cloud.ResetRevision = sanitizeScriptRevision(cloud.ResetRevision)
+	if cloud.ResetRevision > cloud.Revision {
+		cloud.ResetRevision = cloud.Revision
+	}
 	if cloud.Items == nil {
 		cloud.Items = []ScriptBookmark{}
 	}
@@ -1367,6 +1378,11 @@ func SyncScriptBookmarks(c *gin.Context) {
 		return
 	}
 
+	if baseRevision < cloud.ResetRevision {
+		writeResult(http.StatusConflict, false, "workspace_restored", "管理员已恢复全站书签，请采用恢复后的云端副本", "restored", cloud)
+		return
+	}
+
 	if baseRevision != cloud.Revision {
 		// A brand-new local workspace can safely adopt the existing cloud copy.
 		if baseRevision == 0 && len(localItems) == 0 && len(localCategories) == 0 && req.UpdatedAt == 0 {
@@ -1387,10 +1403,11 @@ func SyncScriptBookmarks(c *gin.Context) {
 		now = cloud.UpdatedAt + 1
 	}
 	result := StoredScripts{
-		Items:      localItems,
-		Categories: localCategories,
-		UpdatedAt:  now,
-		Revision:   cloud.Revision + 1,
+		Items:         localItems,
+		Categories:    localCategories,
+		UpdatedAt:     now,
+		Revision:      cloud.Revision + 1,
+		ResetRevision: cloud.ResetRevision,
 	}
 	before := accountStore.snapshotLocked()
 	accountStore.db.Scripts[username] = result

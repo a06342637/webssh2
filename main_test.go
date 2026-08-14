@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -176,29 +178,64 @@ func TestNoStoreResponsesMiddleware(t *testing.T) {
 	}
 }
 
+func TestRequestBodyLimitAllowsLargeSiteBookmarkRestoreOnlyOnItsRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+	handler := func(c *gin.Context) {
+		if _, err := io.Copy(io.Discard, c.Request.Body); err != nil {
+			c.Status(http.StatusRequestEntityTooLarge)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+	router := gin.New()
+	router.Use(requestBodyLimit(4 << 20))
+	router.POST("/api/admin/bookmarks/restore", handler)
+	router.POST("/api/other", handler)
+
+	allowed := httptest.NewRecorder()
+	router.ServeHTTP(allowed, httptest.NewRequest(http.MethodPost, "/api/admin/bookmarks/restore", bytes.NewReader(payload)))
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("site bookmark restore body returned %d", allowed.Code)
+	}
+
+	blocked := httptest.NewRecorder()
+	router.ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "/api/other", bytes.NewReader(payload)))
+	if blocked.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("ordinary API body returned %d, want 413", blocked.Code)
+	}
+	if controller.SiteScriptBackupRequestBodyLimit() <= 4<<20 {
+		t.Fatal("site bookmark restore limit must exceed the default API limit")
+	}
+}
+
 func TestCompressionMiddlewareLeavesSFTPDownloadsUncompressed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	payload := []byte("remote file bytes\x00\xff")
-	router := gin.New()
-	router.Use(compressionMiddleware())
-	router.POST("/file/download", func(c *gin.Context) {
-		c.Header("Content-Disposition", `attachment; filename="file.bin"`)
-		c.Header("Content-Length", strconv.Itoa(len(payload)))
-		c.Data(http.StatusOK, "application/octet-stream", payload)
-	})
+	for _, target := range []string{"/file/download", "/file/archive/download"} {
+		t.Run(target, func(t *testing.T) {
+			router := gin.New()
+			router.Use(compressionMiddleware())
+			router.POST(target, func(c *gin.Context) {
+				c.Header("Content-Disposition", `attachment; filename="file.bin"`)
+				c.Header("Content-Length", strconv.Itoa(len(payload)))
+				c.Data(http.StatusOK, "application/octet-stream", payload)
+			})
 
-	request := httptest.NewRequest(http.MethodPost, "/file/download", nil)
-	request.Header.Set("Accept-Encoding", "gzip")
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, request)
+			request := httptest.NewRequest(http.MethodPost, target, nil)
+			request.Header.Set("Accept-Encoding", "gzip")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
 
-	if got := recorder.Header().Get("Content-Encoding"); got != "" {
-		t.Fatalf("download Content-Encoding = %q, want uncompressed response", got)
-	}
-	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(payload)) {
-		t.Fatalf("download Content-Length = %q, want %d", got, len(payload))
-	}
-	if got := recorder.Body.Bytes(); string(got) != string(payload) {
-		t.Fatalf("download body = %q, want exact payload %q", got, payload)
+			if got := recorder.Header().Get("Content-Encoding"); got != "" {
+				t.Fatalf("download Content-Encoding = %q, want uncompressed response", got)
+			}
+			if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(payload)) {
+				t.Fatalf("download Content-Length = %q, want %d", got, len(payload))
+			}
+			if got := recorder.Body.Bytes(); string(got) != string(payload) {
+				t.Fatalf("download body = %q, want exact payload %q", got, payload)
+			}
+		})
 	}
 }

@@ -229,6 +229,7 @@ func main() {
 		api.GET("/auth/me", controller.AuthMe)
 		api.GET("/scripts", controller.GetScriptBookmarks)
 		api.GET("/admin/accounts", controller.AdminListAccounts)
+		api.GET("/admin/bookmarks/backup", controller.AdminExportScriptBookmarks)
 		api.GET("/admin/version", controller.AdminVersion)
 		api.GET("/admin/update/status", controller.AdminUpdateStatus)
 
@@ -242,6 +243,7 @@ func main() {
 		accountWrites.POST("/admin/accounts", controller.AdminCreateAccount)
 		accountWrites.PUT("/admin/accounts", controller.AdminUpdateAccount)
 		accountWrites.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)
+		accountWrites.POST("/admin/bookmarks/restore", controller.AdminRestoreScriptBookmarks)
 		accountWrites.POST("/admin/update", controller.AdminUpdate)
 	}
 
@@ -297,6 +299,30 @@ func main() {
 			}
 			controller.DownloadFile(c)
 		})
+		file.POST("/archive/prepare", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.PrepareDirectoryArchive(c)
+		})
+		file.POST("/archive/status", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.DirectoryArchiveStatus(c)
+		})
+		file.POST("/archive/cancel", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.CancelDirectoryArchive(c)
+		})
+		file.POST("/archive/download", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.DownloadPreparedDirectoryArchive(c)
+		})
 		file.POST("/edit/open", func(c *gin.Context) {
 			if !gatewayAuth(c) {
 				return
@@ -313,6 +339,16 @@ func main() {
 			}
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.SaveEditedFile(c)
+			if !c.IsAborted() {
+				c.JSON(http.StatusOK, responseBody)
+			}
+		})
+		file.POST("/delete", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			c.Header("Cache-Control", "no-store")
+			responseBody := controller.DeleteFile(c)
 			if !c.IsAborted() {
 				c.JSON(http.StatusOK, responseBody)
 			}
@@ -379,7 +415,7 @@ func compressionMiddleware() gin.HandlerFunc {
 	// extra streaming layer, which can turn interrupted downloads into empty or
 	// corrupt files. Keep normal pages/API responses compressed, but pass the
 	// attachment response through unchanged.
-	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download"}))
+	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download", "/file/archive/download"}))
 }
 
 func securityHeaders() gin.HandlerFunc {
@@ -398,6 +434,8 @@ func requestBodyLimit(limit int64) gin.HandlerFunc {
 			requestLimit := limit
 			if c.Request.URL.Path == "/api/scripts/sync" {
 				requestLimit = 16 << 20
+			} else if c.Request.URL.Path == "/api/admin/bookmarks/restore" {
+				requestLimit = controller.SiteScriptBackupRequestBodyLimit()
 			} else if c.Request.URL.Path == "/file/edit/save" {
 				requestLimit = controller.RemoteEditorRequestBodyLimit()
 			}

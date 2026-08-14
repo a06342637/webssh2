@@ -5,6 +5,8 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'app.js'), 'utf8');
+const styleSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'css', 'style.css'), 'utf8');
+const indexSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
 const setupSource = fs.readFileSync(path.join(__dirname, '..', 'setup.sh'), 'utf8');
 
@@ -526,9 +528,335 @@ test('SFTP download asks for confirmation and uses a cancellable streamed respon
     const runSource = extractFunction('runSftpDownload');
     assert.match(openSource, /sftpDownloadConfirmRequest = \{/);
     assert.match(openSource, /sftpDownloadConfirmModal/);
-    assert.match(runSource, /signal: download\.controller\.signal/);
+    assert.match(runSource, /var controller = new AbortController\(\)/);
+    assert.match(runSource, /signal: controller\.signal/);
     assert.match(runSource, /response\.body && response\.body\.getReader/);
     assert.match(runSource, /download\.received \+= result\.value\.byteLength/);
+});
+
+test('SFTP folders are confirmed as temporary tar.gz archives before downloading', () => {
+    const classes = new Set();
+    const elements = {
+        sftpDownloadConfirmTitle: { textContent: '' },
+        sftpDownloadConfirmDescription: { textContent: '' },
+        sftpDownloadConfirmSizeLabel: { textContent: '' },
+        sftpDownloadConfirmName: { textContent: '' },
+        sftpDownloadConfirmPath: { textContent: '' },
+        sftpDownloadConfirmSize: { textContent: '' },
+        sftpDownloadConfirmHint: { textContent: '' },
+        sftpDownloadConfirmButton: { disabled: false, textContent: '' },
+        sftpDownloadConfirmModal: { classList: { add: (name) => classes.add(name) } },
+    };
+    const session = { id: 'session-1', _connected: true };
+    const sandbox = loadFunctions(
+        ['normalizeRemoteFilePath', 'sftpDownloadPickerAvailable', 'updateSftpDownloadConfirmHint', 'sftpDownload'],
+        {
+            sftpDownloadConfirmRequest: null,
+            getActiveSession: () => session,
+            document: { getElementById: (id) => elements[id] || null },
+            window: { isSecureContext: false },
+            fmtB: (value) => String(value), parseInt,
+        },
+    );
+
+    sandbox.sftpDownload('/srv/logs', 4096, true);
+    assert.equal(sandbox.sftpDownloadConfirmRequest.path, '/srv/logs');
+    assert.equal(sandbox.sftpDownloadConfirmRequest.name, 'logs.tar.gz');
+    assert.equal(sandbox.sftpDownloadConfirmRequest.isDirectory, true);
+    assert.equal(sandbox.sftpDownloadConfirmRequest.size, 0);
+    assert.equal(elements.sftpDownloadConfirmTitle.textContent, '确认压缩并下载文件夹');
+    assert.equal(elements.sftpDownloadConfirmSize.textContent, '压缩完成后确定');
+    assert.match(elements.sftpDownloadConfirmHint.textContent, /两段/);
+    assert.match(elements.sftpDownloadConfirmHint.textContent, /临时压缩包.*自动清理/);
+    assert.equal(classes.has('show'), true);
+});
+
+test('SFTP file rows place a delete action after edit and download', () => {
+    const source = extractFunction('sftpLoad');
+    const editIndex = source.indexOf("var edit =");
+    const downloadIndex = source.indexOf("var dl =");
+    const deleteIndex = source.indexOf("var del =");
+    assert.ok(editIndex >= 0 && downloadIndex > editIndex && deleteIndex > downloadIndex);
+    assert.match(source, /requestSftpDelete/);
+    assert.match(source, /event\.stopPropagation\(\)/);
+    assert.match(source, /isDir \? '压缩并下载文件夹' : '下载'/);
+    assert.match(source, /isDir \? 'true' : 'false'/);
+    assert.match(source, /isDir \? ' directory' : ''/);
+});
+
+test('SFTP folder downloads show real compression progress before byte download progress', () => {
+    const statusSource = extractFunction('sftpDownloadStatusLabel');
+    const renderSource = extractFunction('renderSftpTransfers');
+    const prepareSource = extractFunction('runSftpArchivePreparation');
+    const pollSource = extractFunction('pollSftpArchivePreparation');
+    const runSource = extractFunction('runSftpDownload');
+    assert.match(statusSource, /download\.status === 'preparing'/);
+    assert.match(renderSource, /已扫描/);
+    assert.match(renderSource, /archiveProcessedBytes/);
+    assert.match(renderSource, /archiveProcessedEntries/);
+    assert.match(renderSource, /<i>1<\/i>压缩/);
+    assert.match(renderSource, /<i>2<\/i>下载/);
+    assert.match(renderSource, /download\.status === 'preparing'.*取消/);
+    assert.match(prepareSource, /\/file\/archive\/prepare/);
+    assert.match(prepareSource, /jobId: jobId/);
+    assert.match(pollSource, /\/file\/archive\/status/);
+    assert.match(pollSource, /data\.status === 'ready'/);
+    assert.match(pollSource, /return runSftpDownload\(download\)/);
+    assert.match(runSource, /\/file\/archive\/download/);
+    assert.match(styleSource, /archive-scanning .*animation:sftpArchivePreparing/);
+    assert.match(styleSource, /archive-compressing .*animation:none/);
+});
+
+test('SFTP download requests preserve file and directory intent', async () => {
+    let submitted;
+    const session = { id: 'session-1', _connected: true, sshInfo: 'encoded-ssh-info' };
+    const sandbox = loadFunctions(
+        ['runSftpDownload'],
+        {
+            getSessionById: () => session,
+            renderSftpTransfers: () => { },
+            AbortController: class AbortController { constructor() { this.signal = {}; } },
+            fetch: (url, options) => {
+                submitted = { url, options };
+                return Promise.resolve({ ok: false, text: () => Promise.resolve('{"Msg":"expected test stop"}') });
+            },
+            abortSftpDownloadWriter: () => Promise.resolve(),
+            requestSftpArchiveCancel: () => Promise.resolve(),
+            requestWasAborted: () => false,
+            showToast: () => { },
+        },
+    );
+    const archiveJobId = '01234567-89ab-cdef-0123-456789abcdef';
+    const download = { sessionId: session.id, path: '/srv/logs', name: 'logs.tar.gz', isDirectory: true, archiveReady: true, archiveJobId, status: 'queued' };
+
+    await sandbox.runSftpDownload(download);
+
+    assert.equal(submitted.url, '/file/archive/download');
+    assert.deepEqual(JSON.parse(submitted.options.body), {
+        jobId: archiveJobId,
+    });
+    assert.equal(download.status, 'error');
+
+    const fileDownload = { sessionId: session.id, path: '/srv/readme.txt', name: 'readme.txt', isDirectory: false, status: 'queued' };
+    await sandbox.runSftpDownload(fileDownload);
+    assert.deepEqual(JSON.parse(submitted.options.body), {
+        sshInfo: session.sshInfo,
+        path: fileDownload.path,
+        archive: false,
+    });
+    assert.equal(fileDownload.status, 'error');
+});
+
+test('SFTP folder preparation uses a client job id and transitions through the status endpoint', async () => {
+    const jobId = '01234567-89ab-cdef-0123-456789abcdef';
+    const session = { id: 'session-1', _connected: true, sshInfo: 'encoded-ssh-info' };
+    let prepareRequest;
+    let pollArguments;
+    const sandbox = loadFunctions(
+        ['clearSftpArchivePoll', 'newSftpArchiveJobId', 'runSftpArchivePreparation'],
+        {
+            getSessionById: () => session,
+            renderSftpTransfers: () => { },
+            crypto: { randomUUID: () => jobId },
+            AbortController: class AbortController { constructor() { this.signal = {}; } },
+            remoteEditorRequest: (url, body) => {
+                prepareRequest = { url, body };
+                return Promise.resolve({ jobId });
+            },
+            pollSftpArchivePreparation: (...args) => { pollArguments = args; return Promise.resolve(true); },
+            requestSftpArchiveCancel: () => Promise.resolve(),
+            requestWasAborted: () => false,
+            showToast: () => { },
+            clearTimeout: () => { },
+            Math, Promise,
+        },
+    );
+    const download = { sessionId: session.id, path: '/srv/logs', name: 'logs.tar.gz', archiveAttempt: 0 };
+
+    assert.equal(await sandbox.runSftpArchivePreparation(download), true);
+    assert.equal(prepareRequest.url, '/file/archive/prepare');
+    assert.deepEqual(JSON.parse(JSON.stringify(prepareRequest.body)), { sshInfo: session.sshInfo, path: download.path, jobId });
+    assert.equal(download.archiveAttempt, 1);
+    assert.equal(download.archiveJobId, jobId);
+    assert.equal(pollArguments[0], download);
+    assert.equal(pollArguments[1], session);
+    assert.equal(pollArguments[2], 1);
+    assert.equal(pollArguments[3], jobId);
+});
+
+test('SFTP folder status switches from compression to the prepared archive download', async () => {
+    const jobId = '01234567-89ab-cdef-0123-456789abcdef';
+    const session = { id: 'session-1' };
+    let downloads = 0;
+    const sandbox = loadFunctions(
+        ['applySftpArchiveStatus', 'pollSftpArchivePreparation'],
+        {
+            AbortController: class AbortController { constructor() { this.signal = {}; } },
+            remoteEditorRequest: (url, body) => {
+                assert.equal(url, '/file/archive/status');
+                assert.deepEqual(JSON.parse(JSON.stringify(body)), { jobId });
+                return Promise.resolve({ status: 'ready', percent: 100, totalBytes: 1000, processedBytes: 1000, totalEntries: 8, processedEntries: 8, archiveSize: 420 });
+            },
+            runSftpDownload: () => { downloads++; return Promise.resolve(true); },
+            renderSftpTransfers: () => { },
+            requestSftpArchiveCancel: () => Promise.resolve(),
+            requestWasAborted: () => false,
+            showToast: () => { },
+            parseInt, Math, Promise,
+        },
+    );
+    const download = { status: 'preparing', archiveAttempt: 3, archiveJobId: jobId };
+
+    assert.equal(await sandbox.pollSftpArchivePreparation(download, session, 3, jobId), true);
+    assert.equal(download.archiveReady, true);
+    assert.equal(download.archivePercent, 100);
+    assert.equal(download.expectedSize, 420);
+    assert.equal(download.total, 420);
+    assert.equal(downloads, 1);
+});
+
+test('cancelling folder preparation wakes polling and cancels the server task', () => {
+    const jobId = '01234567-89ab-cdef-0123-456789abcdef';
+    let clearedTimer = 0;
+    let pollWoke = 0;
+    let aborted = 0;
+    let cancelRequest;
+    const sandbox = loadFunctions(
+        ['clearSftpArchivePoll', 'requestSftpArchiveCancel', 'cancelSftpDownload'],
+        {
+            fetch: (url, options) => { cancelRequest = { url, options }; return Promise.resolve({ ok: true }); },
+            clearTimeout: () => { clearedTimer++; },
+            abortSftpDownloadWriter: () => Promise.resolve(),
+            renderSftpTransfers: () => { },
+            getSessionById: () => ({}),
+            Promise,
+        },
+    );
+    const download = {
+        sessionId: 'session-1', status: 'preparing', archiveAttempt: 1, archiveJobId: jobId,
+        pollTimer: 9, pollResolve: () => { pollWoke++; }, controller: { abort: () => { aborted++; } },
+    };
+
+    sandbox.cancelSftpDownload(download);
+
+    assert.equal(download.status, 'cancelled');
+    assert.equal(download.archiveAttempt, 2);
+    assert.equal(download.pollTimer, null);
+    assert.equal(download.pollResolve, null);
+    assert.equal(clearedTimer, 1);
+    assert.equal(pollWoke, 1);
+    assert.equal(aborted, 1);
+    assert.equal(cancelRequest.url, '/file/archive/cancel');
+    assert.deepEqual(JSON.parse(cancelRequest.options.body), { jobId });
+    assert.equal(cancelRequest.options.keepalive, true);
+});
+
+test('stale folder archive polling cannot repaint a newer retry', async () => {
+    let statusRequests = 0;
+    const sandbox = loadFunctions(
+        ['applySftpArchiveStatus', 'pollSftpArchivePreparation'],
+        {
+            remoteEditorRequest: () => { statusRequests++; return Promise.resolve({}); },
+            Promise,
+        },
+    );
+    const download = { status: 'preparing', archiveAttempt: 4, archiveJobId: 'new-job' };
+    assert.equal(await sandbox.pollSftpArchivePreparation(download, {}, 3, 'old-job'), false);
+    assert.equal(statusRequests, 0);
+});
+
+test('SFTP deletion requires confirmation, submits once and refreshes the original directory', async () => {
+    const request = deferred();
+    const modalClasses = new Set();
+    const elements = {
+        sftpDeleteConfirmModal: { classList: { add: (name) => modalClasses.add(name), remove: (name) => modalClasses.delete(name), contains: (name) => modalClasses.has(name) } },
+        sftpDeleteConfirmName: { textContent: '' },
+        sftpDeleteConfirmPath: { textContent: '' },
+        sftpDeleteConfirmStatus: { textContent: '', className: '' },
+        sftpDeleteConfirmButton: { disabled: false, textContent: '', focus: () => {} },
+        sftpDeleteCancelButton: { disabled: false },
+        sftpDeleteCloseButton: { disabled: false },
+    };
+    const session = { id: 'session-1', sshInfo: 'ssh', sftpPath: '/tmp', _connected: true, _sftpDeleteController: null };
+    let deleteCalls = 0;
+    let refreshedPath = '';
+    let refreshedSession = null;
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorFor', 'remoteEditorIsDirty', 'setSftpDeleteConfirmBusy', 'setRemoteEditorDeletePending', 'requestSftpDelete', 'hideSftpDeleteConfirm', 'confirmSftpDelete'],
+        {
+            sessions: [session], remoteEditors: [], sftpDeleteConfirmRequest: null,
+            document: { getElementById: (id) => elements[id] || null },
+            getActiveSession: () => session, getSessionById: (id) => id === session.id ? session : null,
+            showToast: () => {}, restoreRemoteEditor: () => {}, remoteEditorSetStatus: () => {},
+            abortSessionController: () => {}, requestWasAborted: (err) => err && err.name === 'AbortError',
+            remoteEditorRequest: (url, body) => {
+                deleteCalls++;
+                assert.equal(url, '/file/delete');
+                assert.deepEqual(JSON.parse(JSON.stringify(body)), { sshInfo: 'ssh', path: '/tmp/delete.txt' });
+                return request.promise;
+            },
+            destroyRemoteEditor: () => {},
+            sftpLoad: (path, target) => { refreshedPath = path; refreshedSession = target; },
+            setTimeout: (fn) => fn(), AbortController, Promise,
+        },
+    );
+
+    sandbox.requestSftpDelete('/tmp/delete.txt');
+    assert.equal(deleteCalls, 0);
+    assert.equal(modalClasses.has('show'), true);
+    assert.equal(elements.sftpDeleteConfirmPath.textContent, '/tmp/delete.txt');
+
+    const deleting = sandbox.confirmSftpDelete();
+    assert.equal(deleteCalls, 1);
+    assert.equal(await sandbox.confirmSftpDelete(), false);
+    assert.equal(deleteCalls, 1);
+    request.resolve({});
+    assert.equal(await deleting, true);
+    assert.equal(refreshedPath, '/tmp');
+    assert.equal(refreshedSession, session);
+    assert.equal(modalClasses.has('show'), false);
+});
+
+test('cancelling SFTP delete confirmation sends no request and dirty editors are protected', () => {
+    const modalClasses = new Set();
+    const elements = {
+        sftpDeleteConfirmModal: { classList: { add: (name) => modalClasses.add(name), remove: (name) => modalClasses.delete(name) } },
+        sftpDeleteConfirmName: { textContent: '' },
+        sftpDeleteConfirmPath: { textContent: '' },
+        sftpDeleteConfirmStatus: { textContent: '', className: '' },
+        sftpDeleteConfirmButton: { disabled: false, textContent: '', focus: () => {} },
+        sftpDeleteCancelButton: { disabled: false },
+        sftpDeleteCloseButton: { disabled: false },
+    };
+    const session = { id: 'session-1', _connected: true };
+    const editor = { sessionId: session.id, path: '/tmp/dirty.txt', loaded: true, originalContent: 'old', textarea: { value: 'new' } };
+    let restored = 0;
+    let requests = 0;
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorFor', 'remoteEditorIsDirty', 'setSftpDeleteConfirmBusy', 'requestSftpDelete', 'hideSftpDeleteConfirm'],
+        {
+            remoteEditors: [], sftpDeleteConfirmRequest: null,
+            document: { getElementById: (id) => elements[id] || null },
+            getActiveSession: () => session, showToast: () => {}, restoreRemoteEditor: () => { restored++; },
+            remoteEditorRequest: () => { requests++; },
+            setTimeout: (fn) => fn(),
+        },
+    );
+
+    sandbox.requestSftpDelete('/tmp/clean.txt');
+    sandbox.hideSftpDeleteConfirm();
+    assert.equal(requests, 0);
+    assert.equal(modalClasses.has('show'), false);
+
+    sandbox.remoteEditors.push(editor);
+    sandbox.requestSftpDelete('/tmp/dirty.txt');
+    assert.equal(restored, 1);
+    assert.equal(sandbox.sftpDeleteConfirmRequest, null);
+});
+
+test('SFTP delete refresh is skipped after navigating away from the original directory', () => {
+    const source = extractFunction('confirmSftpDelete');
+    assert.match(source, /normalizeSftpDir\(session\.sftpPath \|\| '\/'\) === request\.parentPath/);
 });
 
 test('SFTP transfer controls support pause, resume and cancellation', () => {
@@ -556,11 +884,12 @@ test('saving a remote editor refreshes metadata in the normalized visible SFTP d
     const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '', _remoteEditorControllers: [] };
     const editor = {
         sessionId: session.id, parentPath: '/', path: '/test.txt', name: 'test.txt', version: 'v1',
-        originalContent: 'old', saving: false, textarea: { value: 'new' },
+        targetPath: '/test.txt', originalContent: 'old', saving: false,
+        subtitle: { textContent: '' }, textarea: { value: 'new' },
     };
     let refreshedPath = '';
     const sandbox = loadFunctions(
-        ['normalizeSftpDir', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorPathLabel', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
         {
             sessions: [session], remoteEditors: [editor],
             getSessionById: (id) => id === session.id ? session : null,
@@ -624,11 +953,12 @@ test('saving an editor keeps modifications typed while the request is in flight'
     const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', _remoteEditorControllers: [] };
     const editor = {
         sessionId: session.id,
-        path: '/tmp/test.txt', version: 'v1', originalContent: 'old', saving: false,
+        path: '/tmp/test.txt', targetPath: '/tmp/test.txt', version: 'v1', originalContent: 'old', saving: false,
+        subtitle: { textContent: '' },
         textarea: { value: 'sent content' },
     };
     const sandbox = loadFunctions(
-        ['normalizeSftpDir', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorPathLabel', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
         {
             sessions: [session], remoteEditors: [editor],
             getSessionById: (id) => id === session.id ? session : null,
@@ -651,8 +981,55 @@ test('remote editor save endpoint carries the opened version fingerprint', () =>
     const source = extractFunction('saveRemoteEditor');
     assert.match(source, /var sentVersion = editor\.version;/);
     assert.match(source, /version: sentVersion/);
+    assert.match(source, /var sentTargetPath = creating \? '' : normalizeRemoteFilePath\(editor\.targetPath \|\| sentPath\);/);
+    assert.match(source, /targetPath: sentTargetPath/);
     assert.match(source, /var creating = !!editor\.isNew;/);
     assert.match(source, /create: creating/);
+});
+
+test('remote editor keeps the resolved symbolic link target returned while opening', () => {
+    const loadSource = extractFunction('loadRemoteEditor');
+    assert.match(loadSource, /editor\.targetPath = normalizeRemoteFilePath\(data\.targetPath \|\| editor\.path\);/);
+    assert.match(loadSource, /已加载符号链接目标/);
+
+    const sandbox = loadFunctions(
+        ['normalizeRemoteFilePath', 'remoteEditorPathLabel'],
+        {},
+    );
+    assert.equal(
+        sandbox.remoteEditorPathLabel({ path: '/etc/nginx/dujiao-next.conf', targetPath: '/etc/nginx/sites-available/dujiao-next.conf' }),
+        '/etc/nginx/dujiao-next.conf → /etc/nginx/sites-available/dujiao-next.conf',
+    );
+});
+
+test('remote editor saves a symbolic link through its resolved target without replacing the link path', async () => {
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '/etc/nginx', _remoteEditorControllers: [] };
+    const editor = {
+        sessionId: session.id, parentPath: '/etc/nginx', path: '/etc/nginx/dujiao-next.conf',
+        targetPath: '/etc/nginx/sites-available/dujiao-next.conf', name: 'dujiao-next.conf', version: 'link-v1',
+        originalContent: 'old', saving: false, subtitle: { textContent: '' }, textarea: { value: 'new' },
+    };
+    let sentBody;
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorPathLabel', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        {
+            sessions: [session], remoteEditors: [editor],
+            getSessionById: (id) => id === session.id ? session : null,
+            remoteEditorRequest: (url, body) => {
+                assert.equal(url, '/file/edit/save');
+                sentBody = body;
+                return Promise.resolve({ version: 'link-v2', targetPath: '/etc/nginx/sites-available/dujiao-next.conf' });
+            },
+            remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
+            sftpLoad: () => {}, AbortController, Promise,
+        },
+    );
+
+    assert.equal(await sandbox.saveRemoteEditor(editor, false), true);
+    assert.equal(sentBody.path, '/etc/nginx/dujiao-next.conf');
+    assert.equal(sentBody.targetPath, '/etc/nginx/sites-available/dujiao-next.conf');
+    assert.equal(sentBody.version, 'link-v1');
+    assert.equal(editor.subtitle.textContent, '/etc/nginx/dujiao-next.conf → /etc/nginx/sites-available/dujiao-next.conf');
 });
 
 test('new remote files are created in the active SFTP directory without overwriting', () => {
@@ -729,10 +1106,12 @@ test('large SFTP downloads use the native save picker and verify bytes before co
     const writerSource = extractFunction('sftpDownloadWriter');
     const runSource = extractFunction('runSftpDownload');
     assert.match(confirmSource, /window\.showSaveFilePicker/);
-    assert.match(confirmSource, /startSftpDownload\(session, request\.path, request\.size, request\.name, fileHandle\)/);
+    assert.match(confirmSource, /startSftpDownload\(session, request\.path, request\.size, request\.name, fileHandle, request\.isDirectory\)/);
     assert.match(writerSource, /fileHandle\.createWritable/);
     assert.ok(runSource.indexOf('verifySftpDownloadSize(download);') < runSource.indexOf('writer.close()'));
     assert.match(runSource, /abortSftpDownloadWriter\(download/);
+    assert.match(runSource, /try \{ controller\.abort\(\); \} catch/);
+    assert.match(runSource, /if \(download\.controller === controller\) download\.controller = null/);
 });
 
 test('native save picker cancellation keeps download confirmation open for retry', () => {
@@ -764,14 +1143,14 @@ test('saving an empty new-file draft creates it and turns it into a normal edito
     const removedClasses = [];
     const editor = {
         sessionId: session.id, parentPath: '/tmp', path: '/tmp/new.txt', name: 'new.txt', isNew: true,
-        version: '', originalContent: '', saving: false, maxBytes: 1024,
+        targetPath: '', version: '', originalContent: '', saving: false, maxBytes: 1024,
         nameInput: { value: 'new.txt', readOnly: false, focus: () => {} }, subtitle: { textContent: '' },
         textarea: { value: '' }, el: { classList: { remove: (value) => removedClasses.push(value) } },
     };
     let sentBody;
     let refreshedPath = '';
     const sandbox = loadFunctions(
-        ['utf8ByteLength', 'normalizeSftpDir', 'sanitizeRemoteFileName', 'joinRemoteFilePath', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
+        ['utf8ByteLength', 'normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorPathLabel', 'sanitizeRemoteFileName', 'joinRemoteFilePath', 'remoteEditorSession', 'remoteEditorIsDirty', 'remoteEditorSetStatus', 'removeRemoteEditorController', 'saveRemoteEditor'],
         {
             sessions: [session], remoteEditors: [editor],
             getSessionById: (id) => id === session.id ? session : null,
@@ -783,6 +1162,7 @@ test('saving an empty new-file draft creates it and turns it into a normal edito
 
     const saving = sandbox.saveRemoteEditor(editor, false);
     assert.equal(sentBody.path, '/tmp/new.txt');
+    assert.equal(sentBody.targetPath, '');
     assert.equal(sentBody.create, true);
     assert.equal(editor.nameInput.readOnly, true);
     request.resolve({ version: 'created-v1' });
@@ -901,4 +1281,53 @@ test('duplicate imported script IDs are made unique', () => {
     ]);
     assert.equal(result.length, 2);
     assert.notEqual(result[0].id, result[1].id);
+});
+
+test('personal and site bookmark backup files are classified into separate scopes', () => {
+    const sandbox = loadFunctions(
+        ['classifyScriptBookmarkBackup'],
+        { SBK: 'scripts', SCAT: 'categories' },
+    );
+    assert.equal(sandbox.classifyScriptBookmarkBackup({ type: 'script_bookmarks', scope: 'personal', scripts: [] }), 'personal');
+    assert.equal(sandbox.classifyScriptBookmarkBackup([{ name: 'legacy', cmd: 'true' }]), 'personal');
+    assert.equal(sandbox.classifyScriptBookmarkBackup({ type: 'site_script_bookmarks_backup', scope: 'site', users: [] }), 'site');
+    assert.equal(sandbox.classifyScriptBookmarkBackup({ users: [{ username: 'admin', scripts: [], categories: [] }] }), 'site');
+    assert.equal(sandbox.classifyScriptBookmarkBackup({ hello: 'world' }), 'unknown');
+});
+
+test('new personal exports carry an explicit personal scope and cannot be confused with site backups', () => {
+    const source = extractFunction('exportScriptBookmarks');
+    assert.match(source, /type:\s*'script_bookmarks'/);
+    assert.match(source, /scope:\s*'personal'/);
+    assert.match(source, /version:\s*3/);
+    assert.match(source, /account:\s*scriptAccountName\(currentAccount\)/);
+    assert.match(extractFunction('importScriptBookmarks'), /全站书签备份，不能导入到个人书签/);
+    assert.match(extractFunction('importSiteScriptBookmarks'), /个人书签备份，不能用于全站恢复/);
+    assert.match(extractFunction('importSiteScriptBookmarks'), /file\.size > MAX_SITE_SCRIPT_BACKUP_BYTES/);
+});
+
+test('site bookmark backup controls are administrator-only and include a restore confirmation', () => {
+    assert.match(indexSource, /id="siteBookmarkBackupSection" hidden/);
+    assert.match(indexSource, /id="siteBookmarkRestoreModal"/);
+    assert.match(indexSource, /不会包含密码、会话或 SSH 连接信息/);
+    assert.match(indexSource, /只覆盖当前网站中同名用户的书签/);
+    const source = extractFunction('updateAccountUI');
+    assert.match(source, /siteBackupSection\.hidden = !isAdminAccount/);
+    assert.match(extractFunction('confirmSiteScriptRestore'), /cancelPendingScriptSync\(\)/);
+    assert.match(extractFunction('confirmSiteScriptRestore'), /\/api\/admin\/bookmarks\/restore/);
+});
+
+test('site restore responses force stale clients to adopt the restored cloud workspace', () => {
+    const source = extractFunction('syncScriptBookmarks');
+    assert.match(source, /err\.code === 'workspace_restored'/);
+    assert.match(source, /scriptSyncSnapshotIsCurrent\(snapshot\)/);
+    assert.match(source, /saveScriptWorkspaceAtomically\(restoredScripts, restoredCategories, restoredAt, restored\.revision, true\)/);
+    assert.match(source, /管理员已恢复全站书签/);
+});
+
+test('bookmark manager uses separated sections and a stable statistics grid', () => {
+    assert.match(styleSource, /\.script-manager-card\{width:720px/);
+    assert.match(styleSource, /\.script-manager-summary\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+    assert.match(styleSource, /\.site-backup-actions\{grid-template-columns:repeat\(2,1fr\)\}/);
+    assert.match(styleSource, /\.site-bookmark-restore-overlay\{z-index:1180\}/);
 });

@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -25,39 +28,45 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 type File struct {
-	Name       string
-	Size       string
-	SizeBytes  int64
-	ModifyTime string
-	IsDir      bool
-	IsSymlink  bool
-	Editable   bool
-	EditReason string
+	Name           string
+	Size           string
+	SizeBytes      int64
+	ModifyTime     string
+	IsDir          bool
+	IsSymlink      bool
+	Editable       bool
+	EditReason     string
+	Downloadable   bool
+	DownloadReason string
 }
 
 type fileRequest struct {
 	SSHInfo string `json:"sshInfo"`
 	Path    string `json:"path"`
+	Archive *bool  `json:"archive,omitempty"`
 }
 
 type fileSaveRequest struct {
-	SSHInfo string `json:"sshInfo"`
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Version string `json:"version"`
-	Create  bool   `json:"create"`
+	SSHInfo    string `json:"sshInfo"`
+	Path       string `json:"path"`
+	TargetPath string `json:"targetPath"`
+	Content    string `json:"content"`
+	Version    string `json:"version"`
+	Create     bool   `json:"create"`
 }
 
 type remoteFileSnapshot struct {
-	Content  string
-	Version  string
-	Size     int64
-	Mode     os.FileMode
-	Modified time.Time
-	Stat     *sftp.FileStat
+	Content    string
+	Version    string
+	TargetPath string
+	Size       int64
+	Mode       os.FileMode
+	Modified   time.Time
+	Stat       *sftp.FileStat
 }
 
 type remoteEditorTargetLock struct {
@@ -103,6 +112,13 @@ func bindDownloadRequest(c *gin.Context) (fileRequest, error) {
 			return fileRequest{}, fmt.Errorf("invalid request: %w", err)
 		}
 		request := fileRequest{SSHInfo: c.Request.PostForm.Get("sshInfo"), Path: c.Request.PostForm.Get("path")}
+		if rawArchive := strings.TrimSpace(c.Request.PostForm.Get("archive")); rawArchive != "" {
+			archive, parseErr := strconv.ParseBool(rawArchive)
+			if parseErr != nil {
+				return fileRequest{}, fmt.Errorf("invalid archive intent: %w", parseErr)
+			}
+			request.Archive = &archive
+		}
 		if strings.TrimSpace(request.SSHInfo) == "" {
 			return request, fmt.Errorf("missing sshInfo")
 		}
@@ -283,33 +299,30 @@ func remoteFileVersion(info os.FileInfo, content []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func readRemoteTextFile(client *sftp.Client, path string, maxBytes int64) (remoteFileSnapshot, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return remoteFileSnapshot{}, fmt.Errorf("missing path")
+func resolveRemoteTextTarget(client *sftp.Client, requestedPath string) (os.FileInfo, string, error) {
+	requestedPath = strings.TrimSpace(requestedPath)
+	if requestedPath == "" {
+		return nil, "", fmt.Errorf("missing path")
 	}
-	// Stat follows symbolic links.  Editing through a link would make the
-	// temporary-file rename replace the link itself (or, depending on the
-	// server, unexpectedly modify a different target).  Keep the editor
-	// deliberately limited to a concrete regular file.
-	lstat, err := client.Lstat(path)
+	info, targetPath, err := statRemoteTarget(client, requestedPath)
 	if err != nil {
-		return remoteFileSnapshot{}, err
-	}
-	if lstat.Mode()&os.ModeSymlink != 0 {
-		return remoteFileSnapshot{}, fmt.Errorf("symbolic links cannot be edited")
-	}
-	info, err := client.Stat(path)
-	if err != nil {
-		return remoteFileSnapshot{}, err
+		return nil, targetPath, err
 	}
 	if !info.Mode().IsRegular() {
-		return remoteFileSnapshot{}, fmt.Errorf("only regular files can be edited")
+		return nil, targetPath, fmt.Errorf("only regular files can be edited")
+	}
+	return info, targetPath, nil
+}
+
+func readRemoteTextFile(client *sftp.Client, path string, maxBytes int64) (remoteFileSnapshot, error) {
+	info, targetPath, err := resolveRemoteTextTarget(client, path)
+	if err != nil {
+		return remoteFileSnapshot{}, err
 	}
 	if info.Size() > maxBytes {
 		return remoteFileSnapshot{}, fmt.Errorf("file is too large to edit (maximum %s)", Bytefmt(uint64(maxBytes)))
 	}
-	file, err := client.Open(path)
+	file, err := client.Open(targetPath)
 	if err != nil {
 		return remoteFileSnapshot{}, err
 	}
@@ -322,12 +335,13 @@ func readRemoteTextFile(client *sftp.Client, path string, maxBytes int64) (remot
 		return remoteFileSnapshot{}, err
 	}
 	return remoteFileSnapshot{
-		Content:  string(content),
-		Version:  remoteFileVersion(info, content),
-		Size:     int64(len(content)),
-		Mode:     info.Mode(),
-		Modified: info.ModTime(),
-		Stat:     cloneSFTPFileStat(info),
+		Content:    string(content),
+		Version:    remoteFileVersion(info, content),
+		TargetPath: targetPath,
+		Size:       int64(len(content)),
+		Mode:       info.Mode(),
+		Modified:   info.ModTime(),
+		Stat:       cloneSFTPFileStat(info),
 	}, nil
 }
 
@@ -341,6 +355,10 @@ func cloneSFTPFileStat(info os.FileInfo) *sftp.FileStat {
 }
 
 func writeRemoteTextFile(client *sftp.Client, path string, content []byte, expectedVersion string, maxBytes int64) (remoteFileSnapshot, error) {
+	return writeRemoteTextFileTarget(client, path, content, expectedVersion, "", maxBytes)
+}
+
+func writeRemoteTextFileTarget(client *sftp.Client, path string, content []byte, expectedVersion, expectedTargetPath string, maxBytes int64) (remoteFileSnapshot, error) {
 	if err := validateRemoteTextContent(content, maxBytes, "save", "saved"); err != nil {
 		return remoteFileSnapshot{}, err
 	}
@@ -348,6 +366,14 @@ func writeRemoteTextFile(client *sftp.Client, path string, content []byte, expec
 	if err != nil {
 		return remoteFileSnapshot{}, err
 	}
+	expectedTargetPath = strings.TrimSpace(expectedTargetPath)
+	if expectedTargetPath != "" {
+		expectedTargetPath = pathpkg.Clean(expectedTargetPath)
+		if current.TargetPath != expectedTargetPath {
+			return remoteFileSnapshot{}, fmt.Errorf("the symbolic link target changed after the file was opened; reopen it before saving")
+		}
+	}
+	targetPath := current.TargetPath
 	if strings.TrimSpace(expectedVersion) == "" {
 		return remoteFileSnapshot{}, fmt.Errorf("missing file version")
 	}
@@ -359,7 +385,7 @@ func writeRemoteTextFile(client *sftp.Client, path string, content []byte, expec
 	if _, err := rand.Read(randomBytes); err != nil {
 		return remoteFileSnapshot{}, fmt.Errorf("create editor temp name: %w", err)
 	}
-	tmpPath := pathpkg.Join(pathpkg.Dir(path), ".webssh-edit-"+hex.EncodeToString(randomBytes)+".tmp")
+	tmpPath := pathpkg.Join(pathpkg.Dir(targetPath), ".webssh-edit-"+hex.EncodeToString(randomBytes)+".tmp")
 	tmpFile, err := client.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return remoteFileSnapshot{}, err
@@ -406,24 +432,27 @@ func writeRemoteTextFile(client *sftp.Client, path string, content []byte, expec
 	if err != nil {
 		return remoteFileSnapshot{}, err
 	}
+	if latest.TargetPath != targetPath {
+		return remoteFileSnapshot{}, fmt.Errorf("the symbolic link target changed while the file was being saved; reopen it before trying again")
+	}
 	if latest.Version != expectedVersion {
 		return remoteFileSnapshot{}, fmt.Errorf("the remote file changed while it was being saved; reload it before trying again")
 	}
 	// Re-check the link type immediately before the commit.  This closes the
 	// most important replace-via-link race without weakening the optimistic
 	// version check above.
-	latestLstat, err := client.Lstat(path)
+	latestLstat, err := client.Lstat(targetPath)
 	if err != nil {
 		return remoteFileSnapshot{}, err
 	}
 	if latestLstat.Mode()&os.ModeSymlink != 0 || !latestLstat.Mode().IsRegular() {
 		return remoteFileSnapshot{}, fmt.Errorf("the remote file is no longer a regular file")
 	}
-	if err := replaceRemoteFile(client, tmpPath, path); err != nil {
+	if err := replaceRemoteFile(client, tmpPath, targetPath); err != nil {
 		return remoteFileSnapshot{}, err
 	}
 	committed = true
-	return readRemoteTextFile(client, path, maxBytes)
+	return readRemoteTextFile(client, targetPath, maxBytes)
 }
 
 func createRemoteTextFile(client *sftp.Client, path string, content []byte, maxBytes int64) (remoteFileSnapshot, error) {
@@ -485,15 +514,21 @@ func saveRemoteTextFileWithLock(ctx context.Context, lockKey string, client *sft
 		if strings.TrimSpace(request.Version) != "" {
 			return remoteFileSnapshot{}, fmt.Errorf("new files must not include an existing version")
 		}
+		if strings.TrimSpace(request.TargetPath) != "" {
+			return remoteFileSnapshot{}, fmt.Errorf("new files must not include an existing target path")
+		}
 		return createRemoteTextFile(client, request.Path, []byte(request.Content), maxBytes)
 	}
-	return writeRemoteTextFile(client, request.Path, []byte(request.Content), request.Version, maxBytes)
+	return writeRemoteTextFileTarget(client, request.Path, []byte(request.Content), request.Version, request.TargetPath, maxBytes)
 }
 
 func remoteSnapshotData(path string, snapshot remoteFileSnapshot, maxBytes int64) gin.H {
+	requestedPath := pathpkg.Clean(strings.TrimSpace(path))
 	return gin.H{
-		"path":       path,
-		"name":       pathpkg.Base(path),
+		"path":       requestedPath,
+		"targetPath": snapshot.TargetPath,
+		"isSymlink":  snapshot.TargetPath != "" && snapshot.TargetPath != requestedPath,
+		"name":       pathpkg.Base(requestedPath),
 		"content":    snapshot.Content,
 		"version":    snapshot.Version,
 		"size":       snapshot.Size,
@@ -573,12 +608,111 @@ func SaveEditedFile(c *gin.Context) *ResponseBody {
 	path := strings.TrimSpace(request.Path)
 	request.Path = path
 	maxBytes := remoteEditorMaxBytes()
-	snapshot, err := saveRemoteTextFileWithLock(c.Request.Context(), remoteEditorTargetKey(sshClient, path), sshClient.Sftp, request, maxBytes)
+	lockPath := path
+	if !request.Create {
+		request.TargetPath = strings.TrimSpace(request.TargetPath)
+		if request.TargetPath == "" {
+			_, resolvedPath, resolveErr := resolveRemoteTextTarget(sshClient.Sftp, path)
+			if resolveErr != nil {
+				responseBody.Msg = resolveErr.Error()
+				return &responseBody
+			}
+			request.TargetPath = resolvedPath
+		} else {
+			request.TargetPath = pathpkg.Clean(request.TargetPath)
+		}
+		lockPath = request.TargetPath
+	}
+	snapshot, err := saveRemoteTextFileWithLock(c.Request.Context(), remoteEditorTargetKey(sshClient, lockPath), sshClient.Sftp, request, maxBytes)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	responseBody.Data = remoteSnapshotData(path, snapshot, maxBytes)
+	return &responseBody
+}
+
+func deleteRemoteFile(client *sftp.Client, remotePath string) error {
+	remotePath = strings.TrimSpace(remotePath)
+	if remotePath == "" {
+		return fmt.Errorf("missing path")
+	}
+	remotePath = pathpkg.Clean(remotePath)
+	if remotePath == "." || remotePath == "/" {
+		return fmt.Errorf("invalid file path")
+	}
+	info, err := client.Lstat(remotePath)
+	if err != nil {
+		if os.IsNotExist(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+			return fmt.Errorf("file does not exist")
+		}
+		if os.IsPermission(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxPermissionDenied)) {
+			return fmt.Errorf("permission denied")
+		}
+		return err
+	}
+	// Lstat deliberately does not follow symbolic links: deleting a link must
+	// remove the link itself, never the file or directory it points at.
+	if info.IsDir() {
+		return fmt.Errorf("directories cannot be deleted")
+	}
+	if err := client.Remove(remotePath); err != nil {
+		if os.IsNotExist(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+			return fmt.Errorf("file does not exist")
+		}
+		if os.IsPermission(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxPermissionDenied)) {
+			return fmt.Errorf("permission denied")
+		}
+		return err
+	}
+	return nil
+}
+
+func deleteRemoteFileWithLock(ctx context.Context, lockKey string, client *sftp.Client, remotePath string) error {
+	release, err := acquireRemoteEditorTarget(ctx, lockKey)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return deleteRemoteFile(client, remotePath)
+}
+
+func DeleteFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	request, err := bindFileRequest(c)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	remotePath := pathpkg.Clean(strings.TrimSpace(request.Path))
+	if remotePath == "." || remotePath == "/" {
+		responseBody.Msg = "invalid file path"
+		return &responseBody
+	}
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer sshClient.Close()
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
+	if err := deleteRemoteFileWithLock(c.Request.Context(), remoteEditorTargetKey(sshClient, remotePath), sshClient.Sftp, remotePath); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	responseBody.Data = gin.H{"path": remotePath, "name": pathpkg.Base(remotePath)}
 	return &responseBody
 }
 
@@ -661,6 +795,441 @@ func UploadFile(c *gin.Context) *ResponseBody {
 	return &responseBody
 }
 
+const (
+	remoteFolderArchivePrefix = ".webssh-folder-"
+	remoteFolderArchiveSuffix = ".tar.gz"
+)
+
+type remoteDirectoryArchiver func(ctx context.Context, sourcePath, archivePath string) error
+
+type cappedCommandOutput struct {
+	data []byte
+	max  int
+}
+
+func (w *cappedCommandOutput) Write(p []byte) (int, error) {
+	written := len(p)
+	if w.max <= 0 || len(w.data) >= w.max {
+		return written, nil
+	}
+	remaining := w.max - len(w.data)
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	w.data = append(w.data, p...)
+	return written, nil
+}
+
+func (w *cappedCommandOutput) String() string {
+	return strings.TrimSpace(string(w.data))
+}
+
+func runSSHCommandContext(ctx context.Context, client *ssh.Client, command string) error {
+	if client == nil {
+		return fmt.Errorf("SSH connection is not available")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	stderr := &cappedCommandOutput{max: 8 << 10}
+	session.Stdout = io.Discard
+	session.Stderr = stderr
+	if err := session.Start(command); err != nil {
+		return err
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- session.Wait() }()
+	select {
+	case err := <-wait:
+		if err == nil {
+			return nil
+		}
+		if detail := stderr.String(); detail != "" {
+			return fmt.Errorf("remote command failed: %w: %s", err, detail)
+		}
+		return fmt.Errorf("remote command failed: %w", err)
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		_ = session.Close()
+		select {
+		case <-wait:
+		case <-time.After(2 * time.Second):
+		}
+		return ctx.Err()
+	}
+}
+
+func remoteTarArchiveCommand(sourcePath, archivePath string) string {
+	sourcePath = pathpkg.Clean(sourcePath)
+	archivePath = pathpkg.Clean(archivePath)
+	return strings.Join([]string{
+		"set -eu",
+		"umask 077",
+		"command -v tar >/dev/null 2>&1 || { echo 'tar command is not installed on the remote server' >&2; exit 127; }",
+		"[ -d " + shellQuote(sourcePath) + " ] && [ ! -L " + shellQuote(sourcePath) + " ] || { echo 'folder changed before it could be archived' >&2; exit 1; }",
+		"tar -czf " + shellQuote(archivePath) + " -C " + shellQuote(pathpkg.Dir(sourcePath)) + " -- " + shellQuote(pathpkg.Base(sourcePath)),
+	}, "\n")
+}
+
+func runRemoteTarArchive(ctx context.Context, client *ssh.Client, sourcePath, archivePath string) error {
+	return runSSHCommandContext(ctx, client, remoteTarArchiveCommand(sourcePath, archivePath))
+}
+
+func remoteFolderArchiveCandidateDirs(sourcePath string) []string {
+	candidates := []string{pathpkg.Dir(sourcePath), "/tmp"}
+	result := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = pathpkg.Clean(candidate)
+		if candidate == "." || candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func remotePathWithin(remotePath, directory string) bool {
+	remotePath = pathpkg.Clean(remotePath)
+	directory = pathpkg.Clean(directory)
+	if directory == "/" {
+		return strings.HasPrefix(remotePath, "/")
+	}
+	return remotePath == directory || strings.HasPrefix(remotePath, strings.TrimSuffix(directory, "/")+"/")
+}
+
+func reserveRemoteFolderArchive(client *sftp.Client, directory string) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		randomBytes := make([]byte, 12)
+		if _, err := rand.Read(randomBytes); err != nil {
+			return "", fmt.Errorf("create archive temp name: %w", err)
+		}
+		archivePath := pathpkg.Join(directory, remoteFolderArchivePrefix+hex.EncodeToString(randomBytes)+remoteFolderArchiveSuffix)
+		file, err := client.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			_ = client.Remove(archivePath)
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			_ = client.Remove(archivePath)
+			return "", err
+		}
+		return archivePath, nil
+	}
+	return "", fmt.Errorf("could not reserve a unique archive name")
+}
+
+func isRemoteFolderArchiveName(name string) bool {
+	if !strings.HasPrefix(name, remoteFolderArchivePrefix) || !strings.HasSuffix(name, remoteFolderArchiveSuffix) {
+		return false
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(name, remoteFolderArchivePrefix), remoteFolderArchiveSuffix)
+	if len(token) != 24 {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
+}
+
+func removeRemoteFolderArchive(client *sftp.Client, archivePath string) error {
+	archivePath = pathpkg.Clean(strings.TrimSpace(archivePath))
+	name := pathpkg.Base(archivePath)
+	if archivePath == "." || !isRemoteFolderArchiveName(name) {
+		return fmt.Errorf("invalid temporary archive path")
+	}
+	if err := client.Remove(archivePath); err != nil && !os.IsNotExist(err) && !isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+		return err
+	}
+	return nil
+}
+
+func prepareRemoteDirectoryArchive(ctx context.Context, client *sftp.Client, sourcePath string, archive remoteDirectoryArchiver) (string, os.FileInfo, error) {
+	sourcePath = pathpkg.Clean(strings.TrimSpace(sourcePath))
+	if sourcePath == "." || sourcePath == "" {
+		return "", nil, fmt.Errorf("missing directory path")
+	}
+	if sourcePath == "/" {
+		return "", nil, fmt.Errorf("the remote root directory cannot be archived")
+	}
+	if archive == nil {
+		return "", nil, fmt.Errorf("remote archive command is not available")
+	}
+	sourceInfo, err := client.Lstat(sourcePath)
+	if err != nil {
+		return "", nil, err
+	}
+	if sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.IsDir() {
+		return "", nil, fmt.Errorf("remote archive source is no longer a directory")
+	}
+	var failures []string
+	for _, directory := range remoteFolderArchiveCandidateDirs(sourcePath) {
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		archivePath, err := reserveRemoteFolderArchive(client, directory)
+		if err != nil {
+			failures = append(failures, directory+": "+err.Error())
+			continue
+		}
+		if err := archive(ctx, sourcePath, archivePath); err != nil {
+			_ = removeRemoteFolderArchive(client, archivePath)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", nil, ctxErr
+			}
+			failures = append(failures, directory+": "+err.Error())
+			continue
+		}
+		info, err := client.Lstat(archivePath)
+		if err != nil {
+			_ = removeRemoteFolderArchive(client, archivePath)
+			failures = append(failures, directory+": verify archive: "+err.Error())
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 {
+			_ = removeRemoteFolderArchive(client, archivePath)
+			failures = append(failures, directory+": remote archive is empty or invalid")
+			continue
+		}
+		return archivePath, info, nil
+	}
+	if len(failures) == 0 {
+		return "", nil, fmt.Errorf("could not create the remote folder archive")
+	}
+	return "", nil, fmt.Errorf("could not create the remote folder archive: %s", strings.Join(failures, "; "))
+}
+
+func remoteFolderArchiveDownloadName(requestedPath string) string {
+	name := pathpkg.Base(pathpkg.Clean(strings.TrimSpace(requestedPath)))
+	if name == "." || name == "/" || name == "" {
+		name = "folder"
+	}
+	return name + remoteFolderArchiveSuffix
+}
+
+func validateDownloadArchiveIntent(archive *bool, isDirectory bool) error {
+	if archive == nil {
+		return nil
+	}
+	if *archive && !isDirectory {
+		return fmt.Errorf("the selected folder changed before it could be archived")
+	}
+	if !*archive && isDirectory {
+		return fmt.Errorf("the selected file changed before it could be downloaded")
+	}
+	return nil
+}
+
+type requestContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r requestContextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.r.Read(p)
+	}
+}
+
+type requestContextWriter struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (w requestContextWriter) Write(p []byte) (int, error) {
+	select {
+	case <-w.ctx.Done():
+		return 0, w.ctx.Err()
+	default:
+		return w.w.Write(p)
+	}
+}
+
+func validRemoteArchiveChildName(name string) bool {
+	return name != "" && name != "." && name != ".." && pathpkg.Base(name) == name && !strings.ContainsRune(name, 0)
+}
+
+func addRemoteDirectoryArchiveEntry(ctx context.Context, client *sftp.Client, writer *tar.Writer, remotePath, archiveName, temporaryArchivePath string, info os.FileInfo, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if depth > 256 {
+		return fmt.Errorf("folder nesting is too deep near %s", remotePath)
+	}
+	if pathpkg.Clean(remotePath) == pathpkg.Clean(temporaryArchivePath) {
+		return nil
+	}
+	linkTarget := ""
+	if info.Mode()&os.ModeSymlink != 0 {
+		var err error
+		linkTarget, err = client.ReadLink(remotePath)
+		if err != nil {
+			return fmt.Errorf("read symbolic link %s: %w", remotePath, err)
+		}
+	}
+	header, err := tar.FileInfoHeader(info, linkTarget)
+	if err != nil {
+		return fmt.Errorf("archive metadata %s: %w", remotePath, err)
+	}
+	header.Name = archiveName
+	header.Format = tar.FormatPAX
+	if info.IsDir() && !strings.HasSuffix(header.Name, "/") {
+		header.Name += "/"
+	}
+	if err := writer.WriteHeader(header); err != nil {
+		return fmt.Errorf("write archive header %s: %w", remotePath, err)
+	}
+	if info.Mode().IsRegular() {
+		file, err := client.Open(remotePath)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", remotePath, err)
+		}
+		_, copyErr := io.CopyN(writer, requestContextReader{ctx: ctx, r: file}, info.Size())
+		closeErr := file.Close()
+		if copyErr != nil {
+			return fmt.Errorf("archive %s: %w", remotePath, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %s: %w", remotePath, closeErr)
+		}
+		return nil
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	entries, err := client.ReadDir(remotePath)
+	if err != nil {
+		return fmt.Errorf("read directory %s: %w", remotePath, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !validRemoteArchiveChildName(name) {
+			return fmt.Errorf("invalid filename in remote directory %s", remotePath)
+		}
+		childPath := pathpkg.Join(remotePath, name)
+		if pathpkg.Clean(childPath) == pathpkg.Clean(temporaryArchivePath) {
+			continue
+		}
+		childInfo, err := client.Lstat(childPath)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", childPath, err)
+		}
+		childArchiveName := pathpkg.Join(strings.TrimSuffix(archiveName, "/"), name)
+		if err := addRemoteDirectoryArchiveEntry(ctx, client, writer, childPath, childArchiveName, temporaryArchivePath, childInfo, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeRemoteDirectoryArchiveViaSFTP(ctx context.Context, client *sftp.Client, sourcePath, archivePath string) error {
+	sourceInfo, err := client.Lstat(sourcePath)
+	if err != nil {
+		return err
+	}
+	if !sourceInfo.IsDir() {
+		return fmt.Errorf("remote archive source is no longer a directory")
+	}
+	archiveFile, err := client.OpenFile(archivePath, os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		return err
+	}
+	gzipWriter := gzip.NewWriter(requestContextWriter{ctx: ctx, w: archiveFile})
+	tarWriter := tar.NewWriter(gzipWriter)
+	archiveName := pathpkg.Base(pathpkg.Clean(sourcePath))
+	resultErr := addRemoteDirectoryArchiveEntry(ctx, client, tarWriter, sourcePath, archiveName, archivePath, sourceInfo, 0)
+	if err := tarWriter.Close(); resultErr == nil && err != nil {
+		resultErr = err
+	}
+	if err := gzipWriter.Close(); resultErr == nil && err != nil {
+		resultErr = err
+	}
+	if err := archiveFile.Close(); resultErr == nil && err != nil {
+		resultErr = err
+	}
+	return resultErr
+}
+
+func downloadRemoteDirectoryArchive(c *gin.Context, sshClient *core.SSHClient, requestedPath, sourcePath string, responseBody *ResponseBody) {
+	archivePath, archiveInfo, err := prepareRemoteDirectoryArchive(c.Request.Context(), sshClient.Sftp, sourcePath, func(ctx context.Context, sourcePath, archivePath string) error {
+		var commandErr error
+		if remotePathWithin(archivePath, sourcePath) {
+			commandErr = fmt.Errorf("temporary archive is inside the source folder")
+		} else {
+			commandErr = runRemoteTarArchive(ctx, sshClient.Client, sourcePath, archivePath)
+		}
+		if commandErr == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		fallbackErr := writeRemoteDirectoryArchiveViaSFTP(ctx, sshClient.Sftp, sourcePath, archivePath)
+		if fallbackErr == nil {
+			return nil
+		}
+		return fmt.Errorf("remote tar failed (%v); SFTP compression fallback failed: %w", commandErr, fallbackErr)
+	})
+	if err != nil {
+		responseBody.Msg = err.Error()
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusRequestTimeout
+		}
+		c.JSON(status, responseBody)
+		return
+	}
+	defer func() {
+		if cleanupErr := removeRemoteFolderArchive(sshClient.Sftp, archivePath); cleanupErr != nil {
+			log.Printf("could not remove remote folder archive %q: %v", archivePath, cleanupErr)
+		}
+	}()
+	archiveFile, err := sshClient.Download(archivePath)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
+		return
+	}
+	defer archiveFile.Close()
+	filename := remoteFolderArchiveDownloadName(requestedPath)
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	c.Header("Content-Type", "application/gzip")
+	c.Header("Content-Length", strconv.FormatInt(archiveInfo.Size(), 10))
+	c.Header("Cache-Control", "no-store")
+	c.Header("Accept-Ranges", "none")
+	c.Header("X-WebSSH-File-Size", strconv.FormatInt(archiveInfo.Size(), 10))
+	c.Header("X-WebSSH-Download-Kind", "directory-archive")
+	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-File-Size, X-WebSSH-Download-Kind")
+	c.Status(http.StatusOK)
+	copied, copyErr := io.Copy(c.Writer, requestContextReader{ctx: c.Request.Context(), r: archiveFile})
+	if copyErr == nil && copied != archiveInfo.Size() {
+		copyErr = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", copied, archiveInfo.Size())
+	}
+	if copyErr != nil {
+		responseBody.Msg = copyErr.Error()
+		_ = c.Error(copyErr)
+		c.Abort()
+	}
+}
+
 func DownloadFile(c *gin.Context) *ResponseBody {
 	var (
 		sshClient core.SSHClient
@@ -695,8 +1264,6 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer sshClient.Close()
-	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
-	defer stopCancellation()
 	if path == "" {
 		path = detectHomeDir(sshClient.Sftp, sshClient.Username)
 	}
@@ -706,11 +1273,17 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusInternalServerError, responseBody)
 		return &responseBody
 	}
-	if fileInfo.IsDir() {
-		responseBody.Msg = "cannot download a directory"
-		c.JSON(http.StatusBadRequest, responseBody)
+	if intentErr := validateDownloadArchiveIntent(request.Archive, fileInfo.IsDir()); intentErr != nil {
+		responseBody.Msg = intentErr.Error()
+		c.JSON(http.StatusConflict, responseBody)
 		return &responseBody
 	}
+	if fileInfo.IsDir() {
+		downloadRemoteDirectoryArchive(c, &sshClient, path, resolvedPath, &responseBody)
+		return &responseBody
+	}
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
 	if !fileInfo.Mode().IsRegular() {
 		responseBody.Msg = "only regular files can be downloaded"
 		c.JSON(http.StatusBadRequest, responseBody)
@@ -892,8 +1465,12 @@ func replaceRemoteFile(client *sftp.Client, oldPath, newPath string) error {
 }
 
 func isSFTPUnsupported(err error) bool {
+	return isSFTPStatus(err, uint32(sftp.ErrSSHFxOpUnsupported))
+}
+
+func isSFTPStatus(err error, code uint32) bool {
 	var statusErr *sftp.StatusError
-	return errors.As(err, &statusErr) && statusErr.FxCode() == sftp.ErrSSHFxOpUnsupported
+	return errors.As(err, &statusErr) && statusErr.Code == code
 }
 
 func newRemoteDownloadRequest(ctx context.Context, rawURL string) (*http.Request, error) {
@@ -1065,6 +1642,9 @@ func FileList(c *gin.Context) *ResponseBody {
 		editorMaxBytes = remoteEditorMaxBytes()
 	)
 	for _, mFile := range files {
+		if isRemoteFolderArchiveName(mFile.Name()) {
+			continue
+		}
 		info := mFile
 		isSymlink := mFile.Mode()&os.ModeSymlink != 0
 		resolveErr := error(nil)
@@ -1076,18 +1656,26 @@ func FileList(c *gin.Context) *ResponseBody {
 			}
 		}
 		isDir := resolveErr == nil && info.IsDir()
-		editable := !isSymlink && resolveErr == nil && info.Mode().IsRegular() && info.Size() <= editorMaxBytes
+		editable := resolveErr == nil && info.Mode().IsRegular() && info.Size() <= editorMaxBytes
+		downloadable := resolveErr == nil && (isDir || info.Mode().IsRegular())
 		editReason := ""
 		if !isDir && !editable {
 			switch {
 			case resolveErr != nil:
 				editReason = "符号链接目标不可访问"
-			case isSymlink:
-				editReason = "符号链接不支持在线编辑"
 			case !info.Mode().IsRegular():
 				editReason = "仅支持普通文件"
 			case info.Size() > editorMaxBytes:
 				editReason = fmt.Sprintf("文件超过在线编辑上限 %s", Bytefmt(uint64(editorMaxBytes)))
+			}
+		}
+		downloadReason := ""
+		if !downloadable {
+			switch {
+			case resolveErr != nil:
+				downloadReason = "符号链接目标不可访问"
+			case !info.Mode().IsRegular():
+				downloadReason = "仅支持下载普通文件或文件夹"
 			}
 		}
 		sizeBytes := info.Size()
@@ -1098,14 +1686,16 @@ func FileList(c *gin.Context) *ResponseBody {
 			sizeBytes = 0
 		}
 		file := File{
-			Name:       mFile.Name(),
-			IsDir:      isDir,
-			IsSymlink:  isSymlink,
-			Editable:   editable,
-			EditReason: editReason,
-			SizeBytes:  sizeBytes,
-			Size:       formatRemoteFileSize(sizeBytes, isDir),
-			ModifyTime: info.ModTime().Format("2006-01-02 15:04:05"),
+			Name:           mFile.Name(),
+			IsDir:          isDir,
+			IsSymlink:      isSymlink,
+			Editable:       editable,
+			EditReason:     editReason,
+			Downloadable:   downloadable,
+			DownloadReason: downloadReason,
+			SizeBytes:      sizeBytes,
+			Size:           formatRemoteFileSize(sizeBytes, isDir),
+			ModifyTime:     info.ModTime().Format("2006-01-02 15:04:05"),
 		}
 		fileList = append(fileList, file)
 	}

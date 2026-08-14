@@ -1,17 +1,24 @@
 package controller
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	pathpkg "path"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"webssh/core"
 
+	"github.com/gin-gonic/gin"
 	"github.com/pkg/sftp"
 )
 
@@ -45,6 +52,62 @@ func TestFormatRemoteFileSize(t *testing.T) {
 				t.Fatalf("formatRemoteFileSize(%d, %t) = %q, want %q", test.size, test.isDir, got, test.want)
 			}
 		})
+	}
+}
+
+func TestBindDownloadRequestReadsDirectoryArchiveIntent(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/file/download", strings.NewReader(`{"sshInfo":"encoded","path":"/srv/logs","archive":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	request, err := bindDownloadRequest(ctx)
+	if err != nil {
+		t.Fatalf("bindDownloadRequest() error = %v", err)
+	}
+	if request.Archive == nil || !*request.Archive {
+		t.Fatal("directory archive intent was not preserved")
+	}
+	if request.Path != "/srv/logs" {
+		t.Fatalf("request path = %q, want /srv/logs", request.Path)
+	}
+}
+
+func TestBindDownloadRequestReadsFileIntentFromLegacyForm(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/file/download", strings.NewReader("sshInfo=encoded&path=%2Fsrv%2Ffile.txt&archive=false"))
+	ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	request, err := bindDownloadRequest(ctx)
+	if err != nil {
+		t.Fatalf("bindDownloadRequest() error = %v", err)
+	}
+	if request.Archive == nil || *request.Archive {
+		t.Fatal("file download intent was not preserved")
+	}
+	if request.Path != "/srv/file.txt" {
+		t.Fatalf("request path = %q, want /srv/file.txt", request.Path)
+	}
+}
+
+func TestValidateDownloadArchiveIntentRejectsTargetTypeChanges(t *testing.T) {
+	archive := true
+	file := false
+	if err := validateDownloadArchiveIntent(&archive, true); err != nil {
+		t.Fatalf("directory intent rejected a directory: %v", err)
+	}
+	if err := validateDownloadArchiveIntent(&file, false); err != nil {
+		t.Fatalf("file intent rejected a regular file: %v", err)
+	}
+	if err := validateDownloadArchiveIntent(&archive, false); err == nil || !strings.Contains(err.Error(), "folder changed") {
+		t.Fatalf("directory-to-file change error = %v", err)
+	}
+	if err := validateDownloadArchiveIntent(&file, true); err == nil || !strings.Contains(err.Error(), "file changed") {
+		t.Fatalf("file-to-directory change error = %v", err)
+	}
+	if err := validateDownloadArchiveIntent(nil, true); err != nil {
+		t.Fatalf("legacy request without an intent should remain compatible: %v", err)
 	}
 }
 
@@ -373,6 +436,250 @@ func newEditorTestSFTPClientWithHandler(t *testing.T, handler editorTestHandler)
 	return client
 }
 
+func TestRemoteTarArchiveCommandQuotesPathsAndChecksTar(t *testing.T) {
+	sourcePath := "/srv/it's data/project"
+	archivePath := "/tmp/web ssh archive.tar.gz"
+	command := remoteTarArchiveCommand(sourcePath, archivePath)
+	if !strings.Contains(command, "command -v tar") {
+		t.Fatalf("archive command does not check tar availability: %q", command)
+	}
+	if !strings.Contains(command, "tar -czf "+shellQuote(archivePath)) {
+		t.Fatalf("archive path is not safely quoted: %q", command)
+	}
+	if !strings.Contains(command, "-C "+shellQuote(pathpkg.Dir(sourcePath))+" -- "+shellQuote(pathpkg.Base(sourcePath))) {
+		t.Fatalf("source path is not safely split and quoted: %q", command)
+	}
+}
+
+func TestPrepareRemoteDirectoryArchiveCreatesAndRemovesTemporaryArchive(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	sourceLocalPath := dir + string(os.PathSeparator) + "配置 folder"
+	if err := os.Mkdir(sourceLocalPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := editorTestRemotePath(sourceLocalPath)
+	payload := []byte("fake tar gzip payload")
+	var archivedSource string
+	archivePath, info, err := prepareRemoteDirectoryArchive(context.Background(), client, sourcePath, func(_ context.Context, source, archive string) error {
+		archivedSource = source
+		file, openErr := client.OpenFile(archive, os.O_WRONLY|os.O_TRUNC)
+		if openErr != nil {
+			return openErr
+		}
+		if _, writeErr := file.Write(payload); writeErr != nil {
+			_ = file.Close()
+			return writeErr
+		}
+		return file.Close()
+	})
+	if err != nil {
+		t.Fatalf("prepareRemoteDirectoryArchive() error = %v", err)
+	}
+	if archivedSource != sourcePath {
+		t.Fatalf("archived source = %q, want %q", archivedSource, sourcePath)
+	}
+	if info.Size() != int64(len(payload)) {
+		t.Fatalf("archive size = %d, want %d", info.Size(), len(payload))
+	}
+	archiveName := pathpkg.Base(archivePath)
+	if !strings.HasPrefix(archiveName, remoteFolderArchivePrefix) || !strings.HasSuffix(archiveName, remoteFolderArchiveSuffix) {
+		t.Fatalf("unexpected archive name %q", archiveName)
+	}
+	content, err := os.ReadFile(cleanEditorTestPath(archivePath))
+	if err != nil || string(content) != string(payload) {
+		t.Fatalf("archive content = %q, error = %v", content, err)
+	}
+	if err := removeRemoteFolderArchive(client, archivePath); err != nil {
+		t.Fatalf("removeRemoteFolderArchive() error = %v", err)
+	}
+	if _, err := os.Lstat(cleanEditorTestPath(archivePath)); !os.IsNotExist(err) {
+		t.Fatalf("temporary archive still exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestPrepareRemoteDirectoryArchiveRemovesFailedTemporaryFiles(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	sourceLocalPath := dir + string(os.PathSeparator) + "folder"
+	if err := os.Mkdir(sourceLocalPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := prepareRemoteDirectoryArchive(context.Background(), client, editorTestRemotePath(sourceLocalPath), func(_ context.Context, _, archive string) error {
+		file, openErr := client.OpenFile(archive, os.O_WRONLY|os.O_TRUNC)
+		if openErr == nil {
+			_, _ = file.Write([]byte("partial archive"))
+			_ = file.Close()
+		}
+		return errors.New("tar failed")
+	})
+	if err == nil || !strings.Contains(err.Error(), "tar failed") {
+		t.Fatalf("archive failure = %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), remoteFolderArchivePrefix) {
+			t.Fatalf("failed temporary archive was not removed: %s", entry.Name())
+		}
+	}
+}
+
+func TestWriteRemoteDirectoryArchiveViaSFTPIncludesNestedFiles(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	sourceLocalPath := dir + string(os.PathSeparator) + "project"
+	nestedLocalPath := sourceLocalPath + string(os.PathSeparator) + "nested"
+	if err := os.MkdirAll(nestedLocalPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourceLocalPath+string(os.PathSeparator)+"README.txt", []byte("hello archive\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nestedLocalPath+string(os.PathSeparator)+"配置.ini", []byte("enabled=true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := reserveRemoteFolderArchive(client, editorTestRemotePath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeRemoteFolderArchive(client, archivePath)
+	if err := writeRemoteDirectoryArchiveViaSFTP(context.Background(), client, editorTestRemotePath(sourceLocalPath), archivePath); err != nil {
+		t.Fatalf("writeRemoteDirectoryArchiveViaSFTP() error = %v", err)
+	}
+	archiveFile, err := os.Open(cleanEditorTestPath(archivePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archiveFile.Close()
+	gzipReader, err := gzip.NewReader(archiveFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	contents := make(map[string]string)
+	for {
+		header, nextErr := tarReader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			continue
+		}
+		content, readErr := io.ReadAll(tarReader)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		contents[header.Name] = string(content)
+	}
+	if contents["project/README.txt"] != "hello archive\n" {
+		t.Fatalf("README archive content = %q", contents["project/README.txt"])
+	}
+	if contents["project/nested/配置.ini"] != "enabled=true\n" {
+		t.Fatalf("nested archive content = %q", contents["project/nested/配置.ini"])
+	}
+}
+
+func TestDownloadRemoteDirectoryArchiveStreamsAndRemovesTemporaryArchive(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	sourceLocalPath := dir + string(os.PathSeparator) + "download me"
+	if err := os.MkdirAll(sourceLocalPath+string(os.PathSeparator)+"nested", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourceLocalPath+string(os.PathSeparator)+"nested"+string(os.PathSeparator)+"内容.txt", []byte("streamed archive\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	remotePath := editorTestRemotePath(sourceLocalPath)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/file/download", nil)
+	sshClient := core.SSHClient{Sftp: client}
+	responseBody := ResponseBody{Msg: "success"}
+
+	downloadRemoteDirectoryArchive(ctx, &sshClient, remotePath, remotePath, &responseBody)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("download status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("X-WebSSH-Download-Kind"); got != "directory-archive" {
+		t.Fatalf("download kind = %q", got)
+	}
+	if got := recorder.Header().Get("Content-Disposition"); !strings.Contains(got, "download%20me.tar.gz") && !strings.Contains(got, "download me.tar.gz") {
+		t.Fatalf("content disposition = %q", got)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	found := false
+	for {
+		header, nextErr := tarReader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if header.Name != "download me/nested/内容.txt" {
+			continue
+		}
+		content, readErr := io.ReadAll(tarReader)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(content) != "streamed archive\n" {
+			t.Fatalf("archived content = %q", content)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("downloaded archive did not contain the nested file")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), remoteFolderArchivePrefix) {
+			t.Fatalf("temporary archive remained after streaming: %s", entry.Name())
+		}
+	}
+}
+
+func TestRemoteFolderArchiveRejectsRootAndUnrelatedCleanupPaths(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	if _, _, err := prepareRemoteDirectoryArchive(context.Background(), client, "/", func(context.Context, string, string) error { return nil }); err == nil || !strings.Contains(err.Error(), "root directory") {
+		t.Fatalf("root archive error = %v", err)
+	}
+	if err := removeRemoteFolderArchive(client, "/tmp/unrelated.tar.gz"); err == nil || !strings.Contains(err.Error(), "invalid temporary archive path") {
+		t.Fatalf("unrelated cleanup error = %v", err)
+	}
+	if !isRemoteFolderArchiveName(".webssh-folder-0123456789abcdef01234567.tar.gz") {
+		t.Fatal("valid temporary archive name was rejected")
+	}
+	if isRemoteFolderArchiveName(".webssh-folder-not-random.tar.gz") {
+		t.Fatal("unrelated similarly named file was treated as a temporary archive")
+	}
+	if got := remoteFolderArchiveDownloadName("/srv/资料"); got != "资料.tar.gz" {
+		t.Fatalf("archive download name = %q", got)
+	}
+	if !remotePathWithin("/tmp/.webssh-folder-test.tar.gz", "/tmp") {
+		t.Fatal("archive inside the source folder was not detected")
+	}
+	if remotePathWithin("/tmp2/.webssh-folder-test.tar.gz", "/tmp") {
+		t.Fatal("sibling path was incorrectly treated as inside the source folder")
+	}
+}
+
 func TestRemoteEditorReadWriteRoundTripAndConflict(t *testing.T) {
 	client := newEditorTestSFTPClient(t)
 	dir := t.TempDir()
@@ -387,7 +694,7 @@ func TestRemoteEditorReadWriteRoundTripAndConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readRemoteTextFile() error = %v", err)
 	}
-	if opened.Content != original || opened.Version == "" {
+	if opened.Content != original || opened.Version == "" || opened.TargetPath != path {
 		t.Fatalf("unexpected opened snapshot: %#v", opened)
 	}
 
@@ -464,6 +771,66 @@ func TestRemoteEditorCreateFileAndRejectExistingTarget(t *testing.T) {
 	}
 }
 
+func TestDeleteRemoteFileRemovesFileAndRejectsDirectory(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	filePath := dir + string(os.PathSeparator) + "delete-me.txt"
+	if err := os.WriteFile(filePath, []byte("delete me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteRemoteFile(client, editorTestRemotePath(filePath)); err != nil {
+		t.Fatalf("deleteRemoteFile() error = %v", err)
+	}
+	if _, err := os.Lstat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("deleted file still exists or returned unexpected error: %v", err)
+	}
+	if err := deleteRemoteFile(client, editorTestRemotePath(dir)); err == nil || !strings.Contains(err.Error(), "directories cannot be deleted") {
+		t.Fatalf("directory delete error = %v", err)
+	}
+}
+
+func TestDeleteRemoteFileRemovesSymlinkWithoutDeletingTarget(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := dir + string(os.PathSeparator) + "target.txt"
+	linkPath := dir + string(os.PathSeparator) + "target.link"
+	if err := os.WriteFile(targetPath, []byte("keep target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{readlinks: map[string]string{
+		cleanEditorTestPath(editorTestRemotePath(linkPath)): targetPath,
+	}})
+	// The in-memory readlink mapping makes the SFTP server expose linkPath as a
+	// symlink without requiring Windows symlink privileges. Create a harmless
+	// filesystem entry at the same path so Remove has an exact link entry to
+	// remove in this test handler.
+	if err := os.WriteFile(linkPath, []byte("link placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteRemoteFile(client, editorTestRemotePath(linkPath)); err != nil {
+		t.Fatalf("deleteRemoteFile() symlink error = %v", err)
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("symlink target was removed: %v", err)
+	}
+	if _, err := os.Lstat(linkPath); !os.IsNotExist(err) {
+		t.Fatalf("symlink entry still exists or returned unexpected error: %v", err)
+	}
+}
+
+func TestDeleteRemoteFileRejectsMissingAndRootPaths(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	if err := deleteRemoteFile(client, ""); err == nil || !strings.Contains(err.Error(), "missing path") {
+		t.Fatalf("empty path error = %v", err)
+	}
+	if err := deleteRemoteFile(client, "/"); err == nil || !strings.Contains(err.Error(), "invalid file path") {
+		t.Fatalf("root path error = %v", err)
+	}
+	missing := editorTestRemotePath(t.TempDir() + string(os.PathSeparator) + "missing.txt")
+	if err := deleteRemoteFile(client, missing); err == nil || !strings.Contains(err.Error(), "file does not exist") {
+		t.Fatalf("missing file delete error = %v", err)
+	}
+}
+
 func TestRemoteEditorConcurrentStaleSavesDoNotOverwrite(t *testing.T) {
 	client := newEditorTestSFTPClient(t)
 	dir := t.TempDir()
@@ -532,22 +899,76 @@ func TestRemoteEditorTargetLockWaitCanBeCancelled(t *testing.T) {
 	release()
 }
 
-func TestRemoteEditorRejectsSymlinkAndBinaryFile(t *testing.T) {
+func TestRemoteEditorEditsSymlinkTargetAndRejectsRetarget(t *testing.T) {
 	dir := t.TempDir()
-	textLocalPath := dir + string(os.PathSeparator) + "text.txt"
+	firstTargetPath := dir + string(os.PathSeparator) + "first.txt"
+	secondTargetPath := dir + string(os.PathSeparator) + "second.txt"
 	linkLocalPath := dir + string(os.PathSeparator) + "link.txt"
-	binaryLocalPath := dir + string(os.PathSeparator) + "binary.dat"
 	linkPath := editorTestRemotePath(linkLocalPath)
-	binaryPath := editorTestRemotePath(binaryLocalPath)
-	if err := os.WriteFile(textLocalPath, []byte("text"), 0o600); err != nil {
+	firstTarget := editorTestRemotePath(firstTargetPath)
+	secondTarget := editorTestRemotePath(secondTargetPath)
+	if err := os.WriteFile(firstTargetPath, []byte("first target\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{readlinks: map[string]string{
-		cleanEditorTestPath(linkPath): textLocalPath,
-	}})
-	if _, readErr := readRemoteTextFile(client, linkPath, defaultRemoteEditorMaxBytes); readErr == nil || !strings.Contains(readErr.Error(), "symbolic links") {
-		t.Fatalf("symlink read error = %v", readErr)
+	if err := os.WriteFile(secondTargetPath, []byte("second target\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	handler := editorTestHandler{readlinks: map[string]string{cleanEditorTestPath(linkPath): firstTarget}}
+	client := newEditorTestSFTPClientWithHandler(t, handler)
+	opened, err := readRemoteTextFile(client, linkPath, defaultRemoteEditorMaxBytes)
+	if err != nil {
+		t.Fatalf("readRemoteTextFile() symlink error = %v", err)
+	}
+	if opened.TargetPath != firstTarget || opened.Content != "first target\n" {
+		t.Fatalf("unexpected symlink snapshot: %#v", opened)
+	}
+	saved, err := writeRemoteTextFileTarget(client, linkPath, []byte("edited through link\n"), opened.Version, opened.TargetPath, defaultRemoteEditorMaxBytes)
+	if err != nil {
+		t.Fatalf("writeRemoteTextFileTarget() symlink error = %v", err)
+	}
+	if saved.TargetPath != firstTarget {
+		t.Fatalf("saved target = %q, want %q", saved.TargetPath, firstTarget)
+	}
+	if content, readErr := os.ReadFile(firstTargetPath); readErr != nil || string(content) != "edited through link\n" {
+		t.Fatalf("symlink target content = %q, error = %v", content, readErr)
+	}
+	if _, exists := handler.readlinks[cleanEditorTestPath(linkPath)]; !exists {
+		t.Fatal("editing removed the symbolic link")
+	}
+
+	handler.readlinks[cleanEditorTestPath(linkPath)] = secondTarget
+	if _, err := writeRemoteTextFileTarget(client, linkPath, []byte("must not touch second\n"), saved.Version, firstTarget, defaultRemoteEditorMaxBytes); err == nil || !strings.Contains(err.Error(), "symbolic link target changed") {
+		t.Fatalf("retargeted symlink save error = %v", err)
+	}
+	if content, readErr := os.ReadFile(secondTargetPath); readErr != nil || string(content) != "second target\n" {
+		t.Fatalf("retargeted file was modified: content=%q error=%v", content, readErr)
+	}
+}
+
+func TestRemoteSnapshotDataPreservesLinkAndResolvedTargetPaths(t *testing.T) {
+	data := remoteSnapshotData("/etc/nginx/dujiao-next.conf", remoteFileSnapshot{
+		Content:    "server {}\n",
+		Version:    "version-1",
+		TargetPath: "/etc/nginx/sites-available/dujiao-next.conf",
+		Mode:       0o640,
+		Modified:   time.Unix(123, 0),
+	}, defaultRemoteEditorMaxBytes)
+	if got := data["path"]; got != "/etc/nginx/dujiao-next.conf" {
+		t.Fatalf("response path = %v", got)
+	}
+	if got := data["targetPath"]; got != "/etc/nginx/sites-available/dujiao-next.conf" {
+		t.Fatalf("response targetPath = %v", got)
+	}
+	if got := data["isSymlink"]; got != true {
+		t.Fatalf("response isSymlink = %v", got)
+	}
+}
+
+func TestRemoteEditorRejectsBinaryFile(t *testing.T) {
+	dir := t.TempDir()
+	binaryLocalPath := dir + string(os.PathSeparator) + "binary.dat"
+	binaryPath := editorTestRemotePath(binaryLocalPath)
+	client := newEditorTestSFTPClient(t)
 	if err := os.WriteFile(binaryLocalPath, []byte{'a', 0, 'b'}, 0o600); err != nil {
 		t.Fatal(err)
 	}

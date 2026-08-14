@@ -15,6 +15,7 @@ var remoteEditorCloseRequest = null;
 var remoteEditorZIndex = 40;
 var remoteEditorBoundsObserver = null;
 var sftpDownloadConfirmRequest = null;
+var sftpDeleteConfirmRequest = null;
 var serverInfoModalIdx = -1;
 var serverInfoTimer = null;
 var serverInfoSelectedIface = {};
@@ -217,6 +218,8 @@ document.addEventListener('keydown', function (e) {
         if (scriptDeleteModal && scriptDeleteModal.classList.contains('show')) { hideScriptDeleteModal(); return; }
         var categoryDeleteModal = document.getElementById('categoryDeleteModal');
         if (categoryDeleteModal && categoryDeleteModal.classList.contains('show')) { hideCategoryDeleteModal(); return; }
+        var siteBookmarkRestoreModal = document.getElementById('siteBookmarkRestoreModal');
+        if (siteBookmarkRestoreModal && siteBookmarkRestoreModal.classList.contains('show')) { hideSiteScriptRestoreConfirm(); return; }
         var scriptManagerModal = document.getElementById('scriptManagerModal');
         if (scriptManagerModal && scriptManagerModal.classList.contains('show')) { hideScriptManager(); return; }
         var authModal = document.getElementById('authModal');
@@ -235,6 +238,8 @@ document.addEventListener('keydown', function (e) {
         if (remoteEditorCloseModal && remoteEditorCloseModal.classList.contains('show')) { cancelRemoteEditorClose(); return; }
         var sftpDownloadConfirmModal = document.getElementById('sftpDownloadConfirmModal');
         if (sftpDownloadConfirmModal && sftpDownloadConfirmModal.classList.contains('show')) { hideSftpDownloadConfirm(); return; }
+        var sftpDeleteConfirmModal = document.getElementById('sftpDeleteConfirmModal');
+        if (sftpDeleteConfirmModal && sftpDeleteConfirmModal.classList.contains('show')) { hideSftpDeleteConfirm(); return; }
     }
 });
 
@@ -549,6 +554,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _sftpDirGeneration: 0,
         _sftpDirController: null,
         _sftpRemoteController: null,
+        _sftpDeleteController: null,
         _sftpUploadControllers: [],
         _sftpDownloads: [],
         _remoteEditorControllers: []
@@ -2269,6 +2275,7 @@ var scriptSearchIndex = [];
 var MAX_SCRIPT_BOOKMARKS = 500;
 var MAX_SCRIPT_CATEGORIES = 100;
 var MAX_SCRIPT_COMMAND_CHARS = 20000;
+var MAX_SITE_SCRIPT_BACKUP_BYTES = 256 * 1024 * 1024;
 var EMOJI_OPTIONS = ['🛠️','⚙️','🔧','🔨','🧰','💻','🖥️','⌨️','🖱️','📦','🐳','☁️','🌐','🛰️','📡','🔐','🛡️','🔑','🚀','⚡','🔥','💡','🧪','🧹','🗄️','💾','📊','📈','🔍','📝','📌','⭐','✅','🚨','🩺','🔄','⬆️','⬇️','🐧','🍎','🤖','👾','🎯','🏠','🏢','🧱','🔌','🕸️','🧭','⏱️','📁','📜','🪄','🎨','🌈','💎','❤️','💚','💙','🟣'];
 var currentAccount = null;
 var authMode = 'login';
@@ -2298,6 +2305,8 @@ var pendingDeleteCategoryId = '';
 var pendingDeleteScriptIndex = -1;
 var pendingDeleteScriptId = '';
 var scriptManagerPreserveDrawer = false;
+var pendingSiteScriptBackup = null;
+var siteScriptRestoreInProgress = false;
 var editingManagedAccount = null;
 var versionUpdatePollTimer = null;
 
@@ -2477,6 +2486,22 @@ function getScriptCategory(id, categories) {
     return null;
 }
 
+function downloadScriptBackupJSON(data, filename) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.dataset.keepScriptDrawer = '1';
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    preserveScriptDrawerAfterCategoryChange();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    preserveScriptDrawerAfterCategoryChange();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
 function exportScriptBookmarks() {
     var scripts = loadBM(SBK);
     var categories = loadScriptCategories();
@@ -2484,27 +2509,17 @@ function exportScriptBookmarks() {
     var data = {
         app: 'webssh2',
         type: 'script_bookmarks',
-        version: 2,
+        scope: 'personal',
+        version: 3,
+        account: scriptAccountName(currentAccount),
         exportedAt: new Date().toISOString(),
         origin: location.origin,
         updatedAt: getScriptUpdatedAt(),
         categories: categories,
         scripts: scripts
     };
-    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.dataset.keepScriptDrawer = '1';
-    a.style.display = 'none';
     var stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    a.href = url;
-    a.download = 'webssh-script-bookmarks-' + stamp + '.json';
-    preserveScriptDrawerAfterCategoryChange();
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    preserveScriptDrawerAfterCategoryChange();
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    downloadScriptBackupJSON(data, 'webssh-personal-bookmarks-' + stamp + '.json');
     showToast('导出成功：' + scripts.length + ' 个脚本，' + categories.length + ' 个分类', 'success');
 }
 
@@ -2515,6 +2530,22 @@ function triggerScriptImport() {
     input.value = '';
     input.click();
     preserveScriptDrawerAfterCategoryChange();
+}
+
+function classifyScriptBookmarkBackup(data) {
+    if (Array.isArray(data)) return 'personal';
+    if (!data || typeof data !== 'object') return 'unknown';
+    var type = typeof data.type === 'string' ? data.type.trim().toLowerCase() : '';
+    var scope = typeof data.scope === 'string' ? data.scope.trim().toLowerCase() : '';
+    if (type === 'site_script_bookmarks_backup' || scope === 'site') return 'site';
+    if (Array.isArray(data.users) && data.users.some(function (user) {
+        return user && typeof user === 'object' && (Array.isArray(user.scripts) || Array.isArray(user.categories));
+    })) return 'site';
+    if (type === 'script_bookmarks' || scope === 'personal') return 'personal';
+    if (Array.isArray(data.scripts) || Array.isArray(data[SBK])) return 'personal';
+    if (data.storage && (Array.isArray(data.storage[SBK]) || Array.isArray(data.storage[SCAT]))) return 'personal';
+    if (data.bookmarks && (Array.isArray(data.bookmarks.scripts) || Array.isArray(data.bookmarks.categories))) return 'personal';
+    return 'unknown';
 }
 
 function extractImportedScripts(data) {
@@ -2645,6 +2676,10 @@ function importScriptBookmarks(input) {
     reader.onload = function () {
         try {
             var data = JSON.parse(reader.result);
+            if (classifyScriptBookmarkBackup(data) === 'site') {
+                showToast('这是全站书签备份，不能导入到个人书签。请使用管理员区域的“恢复全站备份”', 'error');
+                return;
+            }
             var result = buildImportedScriptWorkspace(data);
             if (!result) { showToast('本地书签数据损坏，导入已停止以避免覆盖原数据', 'error'); return; }
             if (!result.added && !result.categoryAdded) { showToast('未找到可导入的脚本书签或分类', 'error'); return; }
@@ -2676,6 +2711,142 @@ function importScriptBookmarks(input) {
     reader.readAsText(file, 'utf-8');
 }
 
+function summarizeSiteScriptBackup(data) {
+    var users = data && Array.isArray(data.users) ? data.users : [];
+    var summary = { users: users.length, scripts: 0, categories: 0, exportedAt: '' };
+    users.forEach(function (user) {
+        summary.scripts += user && Array.isArray(user.scripts) ? user.scripts.length : 0;
+        summary.categories += user && Array.isArray(user.categories) ? user.categories.length : 0;
+    });
+    if (data && typeof data.exportedAt === 'string') {
+        var exportedAt = new Date(data.exportedAt);
+        summary.exportedAt = isNaN(exportedAt.getTime()) ? data.exportedAt : exportedAt.toLocaleString();
+    }
+    return summary;
+}
+
+function exportSiteScriptBookmarks() {
+    if (!requireAdminAccountAccess()) return;
+    var button = document.getElementById('siteBookmarkExportBtn');
+    if (button) button.disabled = true;
+    apiJSON('/api/admin/bookmarks/backup')
+        .then(function (res) {
+            var data = res.data || {};
+            var backup = data.backup;
+            if (classifyScriptBookmarkBackup(backup) !== 'site') {
+                throw { msg: '服务器返回的全站书签备份格式不正确' };
+            }
+            var stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            downloadScriptBackupJSON(backup, 'webssh-site-bookmarks-' + stamp + '.json');
+            showToast('全站备份已导出：' + (data.userCount || 0) + ' 个用户，' + (data.scriptCount || 0) + ' 个脚本', 'success');
+        })
+        .catch(function (err) { showToast(err.msg || '全站书签备份导出失败', 'error'); })
+        .finally(function () { if (button) button.disabled = false; });
+}
+
+function triggerSiteScriptImport() {
+    if (!requireAdminAccountAccess()) return;
+    var input = document.getElementById('siteBookmarkImportFile');
+    if (!input) { showToast('全站备份导入控件未找到', 'error'); return; }
+    input.value = '';
+    input.click();
+}
+
+function importSiteScriptBookmarks(input) {
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    if (file.size > MAX_SITE_SCRIPT_BACKUP_BYTES) {
+        input.value = '';
+        showToast('全站书签备份超过 256 MiB 上限，无法导入', 'error');
+        return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+        try {
+            var data = JSON.parse(reader.result);
+            var kind = classifyScriptBookmarkBackup(data);
+            if (kind === 'personal') {
+                showToast('这是个人书签备份，不能用于全站恢复。请使用“导入个人备份”', 'error');
+                return;
+            }
+            if (kind !== 'site' || data.app !== 'webssh2' || data.type !== 'site_script_bookmarks_backup' || data.scope !== 'site') {
+                showToast('文件不是有效的 WebSSH2 全站书签备份', 'error');
+                return;
+            }
+            if (parseInt(data.version, 10) !== 1 || !Array.isArray(data.users)) {
+                showToast('不支持这个全站书签备份版本或文件内容不完整', 'error');
+                return;
+            }
+            pendingSiteScriptBackup = data;
+            showSiteScriptRestoreConfirm(data);
+        } catch (e) {
+            showToast('导入失败：JSON 文件无效', 'error');
+        } finally {
+            input.value = '';
+        }
+    };
+    reader.onerror = function () {
+        input.value = '';
+        showToast('导入失败：无法读取全站备份文件', 'error');
+    };
+    reader.readAsText(file, 'utf-8');
+}
+
+function showSiteScriptRestoreConfirm(data) {
+    var modal = document.getElementById('siteBookmarkRestoreModal');
+    if (!modal) return;
+    var summary = summarizeSiteScriptBackup(data);
+    var users = document.getElementById('siteRestoreUserCount');
+    var scripts = document.getElementById('siteRestoreScriptCount');
+    var categories = document.getElementById('siteRestoreCategoryCount');
+    var exportedAt = document.getElementById('siteRestoreExportedAt');
+    if (users) users.textContent = String(summary.users);
+    if (scripts) scripts.textContent = String(summary.scripts);
+    if (categories) categories.textContent = String(summary.categories);
+    if (exportedAt) exportedAt.textContent = summary.exportedAt || '未提供';
+    modal.classList.add('show');
+}
+
+function hideSiteScriptRestoreConfirm() {
+    if (siteScriptRestoreInProgress) return;
+    var modal = document.getElementById('siteBookmarkRestoreModal');
+    if (modal) modal.classList.remove('show');
+    pendingSiteScriptBackup = null;
+}
+
+function confirmSiteScriptRestore() {
+    if (siteScriptRestoreInProgress || !pendingSiteScriptBackup) return;
+    if (!requireAdminAccountAccess()) return;
+    var backup = pendingSiteScriptBackup;
+    var button = document.getElementById('siteBookmarkRestoreConfirmBtn');
+    siteScriptRestoreInProgress = true;
+    if (button) {
+        button.disabled = true;
+        button.textContent = '正在恢复...';
+    }
+    cancelPendingScriptSync();
+    apiJSON('/api/admin/bookmarks/restore', { method: 'POST', body: backup })
+        .then(function (res) {
+            var data = res.data || {};
+            siteScriptRestoreInProgress = false;
+            hideSiteScriptRestoreConfirm();
+            var message = '已恢复 ' + (data.restoredUsers || 0) + ' 个用户的书签（' + (data.scriptCount || 0) + ' 个脚本、' + (data.categoryCount || 0) + ' 个分类）';
+            if (data.skippedUsers) message += '；跳过 ' + data.skippedUsers + ' 个当前网站不存在的用户';
+            showToast(message, 'success');
+            if (data.currentAccountRestored) syncScriptBookmarks('pull', true);
+        })
+        .catch(function (err) {
+            siteScriptRestoreInProgress = false;
+            showToast(err.msg || '全站书签恢复失败，原数据未改变', 'error');
+        })
+        .finally(function () {
+            if (button) {
+                button.disabled = false;
+                button.textContent = '确认恢复对应用户';
+            }
+        });
+}
+
 var _cloudStatusTimer = null;
 function hideCloudStatus() {
     if (_cloudStatusTimer) {
@@ -2703,6 +2874,7 @@ function setCloudStatus(text, cls, autoHideMs) {
 }
 
 function updateAccountUI() {
+    var isAdminAccount = !!(currentAccount && currentAccount.isAdmin);
     var btn = document.getElementById('scriptAccountBtn');
     if (btn) {
         if (currentAccount && currentAccount.username) {
@@ -2715,8 +2887,11 @@ function updateAccountUI() {
     }
     var adminBtn = document.getElementById('accountAdminBtn');
     if (adminBtn) {
-        adminBtn.classList.toggle('show', !!(currentAccount && currentAccount.isAdmin));
+        adminBtn.classList.toggle('show', isAdminAccount);
     }
+    var siteBackupSection = document.getElementById('siteBookmarkBackupSection');
+    if (siteBackupSection) siteBackupSection.hidden = !isAdminAccount;
+    if (!isAdminAccount && !siteScriptRestoreInProgress) hideSiteScriptRestoreConfirm();
     var loggedIn = document.getElementById('authLoggedIn');
     var loggedOut = document.getElementById('authLoggedOut');
     var name = document.getElementById('authUserName');
@@ -2730,6 +2905,7 @@ function updateAccountUI() {
         if (loggedOut) loggedOut.style.display = '';
         hideCloudStatus();
     }
+    updateScriptManagerSummary();
 }
 
 function clearPasswordChangeForm() {
@@ -3377,6 +3553,34 @@ function syncScriptBookmarks(mode, silent, retryCount, conflictMerged) {
             if (err && err.code === 'account_changed') {
                 cancelPendingScriptSync();
                 refreshAccountState();
+                return;
+            }
+            if (err && err.code === 'workspace_restored') {
+                if (!scriptSyncSnapshotIsCurrent(snapshot)) {
+                    syncLocalScriptsIfLogged(0);
+                    return;
+                }
+                var restored = err.data || {};
+                var restoredAt = parseInt(restored.updatedAt, 10);
+                if (!Array.isArray(restored.scripts) || !Array.isArray(restored.categories) || !isFinite(restoredAt) || restoredAt < 0) {
+                    showToast('管理员恢复后的云端书签响应无效，本地数据未改动', 'error');
+                    return;
+                }
+                if (typeof isScriptStorageCorrupt === 'function' && isScriptStorageCorrupt()) {
+                    showToast('本地书签数据损坏，无法安全采用管理员恢复的云端副本', 'error');
+                    return;
+                }
+                var restoredScripts = normalizeCloudScripts(restored.scripts);
+                var restoredCategories = normalizeScriptCategories(restored.categories);
+                cleanScriptCategoryReferences(restoredScripts, restoredCategories);
+                if (!saveScriptWorkspaceAtomically(restoredScripts, restoredCategories, restoredAt, restored.revision, true)) {
+                    showToast('浏览器存储失败，尚未采用管理员恢复的云端书签', 'error');
+                    return;
+                }
+                refreshActiveScriptWorkspaceUI();
+                updateAccountUI();
+                setCloudStatus('已采用管理员恢复的云端书签', 'synced', 5000);
+                showToast('管理员已恢复全站书签，本标签页已切换到恢复后的云端副本', 'info');
                 return;
             }
             if (err && err.code === 'revision_conflict' && retryCount < 2 && scriptSyncSnapshotIsCurrent(snapshot)) {
@@ -4119,6 +4323,7 @@ function openScriptManager(tab) {
     if (pageSize) pageSize.value = String(categoryManagerPageSize);
     renderEmojiPicker();
     renderCategoryManager();
+    updateAccountUI();
     updateScriptManagerSummary();
     switchScriptManagerTab(tab || 'bookmarks');
     modal.classList.add('show');
@@ -4146,7 +4351,11 @@ function updateScriptManagerSummary(scriptCount, categoryCount) {
     if (!el) return;
     if (typeof scriptCount !== 'number') scriptCount = loadBM(SBK).length;
     if (typeof categoryCount !== 'number') categoryCount = loadScriptCategories().length;
-    el.innerHTML = '<span><b>' + scriptCount + '</b> 个脚本</span><span><b>' + categoryCount + '</b> 个分类</span><span>' + (currentAccount ? ('已登录 ' + esc(currentAccount.username)) : '仅保存在本机') + '</span>';
+    var accountName = currentAccount ? esc(currentAccount.username) : '未登录';
+    var accountLabel = currentAccount ? (currentAccount.isAdmin ? '当前账号 · 管理员' : '当前账号') : '仅保存在本机';
+    el.innerHTML = '<div class="script-manager-stat"><b>' + scriptCount + '</b><span>我的脚本</span></div>' +
+        '<div class="script-manager-stat"><b>' + categoryCount + '</b><span>我的分类</span></div>' +
+        '<div class="script-manager-stat account"><b>' + accountName + '</b><span>' + accountLabel + '</span></div>';
 }
 
 function renderEmojiPicker() {
@@ -4384,6 +4593,12 @@ function cancelSessionSftpRequests(session, cancelDownloads) {
     if (!session) return;
     cancelSessionSftpBrowsing(session);
     abortSessionController(session, '_sftpRemoteController');
+    abortSessionController(session, '_sftpDeleteController');
+    if (sftpDeleteConfirmRequest && sftpDeleteConfirmRequest.sessionId === session.id) {
+        if (sftpDeleteConfirmRequest.editor) setRemoteEditorDeletePending(sftpDeleteConfirmRequest.editor, false, '删除请求已取消', 'warn');
+        sftpDeleteConfirmRequest.deleting = false;
+        hideSftpDeleteConfirm(true);
+    }
     (session._remoteEditorControllers || []).forEach(function (controller) {
         try { controller.abort(); } catch (e) { }
     });
@@ -4441,14 +4656,15 @@ function sftpLoad(path, session) {
                 var fpArg = escAttr(JSON.stringify(fp));
                 var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
                 var sizeBytes = Math.max(0, parseInt(f.SizeBytes, 10) || 0);
-                var downloadable = !isDir && !(f.IsSymlink && f.EditReason === '符号链接目标不可访问');
+                var downloadable = !!f.Downloadable;
                 var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : (downloadable ? 'onclick="sftpDownload(' + fpArg + ',' + sizeBytes + ')"' : '');
                 var editTitle = f.Editable ? '在线编辑' : (f.EditReason || '此文件不支持在线编辑');
                 var edit = isDir ? '' : '<button class="sftp-edit' + (f.Editable ? '' : ' disabled') + '" ' + (f.Editable ? 'onclick="event.stopPropagation();openRemoteEditor(' + fpArg + ')"' : 'data-message="' + escAttr(editTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(editTitle) + '" aria-label="' + escAttr(editTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
-                var dlTitle = downloadable ? '下载' : (isDir ? '无法下载目录' : '符号链接目标不可访问');
-                var dl = isDir ? '' : '<button class="sftp-dl' + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + sizeBytes + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+                var dlTitle = downloadable ? (isDir ? '压缩并下载文件夹' : '下载') : (f.DownloadReason || '此项目不支持下载');
+                var dl = '<button class="sftp-dl' + (isDir ? ' directory' : '') + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + (isDir ? 0 : sizeBytes) + ',' + (isDir ? 'true' : 'false') + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+                var del = isDir ? '' : '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ')" title="删除" aria-label="' + escAttr('删除 ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
                 var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
-                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + edit + dl + '</div>';
+                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + edit + dl + del + '</div>';
             }).join('');
         })
         .catch(function (err) {
@@ -4470,15 +4686,23 @@ function sftpUp() {
     sftpLoad(i <= 0 ? '/' : p.substring(0, i), session);
 }
 
-function sftpDownload(path, sizeBytes) {
+function sftpDownload(path, sizeBytes, isDirectory) {
     var session = getActiveSession();
     if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     path = normalizeRemoteFilePath(path);
     if (!path) { showToast('文件路径无效', 'error'); return; }
-    sftpDownloadConfirmRequest = { sessionId: session.id, path: path, size: Math.max(0, parseInt(sizeBytes, 10) || 0), name: path.split('/').pop() || 'download', fileHandle: null };
+    var sourceName = path.split('/').pop() || 'download';
+    isDirectory = !!isDirectory;
+    sftpDownloadConfirmRequest = { sessionId: session.id, path: path, size: isDirectory ? 0 : Math.max(0, parseInt(sizeBytes, 10) || 0), name: isDirectory ? sourceName + '.tar.gz' : sourceName, sourceName: sourceName, isDirectory: isDirectory, fileHandle: null };
+    var title = document.getElementById('sftpDownloadConfirmTitle');
+    var description = document.getElementById('sftpDownloadConfirmDescription');
+    var sizeLabel = document.getElementById('sftpDownloadConfirmSizeLabel');
+    if (title) title.textContent = isDirectory ? '确认压缩并下载文件夹' : '确认下载文件';
+    if (description) description.textContent = isDirectory ? '确认后先在远端服务器生成临时压缩包，再下载到本地。' : '确认后开始从远端服务器下载此文件。';
+    if (sizeLabel) sizeLabel.textContent = isDirectory ? '压缩包大小' : '文件大小';
     document.getElementById('sftpDownloadConfirmName').textContent = sftpDownloadConfirmRequest.name;
     document.getElementById('sftpDownloadConfirmPath').textContent = path;
-    document.getElementById('sftpDownloadConfirmSize').textContent = sftpDownloadConfirmRequest.size ? fmtB(sftpDownloadConfirmRequest.size) : '读取响应后确定';
+    document.getElementById('sftpDownloadConfirmSize').textContent = isDirectory ? '压缩完成后确定' : (sftpDownloadConfirmRequest.size ? fmtB(sftpDownloadConfirmRequest.size) : '读取响应后确定');
     updateSftpDownloadConfirmHint(sftpDownloadConfirmRequest);
     var confirmButton = document.getElementById('sftpDownloadConfirmButton');
     if (confirmButton) { confirmButton.disabled = false; confirmButton.textContent = '确认下载'; }
@@ -4488,6 +4712,132 @@ function sftpDownload(path, sizeBytes) {
 function showSftpFileActionMessage(event) {
     var target = event && event.currentTarget;
     if (target && target.dataset && target.dataset.message) showToast(target.dataset.message, 'info');
+}
+
+function setSftpDeleteConfirmBusy(busy) {
+    var confirmButton = document.getElementById('sftpDeleteConfirmButton');
+    var cancelButton = document.getElementById('sftpDeleteCancelButton');
+    var closeButton = document.getElementById('sftpDeleteCloseButton');
+    if (confirmButton) { confirmButton.disabled = !!busy; confirmButton.textContent = busy ? '删除中…' : '确认删除'; }
+    if (cancelButton) cancelButton.disabled = !!busy;
+    if (closeButton) closeButton.disabled = !!busy;
+}
+
+function setRemoteEditorDeletePending(editor, pending, statusText, statusType) {
+    if (!editor || remoteEditors.indexOf(editor) < 0) return;
+    var saveButton = editor.el && editor.el.querySelector ? editor.el.querySelector('[data-editor-action="save"]') : null;
+    if (pending) {
+        editor.deletePending = true;
+        editor.deletePreviousReadOnly = !!(editor.textarea && editor.textarea.readOnly);
+        if (editor.textarea) editor.textarea.readOnly = true;
+        if (saveButton) saveButton.disabled = true;
+    } else {
+        editor.deletePending = false;
+        if (editor.textarea) editor.textarea.readOnly = !!editor.deletePreviousReadOnly;
+        delete editor.deletePreviousReadOnly;
+        if (saveButton) saveButton.disabled = false;
+    }
+    if (statusText) remoteEditorSetStatus(editor, statusText, statusType || 'info');
+}
+
+function requestSftpDelete(path) {
+    var session = getActiveSession();
+    if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    path = normalizeRemoteFilePath(path);
+    if (!path || path === '/') { showToast('文件路径无效', 'error'); return; }
+    var editor = remoteEditorFor(session, path);
+    if (editor && (remoteEditorIsDirty(editor) || editor.saving || editor.deletePending)) {
+        restoreRemoteEditor(editor);
+        showToast('该文件有未保存的修改，请先保存或关闭编辑器', 'error');
+        return;
+    }
+    if (editor && (!editor.loaded || editor.controller)) {
+        restoreRemoteEditor(editor);
+        showToast('该文件仍在打开中，请稍后再删除', 'info');
+        return;
+    }
+    var slash = path.lastIndexOf('/');
+    sftpDeleteConfirmRequest = {
+        sessionId: session.id,
+        path: path,
+        parentPath: normalizeSftpDir(slash <= 0 ? '/' : path.substring(0, slash)),
+        name: path.substring(slash + 1) || path,
+        deleting: false,
+        controller: null,
+        editor: editor || null
+    };
+    document.getElementById('sftpDeleteConfirmName').textContent = sftpDeleteConfirmRequest.name;
+    document.getElementById('sftpDeleteConfirmPath').textContent = path;
+    var status = document.getElementById('sftpDeleteConfirmStatus');
+    if (status) { status.textContent = '删除后无法恢复，请确认远端路径无误。'; status.className = 'sftp-delete-confirm-status'; }
+    setSftpDeleteConfirmBusy(false);
+    document.getElementById('sftpDeleteConfirmModal').classList.add('show');
+    var confirmButton = document.getElementById('sftpDeleteConfirmButton');
+    if (confirmButton) setTimeout(function () { confirmButton.focus(); }, 0);
+}
+
+function hideSftpDeleteConfirm(force) {
+    if (sftpDeleteConfirmRequest && sftpDeleteConfirmRequest.deleting && !force) return;
+    sftpDeleteConfirmRequest = null;
+    var modal = document.getElementById('sftpDeleteConfirmModal');
+    if (modal) modal.classList.remove('show');
+    setSftpDeleteConfirmBusy(false);
+}
+
+function confirmSftpDelete() {
+    var request = sftpDeleteConfirmRequest;
+    if (!request || request.deleting) return Promise.resolve(false);
+    var session = getSessionById(request.sessionId);
+    if (!session || !session._connected) {
+        showToast('SSH 连接尚未就绪', 'error');
+        hideSftpDeleteConfirm(true);
+        return Promise.resolve(false);
+    }
+    var editor = remoteEditorFor(session, request.path);
+    if (editor && (remoteEditorIsDirty(editor) || editor.saving || editor.deletePending || !editor.loaded || editor.controller)) {
+        hideSftpDeleteConfirm(true);
+        restoreRemoteEditor(editor);
+        showToast('文件编辑状态已变化，请先保存或关闭编辑器', 'error');
+        return Promise.resolve(false);
+    }
+    request.editor = editor || null;
+    request.deleting = true;
+    setSftpDeleteConfirmBusy(true);
+    var status = document.getElementById('sftpDeleteConfirmStatus');
+    if (status) { status.textContent = '正在删除远端文件…'; status.className = 'sftp-delete-confirm-status working'; }
+    if (request.editor) setRemoteEditorDeletePending(request.editor, true, '正在删除远端文件…', 'warn');
+    abortSessionController(session, '_sftpDeleteController');
+    var controller = new AbortController();
+    request.controller = controller;
+    session._sftpDeleteController = controller;
+    return remoteEditorRequest('/file/delete', { sshInfo: session.sshInfo, path: request.path }, controller.signal)
+        .then(function () {
+            if (sftpDeleteConfirmRequest !== request) return false;
+            request.deleting = false;
+            request.controller = null;
+            if (request.editor && remoteEditors.indexOf(request.editor) >= 0) destroyRemoteEditor(request.editor);
+            hideSftpDeleteConfirm(true);
+            showToast('已删除: ' + request.name, 'success');
+            if (sessions.indexOf(session) >= 0 && session._connected && normalizeSftpDir(session.sftpPath || '/') === request.parentPath) {
+                sftpLoad(request.parentPath, session);
+            }
+            return true;
+        })
+        .catch(function (err) {
+            if (sftpDeleteConfirmRequest !== request) return false;
+            request.deleting = false;
+            request.controller = null;
+            setSftpDeleteConfirmBusy(false);
+            var aborted = requestWasAborted(err);
+            var message = aborted ? '删除请求已中断，请刷新目录确认文件状态。' : ((err && err.msg) || '删除失败');
+            if (status) { status.textContent = message; status.className = 'sftp-delete-confirm-status error'; }
+            if (request.editor) setRemoteEditorDeletePending(request.editor, false, aborted ? '删除请求已中断' : '删除失败，文件仍在编辑器中', aborted ? 'warn' : 'error');
+            if (!aborted) showToast(message, 'error');
+            return false;
+        })
+        .finally(function () {
+            if (session._sftpDeleteController === controller) session._sftpDeleteController = null;
+        });
 }
 
 function hideSftpDownloadConfirm() {
@@ -4505,12 +4855,12 @@ function confirmSftpDownload() {
     if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     if (!request.fileHandle && !sftpDownloadPickerAvailable()) {
         hideSftpDownloadConfirm();
-        startSftpDownload(session, request.path, request.size, request.name, null);
+        startSftpDownload(session, request.path, request.size, request.name, null, request.isDirectory);
         return;
     }
     if (request.fileHandle) {
         hideSftpDownloadConfirm();
-        startSftpDownload(session, request.path, request.size, request.name, request.fileHandle);
+        startSftpDownload(session, request.path, request.size, request.name, request.fileHandle, request.isDirectory);
         return;
     }
     var confirmButton = document.getElementById('sftpDownloadConfirmButton');
@@ -4526,14 +4876,14 @@ function confirmSftpDownload() {
     Promise.resolve(picker).then(function (fileHandle) {
         if (sftpDownloadConfirmRequest !== request) return;
         hideSftpDownloadConfirm();
-        startSftpDownload(session, request.path, request.size, request.name, fileHandle);
+        startSftpDownload(session, request.path, request.size, request.name, fileHandle, request.isDirectory);
     }).catch(function (err) {
         if (confirmButton) { confirmButton.disabled = false; confirmButton.textContent = '确认下载'; }
         if (err && err.name === 'AbortError') return;
         if (sftpDownloadConfirmRequest !== request) return;
         hideSftpDownloadConfirm();
         showToast('浏览器无法直接写入所选位置，已切换兼容下载', 'info');
-        startSftpDownload(session, request.path, request.size, request.name, null);
+        startSftpDownload(session, request.path, request.size, request.name, null, request.isDirectory);
     });
 }
 
@@ -4544,7 +4894,9 @@ function sftpDownloadPickerAvailable() {
 function updateSftpDownloadConfirmHint(request) {
     var hint = document.getElementById('sftpDownloadConfirmHint');
     if (!hint) return;
-    if (request && request.fileHandle) {
+    if (request && request.isDirectory) {
+        hint.textContent = '任务分为“压缩”和“下载”两段：先显示实际扫描/压缩进度，压缩完成后再显示下载速度和剩余时间。临时压缩包会在完成、取消或失败后自动清理。';
+    } else if (request && request.fileHandle) {
         hint.textContent = '保存位置已选择。确认后文件会边下载边写入磁盘；进度、速度和剩余时间显示在 SFTP 顶部。';
     } else if (sftpDownloadPickerAvailable()) {
         hint.textContent = '确认后先选择保存位置；文件会边下载边写入磁盘。进度、速度和剩余时间显示在 SFTP 顶部。';
@@ -4554,6 +4906,12 @@ function updateSftpDownloadConfirmHint(request) {
 }
 
 function sftpDownloadStatusLabel(download) {
+    if (download.status === 'preparing') {
+        if (download.archiveStage === 'connecting') return '准备压缩';
+        if (download.archiveStage === 'scanning') return '扫描文件';
+        if (download.archiveStage === 'finalizing') return '完成压缩';
+        return '正在压缩';
+    }
     if (download.status === 'paused') return '已暂停';
     if (download.status === 'saving') return '正在保存';
     if (download.status === 'completed') return '下载完成';
@@ -4586,16 +4944,38 @@ function renderSftpTransfers(session) {
     panel.className = 'sftp-transfer-panel show';
     panel.innerHTML = downloads.map(function (download) {
         var total = download.total || download.expectedSize || 0;
-        var percent = total > 0 ? Math.min(100, Math.round(download.received / total * 100)) : 0;
+        var preparing = download.status === 'preparing';
+        var percent = preparing ? Math.max(0, Math.min(100, parseInt(download.archivePercent, 10) || 0)) : (total > 0 ? Math.min(100, Math.round(download.received / total * 100)) : 0);
         var speed = sftpDownloadSpeed(download);
         var remaining = total > download.received && speed > 0 ? formatSftpEta((total - download.received) / speed) : (download.status === 'completed' ? '已完成' : '计算中');
-        var detail = download.status === 'error' && download.error
-            ? download.error
-            : fmtB(download.received) + (total ? ' / ' + fmtB(total) : '') + ' · ' + (download.status === 'running' && speed > 0 ? fmtB(speed) + '/s · 剩余 ' + remaining : sftpDownloadStatusLabel(download));
+        var archiveDetail = '正在连接远端服务器，准备扫描文件夹…';
+        if (download.archiveStage === 'scanning') {
+            archiveDetail = '已扫描 ' + (download.archiveTotalEntries || 0) + ' 个项目' + (download.archiveTotalBytes ? ' · 已发现 ' + fmtB(download.archiveTotalBytes) : '');
+        } else if (download.archiveStage === 'compressing') {
+            archiveDetail = download.archiveTotalBytes
+                ? '已处理 ' + fmtB(download.archiveProcessedBytes || 0) + ' / ' + fmtB(download.archiveTotalBytes) + ' · ' + (download.archiveProcessedEntries || 0) + ' / ' + (download.archiveTotalEntries || 0) + ' 个项目'
+                : '已处理 ' + (download.archiveProcessedEntries || 0) + ' / ' + (download.archiveTotalEntries || 0) + ' 个项目';
+        } else if (download.archiveStage === 'finalizing') {
+            archiveDetail = '文件内容已处理完成，正在校验临时压缩包…';
+        }
+        var detail = preparing
+            ? archiveDetail
+            : (download.status === 'error' && download.error
+                ? download.error
+                : fmtB(download.received) + (total ? ' / ' + fmtB(total) : '') + ' · ' + (download.status === 'running' && speed > 0 ? fmtB(speed) + '/s · 剩余 ' + remaining : sftpDownloadStatusLabel(download)));
         var retry = download.status === 'error' ? '<button type="button" onclick="event.stopPropagation();retrySftpDownload(\'' + escAttr(download.id) + '\')">重试</button>' : '';
         var pause = download.status === 'running' ? '<button type="button" onclick="event.stopPropagation();pauseSftpDownload(\'' + escAttr(download.id) + '\')">暂停</button>' : (download.status === 'paused' ? '<button type="button" onclick="event.stopPropagation();resumeSftpDownload(\'' + escAttr(download.id) + '\')">继续</button>' : '');
-        var cancel = download.status === 'running' || download.status === 'paused' || download.status === 'saving' ? '<button class="danger" type="button" onclick="event.stopPropagation();cancelSftpDownloadById(\'' + escAttr(download.id) + '\')">取消</button>' : '<button type="button" onclick="event.stopPropagation();dismissSftpDownload(\'' + escAttr(download.id) + '\')">关闭</button>';
-        return '<div class="sftp-transfer-item ' + escAttr(download.status) + '"><div class="sftp-transfer-head"><div><b>' + esc(download.name) + '</b><span>' + esc(sftpDownloadStatusLabel(download)) + '</span></div><div class="sftp-transfer-actions">' + retry + pause + cancel + '</div></div><div class="sftp-transfer-progress"><i style="width:' + percent + '%"></i></div><div class="sftp-transfer-detail"><span>' + esc(detail) + '</span><b>' + (total ? percent + '%' : '…') + '</b></div></div>';
+        var cancel = download.status === 'preparing' || download.status === 'running' || download.status === 'paused' || download.status === 'saving' ? '<button class="danger" type="button" onclick="event.stopPropagation();cancelSftpDownloadById(\'' + escAttr(download.id) + '\')">取消</button>' : '<button type="button" onclick="event.stopPropagation();dismissSftpDownload(\'' + escAttr(download.id) + '\')">关闭</button>';
+        var stages = '';
+        if (download.isDirectory) {
+            var archiveDone = !!download.archiveReady || ['running', 'paused', 'saving', 'completed'].indexOf(download.status) >= 0;
+            var archiveClass = preparing ? 'active' : (archiveDone ? 'done' : (download.status === 'error' ? 'error' : (download.status === 'cancelled' ? 'cancelled' : '')));
+            var downloadClass = archiveDone ? (download.status === 'completed' ? 'done' : (download.status === 'error' ? 'error' : (download.status === 'cancelled' ? 'cancelled' : 'active'))) : '';
+            stages = '<div class="sftp-transfer-stages"><span class="' + archiveClass + '"><i>1</i>压缩</span><b></b><span class="' + downloadClass + '"><i>2</i>下载</span></div>';
+        }
+        var progressLabel = preparing ? ((download.archiveStage === 'connecting' || download.archiveStage === 'scanning') ? '…' : percent + '%') : (total ? percent + '%' : '…');
+        var stageClass = preparing ? ' archive-' + escAttr(download.archiveStage || 'connecting') : '';
+        return '<div class="sftp-transfer-item ' + escAttr(download.status) + stageClass + '">' + stages + '<div class="sftp-transfer-head"><div><b>' + esc(download.name) + '</b><span>' + esc(sftpDownloadStatusLabel(download)) + '</span></div><div class="sftp-transfer-actions">' + retry + pause + cancel + '</div></div><div class="sftp-transfer-progress"><i style="width:' + percent + '%"></i></div><div class="sftp-transfer-detail"><span>' + esc(detail) + '</span><b>' + progressLabel + '</b></div></div>';
     }).join('');
 }
 
@@ -4645,20 +5025,156 @@ function abortSftpDownloadWriter(download, reason) {
     catch (e) { return Promise.resolve(); }
 }
 
-function runSftpDownload(download) {
+function applySftpArchiveStatus(download, data) {
+    data = data || {};
+    download.archiveStage = data.status || download.archiveStage || 'connecting';
+    download.archivePercent = Math.max(0, Math.min(100, parseInt(data.percent, 10) || 0));
+    download.archiveTotalBytes = Math.max(0, parseInt(data.totalBytes, 10) || 0);
+    download.archiveProcessedBytes = Math.max(0, parseInt(data.processedBytes, 10) || 0);
+    download.archiveTotalEntries = Math.max(0, parseInt(data.totalEntries, 10) || 0);
+    download.archiveProcessedEntries = Math.max(0, parseInt(data.processedEntries, 10) || 0);
+    download.archiveCurrentPath = data.currentPath || '';
+}
+
+function newSftpArchiveJobId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+        if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+            var bytes = new Uint8Array(16);
+            crypto.getRandomValues(bytes);
+            return Array.prototype.map.call(bytes, function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+        }
+    } catch (e) { }
+    var fallback = '';
+    for (var i = 0; i < 4; i++) fallback += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+    return fallback;
+}
+
+function requestSftpArchiveCancel(jobId) {
+    if (!jobId) return Promise.resolve();
+    return fetch('/file/archive/cancel', {
+        method: 'POST', credentials: 'same-origin', keepalive: true,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId: jobId })
+    }).catch(function () { });
+}
+
+function clearSftpArchivePoll(download) {
+    if (!download) return;
+    if (download.pollTimer) { clearTimeout(download.pollTimer); download.pollTimer = null; }
+    var wake = download.pollResolve;
+    download.pollResolve = null;
+    if (wake) wake();
+}
+
+function pollSftpArchivePreparation(download, session, attempt, jobId) {
+    if (!download || download.archiveAttempt !== attempt || download.status === 'cancelled' || !jobId) return Promise.resolve(false);
+    var controller = new AbortController();
+    download.controller = controller;
+    return remoteEditorRequest('/file/archive/status', { jobId: jobId }, controller.signal)
+        .then(function (data) {
+            if (download.controller === controller) download.controller = null;
+            if (download.archiveAttempt !== attempt || download.status === 'cancelled') return false;
+            applySftpArchiveStatus(download, data);
+            if (data.status === 'ready') {
+                download.archiveReady = true;
+                download.archiveJobId = jobId;
+                download.archiveStage = 'ready';
+                download.archivePercent = 100;
+                download.expectedSize = Math.max(0, parseInt(data.archiveSize, 10) || 0);
+                download.total = download.expectedSize;
+                download.received = 0;
+                renderSftpTransfers(session);
+                return runSftpDownload(download);
+            }
+            if (data.status === 'error') throw new Error(data.error || '文件夹压缩失败');
+            if (data.status === 'cancelled') {
+                download.status = 'cancelled';
+                renderSftpTransfers(session);
+                return false;
+            }
+            renderSftpTransfers(session);
+            return new Promise(function (resolve) {
+                download.pollResolve = resolve;
+                download.pollTimer = setTimeout(function () {
+                    download.pollTimer = null;
+                    download.pollResolve = null;
+                    resolve();
+                }, 400);
+            }).then(function () { return pollSftpArchivePreparation(download, session, attempt, jobId); });
+        })
+        .catch(function (err) {
+            if (download.controller === controller) download.controller = null;
+            if (download.archiveAttempt !== attempt || download.status === 'cancelled' || requestWasAborted(err)) return false;
+            requestSftpArchiveCancel(jobId);
+            download.status = 'error';
+            download.error = (err && (err.message || err.msg)) || '文件夹压缩失败';
+            showToast(download.error, 'error');
+            renderSftpTransfers(session);
+            return false;
+        });
+}
+
+function runSftpArchivePreparation(download) {
     var session = getSessionById(download.sessionId);
     if (!session || !session._connected) { download.status = 'error'; download.error = 'SSH 连接已断开'; renderSftpTransfers(session); return Promise.resolve(false); }
-    download.controller = new AbortController();
-    download.status = 'running';
-    download.startedAt = download.startedAt || Date.now();
+    clearSftpArchivePoll(download);
+    var attempt = (download.archiveAttempt || 0) + 1;
+    download.archiveAttempt = attempt;
+    download.status = 'preparing';
+    download.archiveStage = 'connecting';
+    download.archivePercent = 0;
+    download.archiveReady = false;
+    var jobId = newSftpArchiveJobId();
+    download.archiveJobId = jobId;
+    download.archiveTotalBytes = 0;
+    download.archiveProcessedBytes = 0;
+    download.archiveTotalEntries = 0;
+    download.archiveProcessedEntries = 0;
+    download.startedAt = 0;
+    var controller = new AbortController();
+    download.controller = controller;
     renderSftpTransfers(session);
-    return fetch('/file/download', {
+    return remoteEditorRequest('/file/archive/prepare', { sshInfo: session.sshInfo, path: download.path, jobId: jobId }, controller.signal)
+        .then(function (data) {
+            if (download.controller === controller) download.controller = null;
+            if (download.archiveAttempt !== attempt || download.status === 'cancelled') return false;
+            if (!data || !data.jobId) throw new Error('服务器没有返回压缩任务编号');
+            jobId = data.jobId;
+            download.archiveJobId = jobId;
+            return pollSftpArchivePreparation(download, session, attempt, jobId);
+        })
+        .catch(function (err) {
+            if (download.controller === controller) download.controller = null;
+            if (download.archiveAttempt !== attempt || download.status === 'cancelled' || requestWasAborted(err)) return false;
+            requestSftpArchiveCancel(jobId);
+            download.status = 'error';
+            download.error = (err && (err.message || err.msg)) || '无法启动文件夹压缩';
+            showToast(download.error, 'error');
+            renderSftpTransfers(session);
+            return false;
+        });
+}
+
+function runSftpDownload(download) {
+    var session = getSessionById(download.sessionId);
+    if (!session || (!session._connected && !(download.isDirectory && download.archiveReady))) { download.status = 'error'; download.error = 'SSH 连接已断开'; renderSftpTransfers(session); return Promise.resolve(false); }
+    var controller = new AbortController();
+    download.controller = controller;
+    download.status = 'running';
+    download.startedAt = Date.now();
+    renderSftpTransfers(session);
+    var preparedArchive = download.isDirectory && download.archiveJobId;
+    var preparedJobId = preparedArchive ? download.archiveJobId : '';
+    return fetch(preparedArchive ? '/file/archive/download' : '/file/download', {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sshInfo: session.sshInfo, path: download.path }), signal: download.controller.signal
+        body: JSON.stringify(preparedArchive ? { jobId: preparedJobId } : { sshInfo: session.sshInfo, path: download.path, archive: false }), signal: controller.signal
     }).then(function (response) {
         if (!response.ok) return response.text().then(function (text) { var message = text; try { message = (JSON.parse(text).Msg || text); } catch (e) { } throw new Error(message || '下载失败'); });
         var total = parseInt(response.headers.get('X-WebSSH-File-Size') || response.headers.get('Content-Length'), 10) || download.expectedSize || 0;
         download.total = total;
+        download.status = 'running';
+        download.startedAt = Date.now();
+        renderSftpTransfers(session);
         var reader = response.body && response.body.getReader ? response.body.getReader() : null;
         return sftpDownloadWriter(download, total).then(function (sink) {
             var writer = sink.writer;
@@ -4705,25 +5221,33 @@ function runSftpDownload(download) {
         showToast(download.name + ' 下载完成', 'success');
         renderSftpTransfers(session);
     }).catch(function (err) {
+        // A sink/open/write failure can happen after the server has already
+        // started streaming. Abort this exact fetch so regular-file downloads
+        // do not continue consuming SSH bandwidth in the background; folder
+        // jobs are cancelled below as an additional server-side safeguard.
+        try { controller.abort(); } catch (e) { }
         return abortSftpDownloadWriter(download, err && err.message).then(function () {
             if (download.status === 'cancelled' || requestWasAborted(err)) return;
+            if (preparedArchive) requestSftpArchiveCancel(preparedJobId);
             download.status = 'error';
             download.error = err && err.message ? err.message : '下载失败';
             showToast(download.error, 'error');
             renderSftpTransfers(session);
         });
     }).finally(function () {
-        download.controller = null;
+        if (download.controller === controller) download.controller = null;
         download.writer = null;
         download.resumeRead = null;
+        if (download.isDirectory && download.archiveJobId === preparedJobId) download.archiveJobId = null;
     });
 }
 
-function startSftpDownload(session, path, size, name, fileHandle) {
-    var download = { id: 'download_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: name, expectedSize: size || 0, total: size || 0, received: 0, status: 'queued', startedAt: 0, pausedDuration: 0, pausedAt: 0, controller: null, writer: null, writerCommitted: false, fileHandle: fileHandle || null, storageMode: '', chunks: null, resumeRead: null };
+function startSftpDownload(session, path, size, name, fileHandle, isDirectory) {
+    var download = { id: 'download_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: name, isDirectory: !!isDirectory, expectedSize: size || 0, total: size || 0, received: 0, status: 'queued', startedAt: 0, pausedDuration: 0, pausedAt: 0, controller: null, writer: null, writerCommitted: false, fileHandle: fileHandle || null, storageMode: '', chunks: null, resumeRead: null, pollTimer: null, pollResolve: null, archiveAttempt: 0, archiveJobId: null, archiveStage: '', archivePercent: 0, archiveReady: false, archiveTotalBytes: 0, archiveProcessedBytes: 0, archiveTotalEntries: 0, archiveProcessedEntries: 0, archiveCurrentPath: '' };
     (session._sftpDownloads || (session._sftpDownloads = [])).unshift(download);
     renderSftpTransfers(session);
-    runSftpDownload(download);
+    if (download.isDirectory) runSftpArchivePreparation(download);
+    else runSftpDownload(download);
 }
 
 function pauseSftpDownload(id) {
@@ -4741,8 +5265,12 @@ function resumeSftpDownload(id) {
 
 function cancelSftpDownload(download) {
     if (!download) return;
+    clearSftpArchivePoll(download);
+    var archiveJobId = download.archiveJobId;
+    download.archiveAttempt = (download.archiveAttempt || 0) + 1;
     download.status = 'cancelled';
     if (download.controller) { try { download.controller.abort(); } catch (e) { } }
+    requestSftpArchiveCancel(archiveJobId);
     abortSftpDownloadWriter(download, 'cancelled');
     var resume = download.resumeRead;
     download.resumeRead = null;
@@ -4755,8 +5283,9 @@ function cancelSftpDownloadById(id) { cancelSftpDownload(findSftpDownload(id)); 
 function retrySftpDownload(id) {
     var download = findSftpDownload(id);
     if (!download || download.status !== 'error') return;
-    download.received = 0; download.total = download.expectedSize || 0; download.error = ''; download.startedAt = 0; download.pausedDuration = 0; download.writerCommitted = false; download.storageMode = ''; download.chunks = null;
-    runSftpDownload(download);
+    download.received = 0; download.total = download.isDirectory ? 0 : (download.expectedSize || 0); download.error = ''; download.startedAt = 0; download.pausedDuration = 0; download.writerCommitted = false; download.storageMode = ''; download.chunks = null; download.archiveJobId = null; download.archiveStage = ''; download.archivePercent = 0; download.archiveReady = false;
+    if (download.isDirectory) runSftpArchivePreparation(download);
+    else runSftpDownload(download);
 }
 
 function dismissSftpDownload(id) {
@@ -4799,6 +5328,13 @@ function remoteEditorSession(editor) {
 
 function remoteEditorIsDirty(editor) {
     return !!editor && editor.textarea && (!!editor.isNew || editor.textarea.value !== editor.originalContent);
+}
+
+function remoteEditorPathLabel(editor) {
+    if (!editor) return '';
+    var requestedPath = normalizeRemoteFilePath(editor.path);
+    var targetPath = normalizeRemoteFilePath(editor.targetPath);
+    return targetPath && targetPath !== requestedPath ? requestedPath + ' → ' + targetPath : requestedPath;
 }
 
 function remoteEditorSetStatus(editor, text, type) {
@@ -4976,12 +5512,13 @@ function createRemoteEditorElement(editor) {
     editor.textarea.readOnly = true;
     editor.nameInput.value = editor.name;
     editor.nameInput.readOnly = !editor.isNew;
-    editor.subtitle.textContent = editor.path;
+    editor.subtitle.textContent = remoteEditorPathLabel(editor);
     editor.nameInput.addEventListener('input', function () {
         if (!editor.isNew) return;
         editor.name = editor.nameInput.value.trim();
         editor.path = joinRemoteFilePath(editor.parentPath, editor.name);
-        editor.subtitle.textContent = editor.path || normalizeSftpDir(editor.parentPath);
+        editor.targetPath = '';
+        editor.subtitle.textContent = remoteEditorPathLabel(editor) || normalizeSftpDir(editor.parentPath);
         remoteEditorUpdateMetrics(editor);
     });
     editor.nameInput.addEventListener('keydown', function (event) {
@@ -5168,12 +5705,14 @@ function loadRemoteEditor(editor) {
             editor.originalContent = String(data.content || '');
             editor.textarea.value = editor.originalContent;
             editor.version = String(data.version || '');
+            editor.targetPath = normalizeRemoteFilePath(data.targetPath || editor.path);
             editor.loaded = true;
             editor.retryInitialLoad = false;
             editor.maxBytes = parseInt(data.maxBytes, 10) || remoteEditorDefaultMaxBytes;
             editor.el.classList.remove('is-loading');
             editor.textarea.readOnly = false;
-            remoteEditorSetStatus(editor, '已加载 · Ctrl+S 保存', 'success');
+            editor.subtitle.textContent = remoteEditorPathLabel(editor);
+            remoteEditorSetStatus(editor, editor.targetPath !== editor.path ? '已加载符号链接目标 · Ctrl+S 保存' : '已加载 · Ctrl+S 保存', 'success');
             remoteEditorUpdateMetrics(editor);
             editor.textarea.focus();
         })
@@ -5211,7 +5750,7 @@ function openRemoteEditor(path, session) {
         }
         return;
     }
-    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: path.split('/').pop() || path, parentPath: normalizeSftpDir(path.substring(0, path.lastIndexOf('/')) || '/'), isNew: false, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: false, restoreRect: null };
+    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, targetPath: '', name: path.split('/').pop() || path, parentPath: normalizeSftpDir(path.substring(0, path.lastIndexOf('/')) || '/'), isNew: false, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: false, restoreRect: null };
     remoteEditors.push(editor);
     if (!createRemoteEditorElement(editor)) { remoteEditors.pop(); return; }
     var layer = document.getElementById('remoteEditorLayer');
@@ -5244,13 +5783,13 @@ function openNewRemoteFile() {
     if (!session || sessions.indexOf(session) < 0 || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     prepareRemoteEditorWorkspace();
     var parentPath = normalizeSftpDir(session.sftpPath || document.getElementById('sftpPath').value || '/');
-    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: '', name: '新建文件.txt', parentPath: parentPath, isNew: true, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: true, restoreRect: null };
+    var editor = { id: 'editor_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: '', targetPath: '', name: '新建文件.txt', parentPath: parentPath, isNew: true, version: '', originalContent: '', maxBytes: remoteEditorDefaultMaxBytes, minimized: false, maximized: false, saving: false, loaded: true, restoreRect: null };
     editor.path = joinRemoteFilePath(parentPath, editor.name);
     remoteEditors.push(editor);
     if (!createRemoteEditorElement(editor)) { remoteEditors.pop(); return; }
     editor.el.classList.remove('is-loading');
     editor.textarea.readOnly = false;
-    editor.subtitle.textContent = editor.path;
+    editor.subtitle.textContent = remoteEditorPathLabel(editor);
     remoteEditorSetStatus(editor, '新建文件 · 首次保存不会覆盖同名文件', 'info');
     remoteEditorUpdateMetrics(editor);
     activateRemoteEditor(editor);
@@ -5369,7 +5908,7 @@ function confirmRemoteEditorSaveAndClose() {
 }
 
 function saveRemoteEditor(editor, closeAfter) {
-    if (!editor || editor.saving) return Promise.resolve(false);
+    if (!editor || editor.saving || editor.deletePending) return Promise.resolve(false);
     var session = remoteEditorSession(editor);
     if (!session || !session._connected) { remoteEditorSetStatus(editor, 'SSH 已断开，无法保存', 'error'); return Promise.resolve(false); }
     if (!remoteEditorIsDirty(editor)) { if (closeAfter) destroyRemoteEditor(editor); return Promise.resolve(true); }
@@ -5381,8 +5920,9 @@ function saveRemoteEditor(editor, closeAfter) {
         if (duplicate) { remoteEditorSetStatus(editor, '同名文件已在编辑器中打开', 'error'); return Promise.resolve(false); }
         editor.name = newName;
         editor.path = newPath;
+        editor.targetPath = '';
         editor.nameInput.value = newName;
-        editor.subtitle.textContent = newPath;
+        editor.subtitle.textContent = remoteEditorPathLabel(editor);
     }
     var creating = !!editor.isNew;
     var sentPath = editor.path;
@@ -5396,6 +5936,7 @@ function saveRemoteEditor(editor, closeAfter) {
         return Promise.resolve(false);
     }
     var sentVersion = editor.version;
+    var sentTargetPath = creating ? '' : normalizeRemoteFilePath(editor.targetPath || sentPath);
     editor.saving = true;
     if (creating && editor.nameInput) editor.nameInput.readOnly = true;
     remoteEditorSetStatus(editor, '正在保存…', 'info');
@@ -5403,11 +5944,12 @@ function saveRemoteEditor(editor, closeAfter) {
     var controller = new AbortController();
     editor.controller = controller;
     (session._remoteEditorControllers || (session._remoteEditorControllers = [])).push(controller);
-    return remoteEditorRequest('/file/edit/save', { sshInfo: session.sshInfo, path: sentPath, content: sentContent, version: sentVersion, create: creating }, controller.signal)
+    return remoteEditorRequest('/file/edit/save', { sshInfo: session.sshInfo, path: sentPath, targetPath: sentTargetPath, content: sentContent, version: sentVersion, create: creating }, controller.signal)
         .then(function (data) {
             if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return false;
             editor.originalContent = sentContent;
             editor.version = String(data.version || editor.version);
+            editor.targetPath = normalizeRemoteFilePath(data.targetPath || sentTargetPath || sentPath);
             if (creating) {
                 editor.isNew = false;
                 editor.path = sentPath;
@@ -5415,6 +5957,7 @@ function saveRemoteEditor(editor, closeAfter) {
                 editor.el.classList.remove('is-new');
                 if (editor.nameInput) editor.nameInput.readOnly = true;
             }
+            editor.subtitle.textContent = remoteEditorPathLabel(editor);
             if (editor.parentPath) {
                 var editorDirectory = normalizeSftpDir(editor.parentPath);
                 if (normalizeSftpDir(session.sftpPath || '/') === editorDirectory) sftpLoad(editorDirectory, session);
@@ -6602,19 +7145,54 @@ function initPreviewMode() {
         document.getElementById('sftpPanel').classList.add('open');
         var sftpBody = document.getElementById('sftpBody');
         if (sftpBody) sftpBody.innerHTML = [
+            { name: 'logs', size: '文件夹', isDir: true, editable: false },
             { name: 'notes.txt', size: '3KB', editable: true },
             { name: 'archive.log', size: '18MB', editable: false },
             { name: 'initrd.img.old', size: '17.4MB', editable: false }
         ].map(function (item) {
+            var icon = item.isDir
+                ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>'
+                : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
             var editTitle = item.editable ? '在线编辑' : '文件超过在线编辑上限 2MB';
-            return '<div class="sftp-row"><svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg><span class="sftp-name">' + esc(item.name) + '</span><span class="sftp-meta">' + item.size + '</span><button class="sftp-edit' + (item.editable ? '' : ' disabled') + '" title="' + editTitle + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button><button class="sftp-dl" title="下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button></div>';
+            var edit = item.isDir ? '' : '<button class="sftp-edit' + (item.editable ? '' : ' disabled') + '" title="' + editTitle + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
+            var downloadTitle = item.isDir ? '压缩并下载文件夹' : '下载';
+            var download = '<button class="sftp-dl' + (item.isDir ? ' directory' : '') + '" title="' + downloadTitle + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+            var remove = item.isDir ? '' : '<button class="sftp-delete" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+            return '<div class="sftp-row">' + icon + '<span class="sftp-name">' + esc(item.name) + '</span><span class="sftp-meta">' + item.size + '</span>' + edit + download + remove + '</div>';
         }).join('');
-        if (params.get('download') === 'confirm') {
+        if (params.get('delete') === 'confirm') {
+            sftpDeleteConfirmRequest = { sessionId: 'preview', path: '/var/log/archive.log', parentPath: '/var/log', name: 'archive.log', deleting: false };
+            document.getElementById('sftpDeleteConfirmName').textContent = 'archive.log';
+            document.getElementById('sftpDeleteConfirmPath').textContent = '/var/log/archive.log';
+            document.getElementById('sftpDeleteConfirmModal').classList.add('show');
+        } else if (params.get('download') === 'confirm') {
             sftpDownloadConfirmRequest = { sessionId: 'preview', path: '/var/log/archive.log', name: 'archive.log', size: 18 * 1024 * 1024 };
             document.getElementById('sftpDownloadConfirmName').textContent = 'archive.log';
             document.getElementById('sftpDownloadConfirmPath').textContent = '/var/log/archive.log';
             document.getElementById('sftpDownloadConfirmSize').textContent = fmtB(18 * 1024 * 1024);
             document.getElementById('sftpDownloadConfirmModal').classList.add('show');
+        } else if (params.get('download') === 'folder-confirm') {
+            sftpDownloadConfirmRequest = { sessionId: 'preview', path: '/var/log/logs', name: 'logs.tar.gz', sourceName: 'logs', size: 0, isDirectory: true };
+            document.getElementById('sftpDownloadConfirmTitle').textContent = '确认压缩并下载文件夹';
+            document.getElementById('sftpDownloadConfirmDescription').textContent = '确认后先在远端服务器生成临时压缩包，再下载到本地。';
+            document.getElementById('sftpDownloadConfirmSizeLabel').textContent = '压缩包大小';
+            document.getElementById('sftpDownloadConfirmName').textContent = 'logs.tar.gz';
+            document.getElementById('sftpDownloadConfirmPath').textContent = '/var/log/logs';
+            document.getElementById('sftpDownloadConfirmSize').textContent = '压缩完成后确定';
+            updateSftpDownloadConfirmHint(sftpDownloadConfirmRequest);
+            document.getElementById('sftpDownloadConfirmModal').classList.add('show');
+        } else if (params.get('download') === 'compress') {
+            var compressionPanel = document.getElementById('sftpTransferPanel');
+            if (compressionPanel) {
+                compressionPanel.className = 'sftp-transfer-panel show';
+                compressionPanel.innerHTML = '<div class="sftp-transfer-item preparing archive-compressing"><div class="sftp-transfer-stages"><span class="active"><i>1</i>压缩</span><b></b><span><i>2</i>下载</span></div><div class="sftp-transfer-head"><div><b>logs.tar.gz</b><span>正在压缩</span></div><div class="sftp-transfer-actions"><button class="danger">取消</button></div></div><div class="sftp-transfer-progress"><i style="width:63%"></i></div><div class="sftp-transfer-detail"><span>已处理 620MB / 1GB · 138 / 220 个项目</span><b>63%</b></div></div>';
+            }
+        } else if (params.get('download') === 'folder-progress') {
+            var folderPanel = document.getElementById('sftpTransferPanel');
+            if (folderPanel) {
+                folderPanel.className = 'sftp-transfer-panel show';
+                folderPanel.innerHTML = '<div class="sftp-transfer-item running"><div class="sftp-transfer-stages"><span class="done"><i>1</i>压缩</span><b></b><span class="active"><i>2</i>下载</span></div><div class="sftp-transfer-head"><div><b>logs.tar.gz</b><span>下载中</span></div><div class="sftp-transfer-actions"><button>暂停</button><button class="danger">取消</button></div></div><div class="sftp-transfer-progress"><i style="width:42%"></i></div><div class="sftp-transfer-detail"><span>310MB / 738MB · 8.4MB/s · 剩余 51 秒</span><b>42%</b></div></div>';
+            }
         } else if (params.get('download') === 'progress') {
             var panel = document.getElementById('sftpTransferPanel');
             if (panel) {
@@ -6704,6 +7282,12 @@ if (sftpDownloadConfirmModalEl) {
         if (e.target === sftpDownloadConfirmModalEl) hideSftpDownloadConfirm();
     });
 }
+var sftpDeleteConfirmModalEl = document.getElementById('sftpDeleteConfirmModal');
+if (sftpDeleteConfirmModalEl) {
+    sftpDeleteConfirmModalEl.addEventListener('click', function (e) {
+        if (e.target === sftpDeleteConfirmModalEl) hideSftpDeleteConfirm();
+    });
+}
 var editScriptModalEl = document.getElementById('editScriptModal');
 if (editScriptModalEl) {
     editScriptModalEl.addEventListener('click', function (e) {
@@ -6714,6 +7298,12 @@ var scriptManagerModalEl = document.getElementById('scriptManagerModal');
 if (scriptManagerModalEl) {
     scriptManagerModalEl.addEventListener('click', function (e) {
         if (e.target === scriptManagerModalEl) hideScriptManager();
+    });
+}
+var siteBookmarkRestoreModalEl = document.getElementById('siteBookmarkRestoreModal');
+if (siteBookmarkRestoreModalEl) {
+    siteBookmarkRestoreModalEl.addEventListener('click', function (e) {
+        if (e.target === siteBookmarkRestoreModalEl) hideSiteScriptRestoreConfirm();
     });
 }
 var categoryNameEl = document.getElementById('categoryName');

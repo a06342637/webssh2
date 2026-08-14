@@ -500,16 +500,40 @@
                 <div class="sftp-download-confirm-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
                 <div class="sftp-download-confirm-copy">
                     <b id="sftpDownloadConfirmName">-</b>
-                    <p>确认后开始从远端服务器下载此文件。</p>
+                    <p id="sftpDownloadConfirmDescription">确认后开始从远端服务器下载此文件。</p>
                 </div>
                 <dl class="sftp-download-confirm-details">
                     <div><dt>远端路径</dt><dd id="sftpDownloadConfirmPath">-</dd></div>
-                    <div><dt>文件大小</dt><dd id="sftpDownloadConfirmSize">-</dd></div>
+                    <div><dt id="sftpDownloadConfirmSizeLabel">文件大小</dt><dd id="sftpDownloadConfirmSize">-</dd></div>
                 </dl>
                 <div class="sftp-download-confirm-hint" id="sftpDownloadConfirmHint">下载进度会显示在 SFTP 侧边栏顶部，可暂停、继续或取消。</div>
                 <div class="sftp-download-confirm-actions">
                     <button class="drawer-add primary-action" id="sftpDownloadConfirmButton" type="button" onclick="confirmSftpDownload()">确认下载</button>
                     <button class="drawer-add" type="button" onclick="hideSftpDownloadConfirm()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay sftp-delete-confirm-overlay" id="sftpDeleteConfirmModal">
+        <div class="glass-card modal-card sftp-delete-confirm-card" role="dialog" aria-modal="true" aria-labelledby="sftpDeleteConfirmTitle">
+            <div class="drawer-hd auth-hd">
+                <span id="sftpDeleteConfirmTitle">删除文件</span>
+                <button class="settings-close" id="sftpDeleteCloseButton" type="button" onclick="hideSftpDeleteConfirm()" title="取消删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="sftp-download-confirm-body sftp-delete-confirm-body">
+                <div class="sftp-download-confirm-icon sftp-delete-confirm-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+                <div class="sftp-download-confirm-copy">
+                    <b id="sftpDeleteConfirmName">-</b>
+                    <p>确定要永久删除这个远端文件吗？此操作无法恢复。</p>
+                </div>
+                <dl class="sftp-download-confirm-details">
+                    <div><dt>远端路径</dt><dd id="sftpDeleteConfirmPath">-</dd></div>
+                </dl>
+                <div class="sftp-delete-confirm-status" id="sftpDeleteConfirmStatus" aria-live="polite">删除后无法恢复，请确认远端路径无误。</div>
+                <div class="sftp-download-confirm-actions">
+                    <button class="drawer-add danger-confirm" id="sftpDeleteConfirmButton" type="button" onclick="confirmSftpDelete()">确认删除</button>
+                    <button class="drawer-add" id="sftpDeleteCancelButton" type="button" onclick="hideSftpDeleteConfirm()">取消</button>
                 </div>
             </div>
         </div>
@@ -713,12 +737,33 @@
             </div>
             <div class="modal-body script-manager-body">
                 <div id="scriptManagerBookmarks" class="script-manager-panel">
-                    <p class="script-manager-hint">导入、导出或将脚本与当前账号同步。导出文件会保留分类和 Emoji。</p>
-                    <div class="script-manager-actions">
-                        <button type="button" onclick="exportScriptBookmarks()"><b>📤</b><span>导出脚本<small>下载 JSON 备份</small></span></button>
-                        <button type="button" onclick="triggerScriptImport()"><b>📥</b><span>导入脚本<small>兼容旧版文件</small></span></button>
-                        <button type="button" onclick="syncScriptBookmarks('auto')"><b>☁️</b><span>同步书签<small>与登录账号同步</small></span></button>
+                    <div class="bookmark-manager-intro">
+                        <div class="bookmark-manager-intro-icon">▤</div>
+                        <div><b>书签备份与同步</b><p>个人备份与全站备份使用不同格式，导入时会自动校验，避免把其他用户的数据混入自己的书签。</p></div>
                     </div>
+                    <section class="bookmark-backup-section personal-backup-section">
+                        <div class="bookmark-backup-head">
+                            <div><b>我的书签</b><p>只包含当前浏览器中的脚本、分类和使用排序。</p></div>
+                            <span class="bookmark-scope-chip personal">个人范围</span>
+                        </div>
+                        <div class="script-manager-actions personal-backup-actions">
+                            <button type="button" onclick="exportScriptBookmarks()"><b>↓</b><span>导出个人备份<small>下载个人 JSON 文件</small></span></button>
+                            <button type="button" onclick="triggerScriptImport()"><b>↑</b><span>导入个人备份<small>兼容旧版个人文件</small></span></button>
+                            <button type="button" onclick="syncScriptBookmarks('auto')"><b>↻</b><span>同步当前账号<small>与个人云端书签同步</small></span></button>
+                        </div>
+                    </section>
+                    <section class="bookmark-backup-section site-backup-section" id="siteBookmarkBackupSection" hidden>
+                        <div class="bookmark-backup-head">
+                            <div><b>全站书签备份</b><p>备份所有账号的云端书签；不会包含密码、会话或 SSH 连接信息。</p></div>
+                            <span class="bookmark-scope-chip admin">仅管理员</span>
+                        </div>
+                        <div class="script-manager-actions site-backup-actions">
+                            <button type="button" id="siteBookmarkExportBtn" onclick="exportSiteScriptBookmarks()"><b>⇩</b><span>导出全站备份<small>包含所有用户书签</small></span></button>
+                            <button type="button" onclick="triggerSiteScriptImport()"><b>⇧</b><span>恢复全站备份<small>按用户名覆盖云端书签</small></span></button>
+                        </div>
+                        <div class="site-backup-note"><b>恢复规则</b><span>只覆盖当前网站中同名用户的书签；不存在的用户会跳过，不创建账号，当前网站额外账号保持不变。</span></div>
+                        <input type="file" id="siteBookmarkImportFile" accept="application/json,.json" hidden onchange="importSiteScriptBookmarks(this)">
+                    </section>
                     <div class="script-manager-summary" id="scriptManagerSummary"></div>
                 </div>
                 <div id="scriptManagerCategories" class="script-manager-panel" style="display:none">
@@ -755,6 +800,34 @@
                             <button type="button" id="categoryPageNext" onclick="changeCategoryPage(1)">下一页</button>
                         </div>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Site Bookmark Restore Confirmation -->
+    <div class="modal-overlay site-bookmark-restore-overlay" id="siteBookmarkRestoreModal">
+        <div class="glass-card modal-card site-bookmark-restore-card" role="dialog" aria-modal="true" aria-labelledby="siteBookmarkRestoreTitle">
+            <div class="drawer-hd auth-hd">
+                <span id="siteBookmarkRestoreTitle">恢复全站书签备份</span>
+                <button class="settings-close" type="button" onclick="hideSiteScriptRestoreConfirm()" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body site-bookmark-restore-body">
+                <div class="site-restore-alert"><b>即将覆盖匹配用户的云端书签</b><p>个人备份不能在这里导入。恢复会按用户名匹配，不会修改账号、密码、管理员权限或登录会话。</p></div>
+                <div class="site-restore-stats">
+                    <div><b id="siteRestoreUserCount">0</b><span>备份用户</span></div>
+                    <div><b id="siteRestoreScriptCount">0</b><span>脚本</span></div>
+                    <div><b id="siteRestoreCategoryCount">0</b><span>分类</span></div>
+                </div>
+                <div class="site-restore-meta"><span>备份导出时间</span><b id="siteRestoreExportedAt">-</b></div>
+                <ul class="site-restore-rules">
+                    <li>同名用户：书签和分类将被备份内容完整覆盖，包括恢复为空。</li>
+                    <li>不存在的用户：跳过，不会自动创建账号。</li>
+                    <li>备份中没有的当前账号：保持原样。</li>
+                </ul>
+                <div class="edit-actions site-restore-actions">
+                    <button class="drawer-add" type="button" onclick="hideSiteScriptRestoreConfirm()">取消</button>
+                    <button class="drawer-add danger-confirm" id="siteBookmarkRestoreConfirmBtn" type="button" onclick="confirmSiteScriptRestore()">确认恢复对应用户</button>
                 </div>
             </div>
         </div>
