@@ -552,6 +552,12 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _lastSentSize: null,
         _sizeSyncTimer: null,
         sftpPath: '/',
+        sftpSearchQuery: '',
+        sftpSearchMode: 'fuzzy',
+        _sftpList: [],
+        _sftpListPath: '/',
+        _sftpListState: 'idle',
+        _sftpListMessage: '',
         _sftpListGeneration: 0,
         _sftpListController: null,
         sftpDirPickerPath: '/',
@@ -4843,23 +4849,160 @@ function requestWasAborted(err) {
     return !!(err && err.name === 'AbortError');
 }
 
+function filterSftpList(list, query, mode) {
+    list = Array.isArray(list) ? list : [];
+    query = String(query || '').trim().toLowerCase();
+    if (!query) return list.slice();
+    mode = mode === 'exact' ? 'exact' : 'fuzzy';
+    if (mode === 'exact') {
+        return list.filter(function (item) {
+            return String(item && item.Name || '').toLowerCase() === query;
+        });
+    }
+    var keywords = query.split(/\s+/).filter(Boolean);
+    return list.filter(function (item) {
+        var name = String(item && item.Name || '').toLowerCase();
+        return keywords.every(function (keyword) { return name.indexOf(keyword) !== -1; });
+    });
+}
+
+function syncSftpSearchControls(session, filteredCount) {
+    var input = document.getElementById('sftpSearchInput');
+    var clear = document.getElementById('sftpSearchClear');
+    var fuzzy = document.getElementById('sftpSearchFuzzy');
+    var exact = document.getElementById('sftpSearchExact');
+    var count = document.getElementById('sftpSearchCount');
+    var query = session ? String(session.sftpSearchQuery || '') : '';
+    var mode = session && session.sftpSearchMode === 'exact' ? 'exact' : 'fuzzy';
+    if (input && input.value !== query) input.value = query;
+    if (clear) clear.hidden = !query;
+    if (fuzzy) {
+        fuzzy.classList.toggle('active', mode === 'fuzzy');
+        fuzzy.setAttribute('aria-pressed', mode === 'fuzzy' ? 'true' : 'false');
+    }
+    if (exact) {
+        exact.classList.toggle('active', mode === 'exact');
+        exact.setAttribute('aria-pressed', mode === 'exact' ? 'true' : 'false');
+    }
+    if (!count) return;
+    count.textContent = '';
+    if (!session || session._sftpListState !== 'ready') return;
+    var list = Array.isArray(session._sftpList) ? session._sftpList : [];
+    var matched = typeof filteredCount === 'number' ? filteredCount : filterSftpList(list, query, mode).length;
+    count.textContent = query.trim() ? matched + '/' + list.length : list.length + ' 项';
+    count.title = query.trim() ? '匹配 ' + matched + ' 项，共 ' + list.length + ' 项' : '当前目录共 ' + list.length + ' 项';
+}
+
+function renderSftpRow(f, actualPath) {
+    f = f || {};
+    var name = String(f.Name || '');
+    var isDir = !!f.IsDir;
+    var fp = (actualPath === '/' ? '/' : actualPath + '/') + name;
+    var fpArg = escAttr(JSON.stringify(fp));
+    var mediaKind = f.PreviewKind === 'video' ? 'video' : (f.PreviewKind === 'image' ? 'image' : '');
+    var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file ' + mediaKind + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
+    var sizeBytes = Math.max(0, parseInt(f.SizeBytes, 10) || 0);
+    var downloadable = !!f.Downloadable;
+    var previewKindArg = escAttr(JSON.stringify(f.PreviewKind || ''));
+    var previewMimeArg = escAttr(JSON.stringify(f.PreviewMime || ''));
+    var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : (f.Previewable ? 'onclick="openRemotePreview(' + fpArg + ',' + previewKindArg + ',' + previewMimeArg + ')"' : (downloadable ? 'onclick="sftpDownload(' + fpArg + ',' + sizeBytes + ')"' : ''));
+    var previewTitle = f.Previewable ? (f.PreviewKind === 'video' ? '在线视频预览' : '在线图片预览') : (f.PreviewReason || '');
+    var preview = isDir || (!f.Previewable && !f.PreviewReason) ? '' : '<button class="sftp-preview' + (f.Previewable ? '' : ' disabled') + '" ' + (f.Previewable ? 'onclick="event.stopPropagation();openRemotePreview(' + fpArg + ',' + previewKindArg + ',' + previewMimeArg + ')"' : 'data-message="' + escAttr(previewTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(previewTitle) + '" aria-label="' + escAttr(previewTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="12" height="12"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg></button>';
+    var editTitle = f.Editable ? '在线编辑' : (f.EditReason || '此文件不支持在线编辑');
+    var edit = isDir ? '' : '<button class="sftp-edit' + (f.Editable ? '' : ' disabled') + '" ' + (f.Editable ? 'onclick="event.stopPropagation();openRemoteEditor(' + fpArg + ')"' : 'data-message="' + escAttr(editTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(editTitle) + '" aria-label="' + escAttr(editTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
+    var dlTitle = downloadable ? (isDir ? '压缩并下载文件夹' : '下载') : (f.DownloadReason || '此项目不支持下载');
+    var dl = '<button class="sftp-dl' + (isDir ? ' directory' : '') + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + (isDir ? 0 : sizeBytes) + ',' + (isDir ? 'true' : 'false') + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
+    var del = isDir ? '' : '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ')" title="删除" aria-label="' + escAttr('删除 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+    var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
+    return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + preview + edit + dl + del + '</div>';
+}
+
+function renderSftpList(session) {
+    if (!session || getActiveSession() !== session) return;
+    var body = document.getElementById('sftpBody');
+    if (!body) return;
+    syncSftpSearchControls(session);
+    if (session._sftpListState === 'loading') {
+        body.innerHTML = '<div class="sftp-loading">加载中...</div>';
+        return;
+    }
+    if (session._sftpListState === 'disconnected') {
+        body.innerHTML = '<div class="sftp-loading">SSH 连接尚未就绪</div>';
+        return;
+    }
+    if (session._sftpListState === 'error') {
+        body.innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(session._sftpListMessage || '加载失败') + '</div>';
+        return;
+    }
+    var list = Array.isArray(session._sftpList) ? session._sftpList : [];
+    var query = String(session.sftpSearchQuery || '');
+    var filtered = filterSftpList(list, query, session.sftpSearchMode);
+    syncSftpSearchControls(session, filtered.length);
+    if (!list.length) {
+        body.innerHTML = '<div class="sftp-loading">空目录</div>';
+        return;
+    }
+    if (!filtered.length) {
+        body.innerHTML = '<div class="sftp-loading">没有找到匹配的文件或文件夹</div>';
+        return;
+    }
+    var actualPath = normalizeSftpDir(session._sftpListPath || session.sftpPath || '/');
+    body.innerHTML = filtered.map(function (f) { return renderSftpRow(f, actualPath); }).join('');
+}
+
+function setSftpSearchQuery(value) {
+    var session = getActiveSession();
+    if (!session) return;
+    session.sftpSearchQuery = String(value || '');
+    renderSftpList(session);
+}
+
+function setSftpSearchMode(mode) {
+    var session = getActiveSession();
+    if (!session) return;
+    session.sftpSearchMode = mode === 'exact' ? 'exact' : 'fuzzy';
+    renderSftpList(session);
+}
+
+function clearSftpSearch() {
+    var input = document.getElementById('sftpSearchInput');
+    setSftpSearchQuery('');
+    if (input) input.focus();
+}
+
+function handleSftpSearchKeydown(event) {
+    if (!event || event.key !== 'Escape') return;
+    event.preventDefault();
+    clearSftpSearch();
+}
+
 function sftpLoad(path, session) {
     session = session || getActiveSession();
     if (!session || sessions.indexOf(session) === -1) return;
+    path = normalizeSftpDir(path);
+    var previousPath = normalizeSftpDir(session.sftpPath || '/');
+    if (previousPath !== path) {
+        session.sftpSearchQuery = '';
+        session._sftpList = [];
+    }
+    session.sftpPath = path;
     if (!session._connected) {
-        if (getActiveSession() === session) document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">SSH 连接尚未就绪</div>';
+        session._sftpListState = 'disconnected';
+        session._sftpListMessage = 'SSH 连接尚未就绪';
+        renderSftpList(session);
         return;
     }
-    path = normalizeSftpDir(path);
-    session.sftpPath = path;
     session._sftpListGeneration = (session._sftpListGeneration || 0) + 1;
     var generation = session._sftpListGeneration;
     abortSessionController(session, '_sftpListController');
     var controller = new AbortController();
     session._sftpListController = controller;
+    session._sftpListState = 'loading';
+    session._sftpListMessage = '';
     if (getActiveSession() === session) {
         document.getElementById('sftpPath').value = path;
-        document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">加载中...</div>';
+        syncSftpSearchControls(session);
+        renderSftpList(session);
     }
     fetch('/file/list', {
         method: 'POST',
@@ -4871,38 +5014,28 @@ function sftpLoad(path, session) {
         .then(function (d) {
             if (sessions.indexOf(session) === -1 || session._sftpListGeneration !== generation || getActiveSession() !== session) return;
             session._sftpListController = null;
-            if (d.Msg !== 'success') { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">' + esc(d.Msg) + '</div>'; return; }
+            if (d.Msg !== 'success') {
+                session._sftpListState = 'error';
+                session._sftpListMessage = d.Msg || '加载失败';
+                renderSftpList(session);
+                return;
+            }
             var actualPath = normalizeSftpDir(d.Data && d.Data.path ? d.Data.path : path);
+            if (actualPath !== path) session.sftpSearchQuery = '';
             session.sftpPath = actualPath;
+            session._sftpListPath = actualPath;
+            session._sftpList = Array.isArray(d.Data && d.Data.list) ? d.Data.list : [];
+            session._sftpListState = 'ready';
+            session._sftpListMessage = '';
             document.getElementById('sftpPath').value = actualPath;
-            var list = (d.Data && d.Data.list) || [];
-            if (!list.length) { document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading">空目录</div>'; return; }
-            document.getElementById('sftpBody').innerHTML = list.map(function (f) {
-                var isDir = f.IsDir;
-                var fp = (actualPath === '/' ? '/' : actualPath + '/') + f.Name;
-                var fpArg = escAttr(JSON.stringify(fp));
-                var mediaKind = f.PreviewKind === 'video' ? 'video' : (f.PreviewKind === 'image' ? 'image' : '');
-                var icon = isDir ? '<svg class="sftp-icon dir" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>' : '<svg class="sftp-icon file ' + mediaKind + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
-                var sizeBytes = Math.max(0, parseInt(f.SizeBytes, 10) || 0);
-                var downloadable = !!f.Downloadable;
-                var previewKindArg = escAttr(JSON.stringify(f.PreviewKind || ''));
-                var previewMimeArg = escAttr(JSON.stringify(f.PreviewMime || ''));
-                var click = isDir ? 'onclick="sftpLoad(' + fpArg + ')"' : (f.Previewable ? 'onclick="openRemotePreview(' + fpArg + ',' + previewKindArg + ',' + previewMimeArg + ')"' : (downloadable ? 'onclick="sftpDownload(' + fpArg + ',' + sizeBytes + ')"' : ''));
-                var previewTitle = f.Previewable ? (f.PreviewKind === 'video' ? '在线视频预览' : '在线图片预览') : (f.PreviewReason || '');
-                var preview = isDir || (!f.Previewable && !f.PreviewReason) ? '' : '<button class="sftp-preview' + (f.Previewable ? '' : ' disabled') + '" ' + (f.Previewable ? 'onclick="event.stopPropagation();openRemotePreview(' + fpArg + ',' + previewKindArg + ',' + previewMimeArg + ')"' : 'data-message="' + escAttr(previewTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(previewTitle) + '" aria-label="' + escAttr(previewTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="12" height="12"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg></button>';
-                var editTitle = f.Editable ? '在线编辑' : (f.EditReason || '此文件不支持在线编辑');
-                var edit = isDir ? '' : '<button class="sftp-edit' + (f.Editable ? '' : ' disabled') + '" ' + (f.Editable ? 'onclick="event.stopPropagation();openRemoteEditor(' + fpArg + ')"' : 'data-message="' + escAttr(editTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(editTitle) + '" aria-label="' + escAttr(editTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
-                var dlTitle = downloadable ? (isDir ? '压缩并下载文件夹' : '下载') : (f.DownloadReason || '此项目不支持下载');
-                var dl = '<button class="sftp-dl' + (isDir ? ' directory' : '') + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + (isDir ? 0 : sizeBytes) + ',' + (isDir ? 'true' : 'false') + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
-                var del = isDir ? '' : '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ')" title="删除" aria-label="' + escAttr('删除 ' + f.Name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
-                var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
-                return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(f.Name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + preview + edit + dl + del + '</div>';
-            }).join('');
+            renderSftpList(session);
         })
         .catch(function (err) {
             if (session._sftpListGeneration !== generation || requestWasAborted(err) || getActiveSession() !== session) return;
             session._sftpListController = null;
-            document.getElementById('sftpBody').innerHTML = '<div class="sftp-loading" style="color:var(--err)">加载失败</div>';
+            session._sftpListState = 'error';
+            session._sftpListMessage = '加载失败';
+            renderSftpList(session);
         });
 }
 

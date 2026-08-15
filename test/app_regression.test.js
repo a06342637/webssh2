@@ -359,7 +359,7 @@ test('an SFTP response from another tab cannot repaint the active tab', async ()
     const first = { id: 'first', sshInfo: 'first-info', sftpPath: '/', _sftpListGeneration: 0, _connected: true };
     const second = { id: 'second', sshInfo: 'second-info', sftpPath: '/', _sftpListGeneration: 0, _connected: true };
     const sandbox = loadFunctions(
-        ['getActiveSession', 'abortSessionController', 'cancelSessionSftpBrowsing', 'requestWasAborted', 'normalizeSftpDir', 'sftpLoad'],
+        ['getActiveSession', 'abortSessionController', 'cancelSessionSftpBrowsing', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpLoad'],
         {
             sessions: [first, second], activeIdx: 0,
             document: { getElementById: (id) => elements[id] },
@@ -380,6 +380,55 @@ test('an SFTP response from another tab cannot repaint the active tab', async ()
     await flushPromises();
     assert.equal(elements.sftpPath.value, '/second');
     assert.match(elements.sftpBody.innerHTML, /空目录/);
+});
+
+test('SFTP search supports fuzzy keywords and exact full-name matching', () => {
+    const sandbox = loadFunctions(['filterSftpList'], {});
+    const list = [
+        { Name: 'nginx.conf', IsDir: false },
+        { Name: 'nginx-sites', IsDir: true },
+        { Name: 'README.md', IsDir: false },
+        { Name: 'release notes.txt', IsDir: false },
+    ];
+
+    assert.deepEqual(
+        sandbox.filterSftpList(list, 'NGINX', 'fuzzy').map((item) => item.Name),
+        ['nginx.conf', 'nginx-sites'],
+    );
+    assert.deepEqual(
+        sandbox.filterSftpList(list, 'release txt', 'fuzzy').map((item) => item.Name),
+        ['release notes.txt'],
+    );
+    assert.deepEqual(
+        sandbox.filterSftpList(list, 'readme.MD', 'exact').map((item) => item.Name),
+        ['README.md'],
+    );
+    assert.equal(sandbox.filterSftpList(list, 'readme', 'exact').length, 0);
+});
+
+test('SFTP search UI is session-scoped and clears when navigating to another directory', () => {
+    const createSource = extractFunction('createSession');
+    const loadSource = extractFunction('sftpLoad');
+    const sessions = [{ sftpSearchQuery: '', sftpSearchMode: 'fuzzy' }, { sftpSearchQuery: '', sftpSearchMode: 'fuzzy' }];
+    const sandbox = loadFunctions(
+        ['getActiveSession', 'setSftpSearchQuery', 'setSftpSearchMode'],
+        { sessions, activeIdx: 0, renderSftpList: () => {} },
+    );
+    sandbox.setSftpSearchQuery('nginx');
+    sandbox.setSftpSearchMode('exact');
+    sandbox.activeIdx = 1;
+    sandbox.setSftpSearchQuery('apache');
+    assert.equal(sessions[0].sftpSearchQuery, 'nginx');
+    assert.equal(sessions[0].sftpSearchMode, 'exact');
+    assert.equal(sessions[1].sftpSearchQuery, 'apache');
+    assert.equal(sessions[1].sftpSearchMode, 'fuzzy');
+
+    assert.match(indexSource, /id="sftpSearchInput"[\s\S]*setSftpSearchMode\('fuzzy'\)[\s\S]*setSftpSearchMode\('exact'\)/);
+    assert.match(styleSource, /\.sftp-search-bar/);
+    assert.match(createSource, /sftpSearchQuery:\s*''/);
+    assert.match(createSource, /sftpSearchMode:\s*'fuzzy'/);
+    assert.match(loadSource, /if \(previousPath !== path\)[\s\S]*session\.sftpSearchQuery = ''/);
+    assert.match(loadSource, /session\._sftpList = \[\]/);
 });
 
 test('one-time host-key trust remains available only for the live SSH tab', () => {
@@ -600,7 +649,7 @@ test('SFTP folders are confirmed as temporary tar.gz archives before downloading
 });
 
 test('SFTP file rows place a delete action after edit and download', () => {
-    const source = extractFunction('sftpLoad');
+    const source = extractFunction('renderSftpRow');
     const previewIndex = source.indexOf("var preview =");
     const editIndex = source.indexOf("var edit =");
     const downloadIndex = source.indexOf("var dl =");

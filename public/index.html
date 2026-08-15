@@ -480,6 +480,18 @@
                         <button class="tb-btn sm" onclick="toggleSftp()" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                     </div>
                 </div>
+                <div class="sftp-search-bar" role="search" aria-label="搜索当前 SFTP 目录">
+                    <div class="sftp-search-input-wrap">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                        <input type="search" id="sftpSearchInput" class="sftp-search-input" placeholder="搜索文件或文件夹" autocomplete="off" spellcheck="false" oninput="setSftpSearchQuery(this.value)" onkeydown="handleSftpSearchKeydown(event)">
+                        <button type="button" id="sftpSearchClear" class="sftp-search-clear" onclick="clearSftpSearch()" title="清空搜索" aria-label="清空 SFTP 搜索" hidden>×</button>
+                    </div>
+                    <div class="sftp-search-mode" role="group" aria-label="搜索方式">
+                        <button type="button" id="sftpSearchFuzzy" class="active" onclick="setSftpSearchMode('fuzzy')" title="模糊搜索：文件名包含全部关键词" aria-pressed="true">模糊</button>
+                        <button type="button" id="sftpSearchExact" onclick="setSftpSearchMode('exact')" title="精准搜索：匹配完整文件名" aria-pressed="false">精准</button>
+                    </div>
+                    <span class="sftp-search-count" id="sftpSearchCount" aria-live="polite"></span>
+                </div>
                 <div class="sftp-transfer-panel" id="sftpTransferPanel" aria-live="polite"></div>
                 <div class="sftp-body" id="sftpBody">
                     <div class="sftp-loading">加载中...</div>
