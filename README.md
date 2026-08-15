@@ -13,7 +13,7 @@
 - 脚本及分类导入、导出和账号云同步；管理员可备份/恢复全站用户书签
 - 管理员用户列表，支持用户增、删、改、查及重置密码
 - xterm.js、插件、中文字体和等宽字体全部随程序/Docker 镜像部署，不依赖远程 CDN
-- Docker Compose 交互式部署及可选页面内更新
+- Docker Compose 交互式部署，以及带健康校验/回滚的页面和命令行更新
 - 移动端和 iPad 响应式界面
 
 ## 快速部署
@@ -375,7 +375,7 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 - 系统信息命令最长执行 12 秒、输出最多 1 MiB；客户端断开时会关闭对应 SSH/SFTP 连接。
 - 服务端发送 `nosniff`、`SAMEORIGIN`、`no-referrer` 和权限策略响应头。
 
-## 页面内版本更新
+## 版本更新（页面或命令行）
 
 普通 Compose 默认不具有 Docker socket 权限，页面更新也默认关闭。只有安装向导中明确输入 `y` 才会在 `.env` 写入：
 
@@ -392,22 +392,51 @@ COMPOSE_FILE=docker-compose.yml
 WEBSSH_ENABLE_SELF_UPDATE=false
 ```
 
-管理员点击普通更新时会：
+管理员点击普通更新，或在项目目录执行 `sh update.sh` 时会：
 
 1. 检查当前分支和远端版本。
 2. 在 `.webssh-update-backups/时间戳/` 保存 Git 状态、差异、提交记录、bundle 和 `.env` 备份。
 3. 执行 `git pull --ff-only`。
-4. 成功后执行 `docker compose up -d --build`。
+4. **先构建新镜像，构建期间旧容器继续服务**。
+5. 切换到新镜像后等待 Docker 健康检查，并核对容器内实际版本。
+6. 新容器启动或校验失败时，自动恢复更新前的 Docker 镜像，避免更新失败后网站一直离线。
 
-普通更新遇到分叉或本地冲突会停止，**不会强制覆盖源码**。只有管理员明确选择“强制更新”时才执行 `git reset --hard`；强制更新会覆盖所有受 Git 跟踪的本地修改。备份目录为 `0700`、文件为 `0600`，最多保留 20 份并清理 30 天前的目录；卡在 `created` 超过 10 分钟的更新助手也会在下次更新前清理。
+普通更新遇到分叉或本地冲突会停止，**不会强制覆盖源码**。只有管理员明确选择“强制更新”，或命令行传入 `--force` 时才执行 `git reset --hard`；强制更新会覆盖所有受 Git 跟踪的本地修改。备份目录为 `0700`、文件为 `0600`，最多保留 20 份并清理 30 天前的目录；卡在 `created` 超过 10 分钟的更新助手也会在下次更新前清理。
+
+页面会把当前更新任务保存在浏览器中。即使小型服务器构建十几分钟、WebSSH 容器中途重启或页面被刷新，管理员重新登录后仍会自动恢复日志轮询；只有更新助手明确返回非零退出码才显示失败，不会再因固定的 4–5 分钟前端超时误报失败。
 
 在线更新只会取得当前仓库、当前分支已经提交并推送的内容。Render、Railway 等通常无法在容器内控制 Docker，应使用平台重新部署。
 
-手动安全更新：
+### 命令行更新
+
+进入 WebSSH 仓库后执行：
 
 ```bash
-git pull --ff-only
-docker compose up -d --build
+cd /root/webssh2
+sudo sh update.sh
+```
+
+如果项目安装在其他目录，把第一行改为实际路径。强制与远端当前分支保持一致：
+
+```bash
+cd /root/webssh2
+sudo sh update.sh --force
+```
+
+从 `v0.5.63` 或更早版本首次切换到新脚本时，可以直接从当前仓库的远端分支取出脚本再执行，不需要先停止容器：
+
+```bash
+cd /root/webssh2
+git fetch origin main
+git show origin/main:update.sh > /tmp/webssh-update.sh
+sudo sh /tmp/webssh-update.sh --project-dir "$(pwd)"
+rm -f /tmp/webssh-update.sh
+```
+
+默认只对新容器的启动/健康检查等待 240 秒（镜像构建时间不计入）。如果应用启动环境特别慢，可临时调整：
+
+```bash
+WEBSSH_UPDATE_HEALTH_TIMEOUT=600 sudo -E sh update.sh
 ```
 
 ## Web 页面 Basic Auth

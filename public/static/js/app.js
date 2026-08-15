@@ -2268,6 +2268,7 @@ var SCRIPT_LEGACY_OWNER = 'webssh_script_legacy_owner';
 var AUTH_EVENT_KEY = 'webssh_auth_event';
 var PRESET_USAGE_KEY = 'webssh_preset_script_usage';
 var VERSION_CACHE_KEY = 'webssh_version_check_cache';
+var ACTIVE_VERSION_UPDATE_KEY = 'webssh_active_version_update';
 var scriptSearchQuery = '';
 var activeScriptCategory = '';
 var scriptSearchFrame = 0;
@@ -2309,6 +2310,9 @@ var pendingSiteScriptBackup = null;
 var siteScriptRestoreInProgress = false;
 var editingManagedAccount = null;
 var versionUpdatePollTimer = null;
+var versionUpdatePollGeneration = 0;
+var versionUpdatePollActive = false;
+var versionUpdateResumeAccount = '';
 
 function scriptAccountName(account) {
     var username = account && account.username ? String(account.username).trim().toLowerCase() : '';
@@ -3068,6 +3072,12 @@ function applyCurrentAccount(account) {
         refreshActiveScriptWorkspaceUI();
     }
     updateAccountUI();
+    if (currentAccount && currentAccount.isAdmin) {
+        resumeVersionUpdateIfNeeded();
+    } else {
+        versionUpdateResumeAccount = '';
+        stopVersionUpdatePolling();
+    }
 }
 
 function ensureGatewayAccount() {
@@ -3706,6 +3716,12 @@ function requireAdminForUpdate() {
 
 function checkVersionUpdate() {
     if (!requireAdminForUpdate()) return;
+    var activeTask = loadActiveVersionUpdate();
+    if (activeTask) {
+        setVersionStatus('更新任务仍在运行，正在恢复进度...', 'warn');
+        pollVersionUpdateStatus(activeTask.updater, activeTask);
+        return;
+    }
     setVersionStatus('正在检测远端版本...', '');
     apiJSON('/api/admin/version')
         .then(function (res) {
@@ -3734,69 +3750,195 @@ function compactUpdateLog(logs) {
     return lines.slice(-4).join(' / ').slice(-260);
 }
 
-function stopVersionUpdatePolling() {
-    if (versionUpdatePollTimer) {
-        clearInterval(versionUpdatePollTimer);
-        versionUpdatePollTimer = null;
-    }
+function normalizeActiveVersionUpdate(task) {
+    if (!task || typeof task !== 'object') return null;
+    var updater = String(task.updater || '').trim();
+    if (updater && !/^webssh-updater-[0-9]+$/.test(updater)) return null;
+    var startedAt = parseInt(task.startedAt, 10) || 0;
+    if (!startedAt) return null;
+    return {
+        updater: updater,
+        startedAt: startedAt,
+        targetVersion: String(task.targetVersion || '').trim(),
+        force: !!task.force
+    };
 }
 
-function pollVersionUpdateStatus(updater) {
+function loadActiveVersionUpdate() {
+    var task = null;
+    try { task = JSON.parse(safeStorageGet(ACTIVE_VERSION_UPDATE_KEY, 'null')); } catch (e) { task = null; }
+    return normalizeActiveVersionUpdate(task);
+}
+
+function saveActiveVersionUpdate(task) {
+    task = normalizeActiveVersionUpdate(task);
+    if (!task) return null;
+    safeStorageSet(ACTIVE_VERSION_UPDATE_KEY, JSON.stringify(task));
+    return task;
+}
+
+function clearActiveVersionUpdate() {
+    safeStorageRemove(ACTIVE_VERSION_UPDATE_KEY);
+}
+
+function stopVersionUpdatePolling() {
+    if (versionUpdatePollTimer) {
+        clearTimeout(versionUpdatePollTimer);
+        versionUpdatePollTimer = null;
+    }
+    versionUpdatePollActive = false;
+    versionUpdatePollGeneration++;
+}
+
+function resumeVersionUpdateIfNeeded() {
+    if (!currentAccount || !currentAccount.isAdmin) return;
+    var task = loadActiveVersionUpdate();
+    if (!task) return;
+    // A task older than one day cannot reasonably still be a normal image build.
+    // Remove only the browser marker; the updater container and its logs remain on
+    // the server for manual inspection.
+    if (Date.now() - task.startedAt > 24 * 60 * 60 * 1000) {
+        clearActiveVersionUpdate();
+        return;
+    }
+    if (versionUpdatePollActive && versionUpdateResumeAccount === currentAccount.username) return;
+    versionUpdateResumeAccount = currentAccount.username;
+    setVersionStatus('检测到未完成的更新任务，正在恢复进度...', 'warn');
+    pollVersionUpdateStatus(task.updater, task);
+}
+
+function pollVersionUpdateStatus(updater, options) {
     stopVersionUpdatePolling();
-    var startedAt = Date.now();
-    function tick() {
-        apiJSON('/api/admin/update/status?updater=' + encodeURIComponent(updater || ''))
+    options = options || {};
+    var task = loadActiveVersionUpdate() || {};
+    if (typeof updater === 'string') task.updater = updater.trim();
+    task.startedAt = parseInt(options.startedAt || task.startedAt, 10) || Date.now();
+    task.targetVersion = String(options.targetVersion || task.targetVersion || '').trim();
+    task.force = options.force === undefined ? !!task.force : !!options.force;
+    task = saveActiveVersionUpdate(task) || task;
+    var generation = versionUpdatePollGeneration;
+    versionUpdatePollActive = true;
+
+    function schedule(delay) {
+        if (!versionUpdatePollActive || generation !== versionUpdatePollGeneration) return;
+        versionUpdatePollTimer = setTimeout(tick, delay);
+    }
+
+    function finishSuccess(data, logs) {
+        stopVersionUpdatePolling();
+        clearActiveVersionUpdate();
+        setVersionStatus('更新完成，健康检查已通过，正在刷新页面...' + (logs ? ' · ' + logs : ''), 'ok');
+        showToast('更新完成，正在刷新页面', 'success');
+        apiJSON('/api/admin/version')
             .then(function (res) {
+                var versionData = res.data || {};
+                setVersionLabels(versionData);
+                saveVersionCache(versionData);
+            })
+            .catch(function () {
+                if (task.targetVersion) applyRunningAppVersion(task.targetVersion);
+            })
+            .finally(function () {
+                setTimeout(function () { location.reload(); }, 2500);
+            });
+    }
+
+    function tick() {
+        if (!versionUpdatePollActive || generation !== versionUpdatePollGeneration) return;
+        versionUpdatePollTimer = null;
+        var statusURL = '/api/admin/update/status';
+        if (task.updater) statusURL += '?updater=' + encodeURIComponent(task.updater);
+        apiJSON(statusURL)
+            .then(function (res) {
+                if (!versionUpdatePollActive || generation !== versionUpdatePollGeneration) return;
                 var data = res.data || {};
                 var logs = compactUpdateLog(data.logs);
+                if (!task.updater && data.updater) {
+                    var createdAt = (parseInt(data.createdAt, 10) || 0) * 1000;
+                    if (createdAt && createdAt + 10000 < task.startedAt) {
+                        setVersionStatus('更新请求已发出，正在等待本次任务启动...', 'warn');
+                        schedule(5000);
+                        return;
+                    }
+                    task.updater = String(data.updater || '').trim();
+                    saveActiveVersionUpdate(task);
+                }
                 if (data.success) {
-                    stopVersionUpdatePolling();
-                    setVersionStatus('更新完成，正在刷新页面...' + (logs ? ' · ' + logs : ''), 'ok');
-                    showToast('更新完成，正在刷新页面', 'success');
-                    setTimeout(function () { location.reload(); }, 5000);
+                    finishSuccess(data, logs);
                     return;
                 }
                 if (data.failed) {
                     stopVersionUpdatePolling();
+                    clearActiveVersionUpdate();
                     setVersionStatus('更新失败：' + (logs || data.error || '请查看 Docker 日志'), 'err');
                     showToast('更新失败，已显示日志末尾', 'error');
                     return;
                 }
                 setVersionStatus('更新进行中...' + (logs ? ' · ' + logs : ''), 'warn');
+                schedule(5000);
             })
             .catch(function (err) {
-                if (Date.now() - startedAt > 240000) {
+                if (!versionUpdatePollActive || generation !== versionUpdatePollGeneration) return;
+                if (err && (err.status === 401 || err.status === 403)) {
                     stopVersionUpdatePolling();
-                    setVersionStatus((err && err.msg) || '更新状态读取失败，请稍后手动刷新页面', 'warn');
+                    setVersionStatus('更新任务仍在后台运行；请重新登录管理员账号后继续查看。', 'warn');
                     return;
                 }
-                setVersionStatus('更新中，服务可能正在重启，稍后自动刷新...', 'warn');
+                if (Date.now() - task.startedAt > 90 * 60 * 1000) {
+                    stopVersionUpdatePolling();
+                    setVersionStatus('更新任务跟踪已暂停，但没有判定失败；刷新页面后可继续读取任务状态。', 'warn');
+                    return;
+                }
+                setVersionStatus('更新中，构建可能较慢或服务正在重启；连接恢复后会自动继续...', 'warn');
+                schedule(5000);
             });
     }
     tick();
-    versionUpdatePollTimer = setInterval(tick, 5000);
-    setTimeout(function () { location.reload(); }, 300000);
 }
 
 function runVersionUpdate() {
     if (!requireAdminForUpdate()) return;
     var force = !!document.getElementById('forceUpdateVersion').checked;
+    var remoteLabel = document.getElementById('remoteVersionLabel');
+    var task = saveActiveVersionUpdate({
+        updater: '',
+        startedAt: Date.now(),
+        targetVersion: remoteLabel ? remoteLabel.textContent : '',
+        force: force
+    });
     stopVersionUpdatePolling();
     setVersionStatus(force ? '正在启动强制更新任务，请稍候...' : '正在启动更新任务，请稍候...', 'warn');
     apiJSON('/api/admin/update', { method: 'POST', body: { force: force } })
         .then(function (res) {
             var updater = res.data && res.data.updater ? res.data.updater : '';
+            if (!updater) {
+                clearActiveVersionUpdate();
+                if (res.data) {
+                    setVersionLabels(res.data);
+                    saveVersionCache(res.data);
+                }
+                setVersionStatus(res.msg || '当前已经是最新版本。', 'ok');
+                showToast(res.msg || '当前已经是最新版本', 'success');
+                return;
+            }
+            task = task || { startedAt: Date.now(), force: force };
+            task.updater = updater;
+            if (res.data && res.data.version) {
+                task.targetVersion = String(res.data.version.latestVersion || res.data.version.latest || task.targetVersion || '').trim();
+            }
+            saveActiveVersionUpdate(task);
             setVersionStatus((res.msg || '更新任务已启动') + '。正在跟踪构建日志...', 'warn');
             showToast(res.msg || '更新任务已启动', 'success');
-            pollVersionUpdateStatus(updater);
+            pollVersionUpdateStatus(updater, task);
         })
         .catch(function (err) {
             if (!err || !err.msg) {
-                setVersionStatus('更新请求已发出，Docker 可能正在重启或构建中。页面会稍后自动刷新。', 'warn');
-                showToast('Docker 可能正在重启或构建中，请稍后刷新', 'info');
-                setTimeout(function () { location.reload(); }, 180000);
+                setVersionStatus('更新请求可能已发出，正在自动查找并跟踪任务...', 'warn');
+                showToast('连接暂时中断，正在继续确认更新状态', 'info');
+                pollVersionUpdateStatus('', task || { startedAt: Date.now(), force: force });
                 return;
             }
+            clearActiveVersionUpdate();
             var output = err.data && err.data.output ? ('：' + err.data.output.slice(-160)) : '';
             setVersionStatus((err.msg || '更新失败') + output, 'err');
             showToast(err.msg || '更新失败', 'error');

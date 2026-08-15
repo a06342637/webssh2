@@ -1478,6 +1478,12 @@ func versionDisplayInfo(currentVersion, latestVersion string) gin.H {
 	}
 }
 
+func versionHasUpdate(currentVersion, latestVersion, currentCommit, latestCommit string) bool {
+	currentVersion = cleanAppVersion(currentVersion, AppVersion)
+	latestVersion = cleanAppVersion(latestVersion, currentVersion)
+	return (latestCommit != "" && latestCommit != currentCommit) || latestVersion != currentVersion
+}
+
 func selfUpdateEnabled() bool {
 	value := strings.TrimSpace(os.Getenv("WEBSSH_ENABLE_SELF_UPDATE"))
 	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
@@ -1558,6 +1564,34 @@ func updaterRunArgs(updaterName, hostDir, srcDir, image, script string) []string
 	}
 }
 
+// updateHelperBootstrapScript只负责从目标分支取出最新版 update.sh，再把真正的
+// 备份、拉取、构建、健康检查和回滚交给它。这样页面更新和命令行更新共享同一套
+// 实现，修复更新逻辑时也不必等待当前旧容器先升级一次才能生效。
+func updateHelperBootstrapScript(hostDir, branch string, force bool) string {
+	args := "--project-dir " + shellQuote(hostDir) + " --branch " + shellQuote(branch)
+	if force {
+		args += " --force"
+	}
+	return strings.Join([]string{
+		"set -eu",
+		"umask 077",
+		"log(){ printf '%s %s\\n' \"$(date '+%F %T')\" \"$*\"; }",
+		"BRANCH=" + shellQuote(branch),
+		"REMOTE_REF=\"refs/remotes/origin/$BRANCH\"",
+		"cd " + shellQuote(hostDir),
+		"log 'WebSSH update helper started'",
+		"git config --global --add safe.directory " + shellQuote(hostDir) + " >/dev/null 2>&1 || true",
+		"log \"fetch update script from origin/$BRANCH\"",
+		"git fetch --prune origin \"$BRANCH\"",
+		"TMP_SCRIPT=/tmp/webssh-update.sh",
+		"trap 'rm -f \"$TMP_SCRIPT\"' EXIT HUP INT TERM",
+		"git show \"${REMOTE_REF}:update.sh\" > \"$TMP_SCRIPT\"",
+		"chmod 700 \"$TMP_SCRIPT\"",
+		"log 'handing update to update.sh'",
+		"sh \"$TMP_SCRIPT\" " + args,
+	}, "\n")
+}
+
 func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	updateMu.Lock()
 	defer updateMu.Unlock()
@@ -1579,64 +1613,7 @@ func startUpdateHelper(ctx context.Context, force bool) (gin.H, error) {
 	}
 	branch := currentGitBranch(ctx, dir)
 	updaterName := fmt.Sprintf("webssh-updater-%d", time.Now().UnixNano())
-	composeCmd := "docker compose up -d --build"
-	if force {
-		composeCmd += " --force-recreate"
-	}
-	gitUpdateCmd := strings.Join([]string{
-		"log \"pull origin/$BRANCH (fast-forward only)\"",
-		"git pull --ff-only origin \"$BRANCH\"",
-	}, "\n")
-	if force {
-		gitUpdateCmd = strings.Join([]string{
-			"log \"force update: reset tracked source files to $REMOTE_REF\"",
-			"git rev-parse --verify \"$REMOTE_REF\" >/dev/null",
-			"git reset --hard \"$REMOTE_REF\"",
-		}, "\n")
-	}
-	script := strings.Join([]string{
-		"set -eu",
-		"umask 077",
-		"log(){ printf '%s %s\\n' \"$(date '+%F %T')\" \"$*\"; }",
-		"BRANCH=" + shellQuote(branch),
-		"REMOTE_REF=\"refs/remotes/origin/$BRANCH\"",
-		"cd " + shellQuote(hostDir),
-		"log 'WebSSH update started'",
-		"git config --global --add safe.directory " + shellQuote(hostDir) + " >/dev/null 2>&1 || true",
-		"BACKUP_DIR=\"$PWD/.webssh-update-backups/$(date +%Y%m%d-%H%M%S)\"",
-		"mkdir -p \"$BACKUP_DIR\"",
-		"chmod 700 \"$PWD/.webssh-update-backups\" \"$BACKUP_DIR\"",
-		"git status --short --branch > \"$BACKUP_DIR/git-status.txt\" || true",
-		"git log --oneline --decorate --all -n 80 > \"$BACKUP_DIR/git-log.txt\" || true",
-		"git diff > \"$BACKUP_DIR/git-diff.patch\" || true",
-		"git diff --cached > \"$BACKUP_DIR/git-staged-diff.patch\" || true",
-		"git rev-parse HEAD > \"$BACKUP_DIR/HEAD.txt\" || true",
-		"git bundle create \"$BACKUP_DIR/repo-before-update.bundle\" --all >/dev/null 2>&1 || true",
-		"if [ -f .env ]; then cp -a .env \"$BACKUP_DIR/.env.backup\"; chmod 600 \"$BACKUP_DIR/.env.backup\"; fi",
-		"find \"$BACKUP_DIR\" -type f -exec chmod 600 {} +",
-		"log \"backup saved to $BACKUP_DIR\"",
-		"find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +",
-		"BACKUP_COUNT=\"$(find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')\"",
-		"while [ \"$BACKUP_COUNT\" -gt 20 ]; do OLDEST=\"$(find \"$PWD/.webssh-update-backups\" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)\"; [ -n \"$OLDEST\" ] || break; rm -rf \"$OLDEST\"; BACKUP_COUNT=$((BACKUP_COUNT - 1)); done",
-		"log 'checking git repository'",
-		"git status --short || true",
-		"log 'fetch origin'",
-		"git fetch --prune origin \"$BRANCH\"",
-		"if [ -f .git/shallow ]; then log 'repository is shallow; deepening history for safer update'; git fetch --unshallow origin \"$BRANCH\" || git fetch --deepen=1000 origin \"$BRANCH\" || true; fi",
-		gitUpdateCmd,
-		"log \"source is now $(git rev-parse --short HEAD)\"",
-		"if [ -f docker-compose.update.yml ] && [ -f .env ] && grep -Eqi '^WEBSSH_ENABLE_SELF_UPDATE=(true|1|yes)$' .env; then export COMPOSE_FILE=docker-compose.yml:docker-compose.update.yml; fi",
-		"log 'docker compose version'",
-		"docker compose version",
-		"log 'docker compose build/up'",
-		composeCmd,
-		// compose 先删旧容器再建新的，中途出岔子就会停在"服务没了"的状态。
-		// 明确校验一次，让失败在更新状态里可见，而不是等用户发现页面打不开。
-		"log 'verify webssh container is running'",
-		"CID=\"$(docker compose ps -q webssh || true)\"",
-		"if [ -z \"$CID\" ] || [ \"$(docker inspect -f '{{.State.Running}}' \"$CID\" 2>/dev/null)\" != true ]; then log 'ERROR: webssh container is not running after compose up'; exit 1; fi",
-		"log 'WebSSH update finished'",
-	}, "\n")
+	script := updateHelperBootstrapScript(hostDir, branch, force)
 	out, err := dockerOutput(ctx, updaterRunArgs(updaterName, hostDir, dir, image, script)...)
 	if err != nil {
 		return nil, fmt.Errorf("启动更新助手失败: %s", out)
@@ -1702,17 +1679,40 @@ func cleanupFinishedUpdateHelpers(ctx context.Context) {
 	}
 }
 
+func updateHelperCreatedAt(ctx context.Context, name string) int64 {
+	raw, err := dockerOutput(ctx, "inspect", "-f", "{{ index .Config.Labels \"webssh.updater.created\" }}", name)
+	if err == nil {
+		if createdAt, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); parseErr == nil {
+			return createdAt
+		}
+	}
+	raw, err = dockerOutput(ctx, "inspect", "-f", "{{.Created}}", name)
+	if err == nil {
+		if createdAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); parseErr == nil {
+			return createdAt.Unix()
+		}
+	}
+	return 0
+}
+
 func latestUpdateHelper(ctx context.Context) string {
 	out, err := dockerOutput(ctx, "ps", "-a", "--filter", "label=webssh.updater=true", "--format", "{{.Names}}")
 	if err != nil {
 		return ""
 	}
+	latestName := ""
+	latestCreatedAt := int64(0)
 	for _, name := range strings.Fields(out) {
-		if updaterRule.MatchString(name) {
-			return name
+		if !updaterRule.MatchString(name) {
+			continue
+		}
+		createdAt := updateHelperCreatedAt(ctx, name)
+		if latestName == "" || createdAt > latestCreatedAt {
+			latestName = name
+			latestCreatedAt = createdAt
 		}
 	}
-	return ""
+	return latestName
 }
 
 func readUpdateStatus(ctx context.Context, name string) (gin.H, error) {
@@ -1752,8 +1752,10 @@ func readUpdateStatus(ctx context.Context, name string) (gin.H, error) {
 		finishedAt = parts[3]
 	}
 	logs, _ := dockerOutput(ctx, "logs", "--tail", "220", name)
+	createdAt := updateHelperCreatedAt(ctx, name)
 	return gin.H{
 		"updater":    name,
+		"createdAt":  createdAt,
 		"status":     status,
 		"exitCode":   exitCode,
 		"error":      stateErr,
@@ -1813,10 +1815,11 @@ func readVersionInfo() (gin.H, error) {
 	if len(latestCommitShort) > 12 {
 		latestCommitShort = latestCommitShort[:12]
 	}
-	latestVersion := currentVersion
+	sourceVersion := gitRefAppVersion(ctx, dir, "HEAD", currentVersion)
+	latestVersion := sourceVersion
 	if latestCommit != "" && latestCommit != currentCommit {
 		if _, err := gitOutput(ctx, dir, "fetch", "--no-tags", "origin", remoteRef); err == nil {
-			latestVersion = gitRefAppVersion(ctx, dir, "FETCH_HEAD", currentVersion)
+			latestVersion = gitRefAppVersion(ctx, dir, "FETCH_HEAD", sourceVersion)
 		}
 	}
 	info := versionDisplayInfo(currentVersion, latestVersion)
@@ -1825,11 +1828,13 @@ func readVersionInfo() (gin.H, error) {
 	info["hostDir"] = hostProjectDir()
 	info["branch"] = branch
 	info["remote"] = remoteURL
+	info["sourceVersion"] = sourceVersion
+	info["binaryOutOfDate"] = sourceVersion != currentVersion
 	info["currentCommit"] = currentCommit
 	info["currentCommitShort"] = currentCommitShort
 	info["latestCommit"] = latestCommit
 	info["latestCommitShort"] = latestCommitShort
-	info["hasUpdate"] = latestCommit != "" && latestCommit != currentCommit
+	info["hasUpdate"] = versionHasUpdate(currentVersion, latestVersion, currentCommit, latestCommit)
 	return info, nil
 }
 

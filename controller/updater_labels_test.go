@@ -114,6 +114,41 @@ func TestUpdaterRunArgsOrderAndPayload(t *testing.T) {
 	}
 }
 
+func TestUpdateHelperBootstrapUsesSharedCommandUpdater(t *testing.T) {
+	script := updateHelperBootstrapScript("/root/webssh2", "main", false)
+	for _, want := range []string{
+		"git fetch --prune origin \"$BRANCH\"",
+		"git show \"${REMOTE_REF}:update.sh\"",
+		"sh \"$TMP_SCRIPT\" --project-dir '/root/webssh2' --branch 'main'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("bootstrap script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "docker compose up") {
+		t.Error("bootstrap must delegate build/activation to update.sh instead of keeping a second update implementation")
+	}
+}
+
+func TestUpdateHelperBootstrapForwardsForce(t *testing.T) {
+	script := updateHelperBootstrapScript("/srv/webssh", "stable", true)
+	if !strings.Contains(script, "--project-dir '/srv/webssh' --branch 'stable' --force") {
+		t.Fatalf("force option was not forwarded to update.sh:\n%s", script)
+	}
+}
+
+func TestVersionHasUpdateDetectsRebuiltSourceWaitingForBinary(t *testing.T) {
+	if !versionHasUpdate("0.5.63", "0.5.64", "same-commit", "same-commit") {
+		t.Fatal("a source/binary version mismatch must remain updateable after an automatic image rollback")
+	}
+	if versionHasUpdate("0.5.64", "0.5.64", "same-commit", "same-commit") {
+		t.Fatal("matching source, binary and remote versions must not report an update")
+	}
+	if !versionHasUpdate("0.5.64", "0.5.64", "old-commit", "new-commit") {
+		t.Fatal("a different remote commit must report an update even when VERSION did not change")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {

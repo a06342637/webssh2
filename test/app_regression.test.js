@@ -9,6 +9,7 @@ const styleSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static
 const indexSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
 const setupSource = fs.readFileSync(path.join(__dirname, '..', 'setup.sh'), 'utf8');
+const updateScriptSource = fs.readFileSync(path.join(__dirname, '..', 'update.sh'), 'utf8');
 
 function extractFunction(name) {
     const start = appSource.indexOf('function ' + name + '(');
@@ -1099,6 +1100,29 @@ test('runtime config keeps a newer cached remote release while refreshing curren
     assert.equal(sandbox.window.__WEBSSH_APP_VERSION__, '0.5.60');
     assert.equal(labels.currentVersionLabel.textContent, '0.5.60');
     assert.equal(labels.remoteVersionLabel.textContent, '0.5.61');
+});
+
+test('version update tracking survives slow builds and service restarts', () => {
+    const pollSource = extractFunction('pollVersionUpdateStatus');
+    const runSource = extractFunction('runVersionUpdate');
+    const accountSource = extractFunction('applyCurrentAccount');
+    assert.match(appSource, /ACTIVE_VERSION_UPDATE_KEY = 'webssh_active_version_update'/);
+    assert.match(pollSource, /saveActiveVersionUpdate\(task\)/);
+    assert.match(pollSource, /setTimeout\(tick, delay\)/);
+    assert.match(pollSource, /90 \* 60 \* 1000/);
+    assert.doesNotMatch(pollSource, /240000|300000|setInterval/);
+    assert.match(runSource, /if \(!updater\)/);
+    assert.match(runSource, /pollVersionUpdateStatus\('', task/);
+    assert.match(accountSource, /resumeVersionUpdateIfNeeded\(\)/);
+});
+
+test('command update builds before switching and verifies or rolls back the container', () => {
+    assert.match(updateScriptSource, /docker compose build webssh/);
+    assert.match(updateScriptSource, /docker compose up -d --no-deps webssh/);
+    assert.match(updateScriptSource, /wait_for_webssh/);
+    assert.match(updateScriptSource, /Version: \$expected_version/);
+    assert.match(updateScriptSource, /rollback_service/);
+    assert.match(updateScriptSource, /previous WebSSH image has been restored/);
 });
 
 test('large SFTP downloads use the native save picker and verify bytes before committing', () => {
