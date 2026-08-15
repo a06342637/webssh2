@@ -1207,6 +1207,53 @@ test('remote minimap drag maps its visible handle to the editor scroll range', (
     assert.ok(textarea.scrollTop > 390 && textarea.scrollTop < 410);
 });
 
+test('remote minimap scrolling reuses its cached drawing for large files', () => {
+    const attributes = {};
+    const textarea = {
+        clientHeight: 200,
+        scrollHeight: 1000,
+        scrollTop: 400,
+        get value() { throw new Error('scrolling reparsed the complete file'); },
+    };
+    const sandbox = loadFunctions(['drawRemoteEditorMinimap'], {
+        window: { devicePixelRatio: 1 },
+        Math,
+    });
+    const editor = {
+        textarea,
+        _minimapDrawn: true,
+        el: { classList: { contains: (name) => name === 'is-active' } },
+        minimap: { width: 50, height: 200 },
+        minimapWrap: {
+            getBoundingClientRect: () => ({ width: 50, height: 200 }),
+            classList: { toggle() {} },
+            setAttribute: (name, value) => { attributes[name] = value; },
+        },
+        minimapViewport: { style: {} },
+    };
+
+    sandbox.drawRemoteEditorMinimap(editor, false);
+
+    assert.equal(attributes['aria-valuenow'], '50');
+    assert.ok(parseFloat(editor.minimapViewport.style.top) > 2);
+});
+
+test('large remote files switch to a native low-overhead editing mode', () => {
+    const metricsSource = extractFunction('remoteEditorUpdateMetrics');
+    const inputSource = extractFunction('remoteEditorHandleLargeFileInput');
+    const decorationSource = extractFunction('scheduleRemoteEditorDecorations');
+    const createSource = extractFunction('createRemoteEditorElement');
+    assert.match(metricsSource, /lines > remoteEditorLargeFileMaxLines/);
+    assert.match(metricsSource, /classList\.toggle\('is-large-file'/);
+    assert.match(inputSource, /editor\._metricsTimer = setTimeout/);
+    assert.match(inputSource, /editor\.highlightCode\.textContent = ''/);
+    assert.match(decorationSource, /if \(largeFileMode\)[\s\S]*classList\.add\('highlight-disabled'\)[\s\S]*return;/);
+    assert.match(createSource, /drawRemoteEditorMinimap\(editor, false\)/);
+    assert.match(styleSource, /\.remote-editor-document\.is-large-file \.remote-editor-gutter/);
+    assert.match(styleSource, /\.remote-editor-document\.is-large-file \.remote-editor-minimap-wrap/);
+    assert.match(styleSource, /\.remote-editor-document\.highlight-disabled \.remote-editor-highlight\{display:none\}/);
+});
+
 test('image, icon and video previews use the authenticated cancellable preview endpoint', () => {
     const kindSource = extractFunction('remotePreviewKindForName');
     const openSource = extractFunction('openRemotePreview');

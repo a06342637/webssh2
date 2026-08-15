@@ -15,6 +15,7 @@ var remoteEditorCloseRequest = null;
 var remoteEditorZIndex = 40;
 var remoteEditorBoundsObserver = null;
 var remoteEditorDecorationMaxBytes = 384 * 1024;
+var remoteEditorLargeFileMaxLines = 12000;
 var sftpDownloadConfirmRequest = null;
 var sftpDeleteConfirmRequest = null;
 var SFTP_UPLOAD_CONCURRENCY = 2;
@@ -5624,7 +5625,9 @@ function remoteEditorSession(editor) {
 }
 
 function remoteEditorIsDirty(editor) {
-    return !!editor && (editor.viewMode || 'text') === 'text' && editor.textarea && (!!editor.isNew || editor.textarea.value !== editor.originalContent);
+    if (!editor || (editor.viewMode || 'text') !== 'text' || !editor.textarea) return false;
+    if (typeof editor._dirty === 'boolean') return editor._dirty;
+    return !!editor.isNew || editor.textarea.value !== editor.originalContent;
 }
 
 function remoteEditorPathLabel(editor) {
@@ -5642,6 +5645,10 @@ function remoteEditorSetStatus(editor, text, type) {
 
 function remoteEditorUpdateMetrics(editor) {
     if (!editor) return false;
+    if (editor._metricsTimer) {
+        clearTimeout(editor._metricsTimer);
+        editor._metricsTimer = null;
+    }
     var workspace = remoteEditorWorkspaceFor(editor);
     if ((editor.viewMode || 'text') !== 'text' || !editor.textarea) {
         var mediaDetails = [];
@@ -5655,34 +5662,70 @@ function remoteEditorUpdateMetrics(editor) {
         return false;
     }
     var value = editor.textarea.value || '';
+    var dirty = !!editor.isNew || value !== editor.originalContent;
+    editor._dirty = dirty;
     var lines = 1;
     for (var lineIndex = 0; lineIndex < value.length; lineIndex++) {
         if (value.charCodeAt(lineIndex) === 10) lines++;
     }
     var bytes = 0;
     try { bytes = new TextEncoder().encode(value).length; } catch (e) { bytes = value.length; }
-    var hideLineNumbers = lines > 50000;
-    if (editor.metrics) editor.metrics.textContent = lines + ' 行 · ' + bytes + ' 字节' + (editor.maxBytes ? ' / ' + fmtB(editor.maxBytes) : '') + (hideLineNumbers ? ' · 行号已隐藏' : '');
+    var largeFileMode = value.length > remoteEditorDecorationMaxBytes || bytes > remoteEditorDecorationMaxBytes || lines > remoteEditorLargeFileMaxLines;
+    editor._largeFile = largeFileMode;
+    var hideLineNumbers = largeFileMode || lines > 50000;
+    if (editor.el) editor.el.classList.toggle('is-large-file', largeFileMode);
+    if (editor.metrics) editor.metrics.textContent = lines + ' 行 · ' + bytes + ' 字节' + (editor.maxBytes ? ' / ' + fmtB(editor.maxBytes) : '') + (largeFileMode ? ' · 大文件流畅模式（高亮/行号/缩略图已关闭）' : (hideLineNumbers ? ' · 行号已隐藏' : ''));
     if (editor.gutter) {
         editor.gutter.hidden = hideLineNumbers;
         if (hideLineNumbers) {
-            editor.gutter.textContent = '';
-        } else {
+            if (editor.gutter.textContent) editor.gutter.textContent = '';
+            editor._gutterLineCount = 0;
+        } else if (editor._gutterLineCount !== lines) {
             var gutterLines = [];
             for (var i = 1; i <= lines; i++) gutterLines.push(String(i));
             editor.gutter.textContent = gutterLines.join('\n');
-            editor.gutter.scrollTop = editor.textarea.scrollTop;
+            editor._gutterLineCount = lines;
         }
+        editor.gutter.scrollTop = editor.textarea.scrollTop;
     }
-    if (editor.el) editor.el.classList.toggle('is-dirty', remoteEditorIsDirty(editor));
+    if (editor.el) editor.el.classList.toggle('is-dirty', dirty);
     var session = remoteEditorSession(editor);
     var tooLarge = !!editor.maxBytes && bytes > editor.maxBytes;
-    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !remoteEditorIsDirty(editor) || !session || !session._connected;
+    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !dirty || !session || !session._connected;
     if (tooLarge && !editor.saving) remoteEditorSetStatus(editor, '内容超过在线编辑上限 ' + fmtB(editor.maxBytes), 'error');
     remoteEditorUpdateTab(editor);
     updateRemoteEditorWorkspaceSummary(workspace);
     scheduleRemoteEditorDecorations(editor);
     if (workspace && workspace.minimized) renderRemoteEditorDock(getActiveSession());
+    return tooLarge;
+}
+
+function remoteEditorHandleLargeFileInput(editor) {
+    if (!editor || !editor.textarea) return false;
+    var value = editor.textarea.value || '';
+    editor._dirty = true;
+    editor._largeFile = true;
+    if (editor.el) {
+        editor.el.classList.add('is-large-file');
+        editor.el.classList.add('highlight-disabled');
+        editor.el.classList.add('is-dirty');
+    }
+    if (editor.highlightCode && editor.highlightCode.textContent) editor.highlightCode.textContent = '';
+    if (editor.gutter) {
+        editor.gutter.hidden = true;
+        if (editor.gutter.textContent) editor.gutter.textContent = '';
+        editor._gutterLineCount = 0;
+    }
+    var session = remoteEditorSession(editor);
+    var tooLarge = !!editor.maxBytes && value.length > editor.maxBytes;
+    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !session || !session._connected;
+    remoteEditorUpdateTab(editor);
+    updateRemoteEditorWorkspaceSummary(remoteEditorWorkspaceFor(editor));
+    if (editor._metricsTimer) clearTimeout(editor._metricsTimer);
+    editor._metricsTimer = setTimeout(function () {
+        editor._metricsTimer = null;
+        if (remoteEditors.indexOf(editor) >= 0) remoteEditorUpdateMetrics(editor);
+    }, 220);
     return tooLarge;
 }
 
@@ -6024,7 +6067,19 @@ function updateRemoteEditorWorkspaceSummary(workspace) {
 }
 
 function scheduleRemoteEditorDecorations(editor) {
-    if (!editor || !editor.textarea || editor._decorateFrame) return;
+    if (!editor || !editor.textarea) return;
+    var largeFileMode = !!editor._largeFile || editor.textarea.value.length > remoteEditorDecorationMaxBytes;
+    if (largeFileMode) {
+        if (editor._decorateFrame) {
+            cancelAnimationFrame(editor._decorateFrame);
+            editor._decorateFrame = 0;
+        }
+        if (editor.el) editor.el.classList.add('highlight-disabled');
+        if (editor.highlightCode && editor.highlightCode.textContent) editor.highlightCode.textContent = '';
+        syncRemoteEditorCodeScroll(editor);
+        return;
+    }
+    if (editor._decorateFrame) return;
     editor._decorateFrame = requestAnimationFrame(function () {
         editor._decorateFrame = 0;
         if (!editor.textarea || remoteEditors.indexOf(editor) < 0) return;
@@ -6032,10 +6087,11 @@ function scheduleRemoteEditorDecorations(editor) {
         var highlightEnabled = value.length <= remoteEditorDecorationMaxBytes;
         if (editor.highlightCode) {
             editor.el.classList.toggle('highlight-disabled', !highlightEnabled);
-            editor.highlightCode.innerHTML = (highlightEnabled ? remoteEditorHighlightCode(value, editor.language ? editor.language.id : 'text') : remoteEditorEscapeCode(value)) + '\n';
+            if (highlightEnabled) editor.highlightCode.innerHTML = remoteEditorHighlightCode(value, editor.language ? editor.language.id : 'text') + '\n';
+            else if (editor.highlightCode.textContent) editor.highlightCode.textContent = '';
         }
         syncRemoteEditorCodeScroll(editor);
-        drawRemoteEditorMinimap(editor);
+        drawRemoteEditorMinimap(editor, true);
     });
 }
 
@@ -6048,7 +6104,7 @@ function syncRemoteEditorCodeScroll(editor) {
     }
 }
 
-function drawRemoteEditorMinimap(editor) {
+function drawRemoteEditorMinimap(editor, redrawContent) {
     if (!editor || !editor.minimap || !editor.minimapWrap || !editor.textarea || !editor.el || !editor.el.classList.contains('is-active')) return;
     var canvas = editor.minimap;
     var wrap = editor.minimapWrap;
@@ -6057,39 +6113,43 @@ function drawRemoteEditorMinimap(editor) {
     var ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     var width = Math.max(1, Math.round(rect.width * ratio));
     var height = Math.max(1, Math.round(rect.height * ratio));
-    if (canvas.width !== width || canvas.height !== height) {
+    var canvasResized = canvas.width !== width || canvas.height !== height;
+    if (canvasResized) {
         canvas.width = width;
         canvas.height = height;
     }
-    var context = canvas.getContext('2d');
-    if (!context) return;
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    context.clearRect(0, 0, rect.width, rect.height);
-    var lines = (editor.textarea.value || '').split('\n');
-    var drawableHeight = Math.max(1, rect.height - 6);
-    var maxRows = Math.max(1, Math.floor(drawableHeight / 2));
-    var step = Math.max(1, Math.ceil(lines.length / maxRows));
-    var sampledRows = Math.max(1, Math.ceil(lines.length / step));
-    // Short files stay grouped at the top instead of being stretched over the
-    // entire minimap. Long files are sampled down to the available height.
-    var rowHeight = Math.max(1.2, Math.min(2.35, drawableHeight / sampledRows));
-    var languageColor = editor.language && editor.language.id === 'html' ? '#fb923c' :
-        (editor.language && editor.language.id === 'python' ? '#60a5fa' :
-            (editor.language && editor.language.id === 'css' ? '#c084fc' : '#67e8f9'));
-    context.globalAlpha = .66;
-    var rowIndex = 0;
-    for (var i = 0; i < lines.length; i += step) {
-        var line = lines[i] || '';
-        var trimmed = line.trim();
-        var y = 3 + rowIndex * rowHeight;
-        rowIndex++;
-        if (!trimmed) continue;
-        var indent = Math.min(22, line.length - line.replace(/^\s+/, '').length);
-        var x = 3 + Math.min(rect.width * .34, indent * .65);
-        var lineWidth = Math.max(2, Math.min(rect.width - x - 4, trimmed.length * .72));
-        context.fillStyle = /^(#|\/\/|\/\*|<!--|--)/.test(trimmed) ? '#4ade80' :
-            (/^["'\x60]/.test(trimmed) ? '#fbbf24' : languageColor);
-        context.fillRect(x, y, lineWidth, Math.max(1, Math.min(1.45, rowHeight - .25)));
+    if (redrawContent !== false || canvasResized || !editor._minimapDrawn) {
+        var context = canvas.getContext('2d');
+        if (!context) return;
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.clearRect(0, 0, rect.width, rect.height);
+        var lines = (editor.textarea.value || '').split('\n');
+        var drawableHeight = Math.max(1, rect.height - 6);
+        var maxRows = Math.max(1, Math.floor(drawableHeight / 2));
+        var step = Math.max(1, Math.ceil(lines.length / maxRows));
+        var sampledRows = Math.max(1, Math.ceil(lines.length / step));
+        // Short files stay grouped at the top instead of being stretched over the
+        // entire minimap. Long files are sampled down to the available height.
+        var rowHeight = Math.max(1.2, Math.min(2.35, drawableHeight / sampledRows));
+        var languageColor = editor.language && editor.language.id === 'html' ? '#fb923c' :
+            (editor.language && editor.language.id === 'python' ? '#60a5fa' :
+                (editor.language && editor.language.id === 'css' ? '#c084fc' : '#67e8f9'));
+        context.globalAlpha = .66;
+        var rowIndex = 0;
+        for (var i = 0; i < lines.length; i += step) {
+            var line = lines[i] || '';
+            var trimmed = line.trim();
+            var y = 3 + rowIndex * rowHeight;
+            rowIndex++;
+            if (!trimmed) continue;
+            var indent = Math.min(22, line.length - line.replace(/^\s+/, '').length);
+            var x = 3 + Math.min(rect.width * .34, indent * .65);
+            var lineWidth = Math.max(2, Math.min(rect.width - x - 4, trimmed.length * .72));
+            context.fillStyle = /^(#|\/\/|\/\*|<!--|--)/.test(trimmed) ? '#4ade80' :
+                (/^["'\x60]/.test(trimmed) ? '#fbbf24' : languageColor);
+            context.fillRect(x, y, lineWidth, Math.max(1, Math.min(1.45, rowHeight - .25)));
+        }
+        editor._minimapDrawn = true;
     }
     var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
     var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
@@ -6123,7 +6183,7 @@ function scrollRemoteEditorFromMinimap(editor, clientY, dragOffset) {
     var ratio = Math.max(0, Math.min(1, viewportTop / viewportTravel));
     editor.textarea.scrollTop = ratio * maxScroll;
     syncRemoteEditorCodeScroll(editor);
-    drawRemoteEditorMinimap(editor);
+    drawRemoteEditorMinimap(editor, false);
 }
 
 function setupRemoteEditorMinimap(editor) {
@@ -6162,7 +6222,7 @@ function setupRemoteEditorMinimap(editor) {
         if (maxScroll <= 0) return;
         editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, editor.textarea.scrollTop + event.deltaY));
         syncRemoteEditorCodeScroll(editor);
-        drawRemoteEditorMinimap(editor);
+        drawRemoteEditorMinimap(editor, false);
         event.preventDefault();
     }, { passive: false });
     wrap.addEventListener('keydown', function (event) {
@@ -6178,7 +6238,7 @@ function setupRemoteEditorMinimap(editor) {
         else return;
         editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, next));
         syncRemoteEditorCodeScroll(editor);
-        drawRemoteEditorMinimap(editor);
+        drawRemoteEditorMinimap(editor, false);
         event.preventDefault();
     });
 }
@@ -6329,12 +6389,14 @@ function createRemoteEditorElement(editor) {
             if (event.key === 'Enter') { event.preventDefault(); editor.textarea.focus(); }
         });
         editor.textarea.addEventListener('input', function () {
-            var tooLarge = remoteEditorUpdateMetrics(editor);
+            var tooLarge = editor._largeFile || editor.textarea.value.length > remoteEditorDecorationMaxBytes
+                ? remoteEditorHandleLargeFileInput(editor)
+                : remoteEditorUpdateMetrics(editor);
             if (!editor.saving && !tooLarge) remoteEditorSetStatus(editor, remoteEditorIsDirty(editor) ? '有未保存修改' : '已保存', remoteEditorIsDirty(editor) ? 'warn' : 'success');
         });
         editor.textarea.addEventListener('scroll', function () {
             syncRemoteEditorCodeScroll(editor);
-            drawRemoteEditorMinimap(editor);
+            drawRemoteEditorMinimap(editor, false);
         });
         editor.textarea.addEventListener('keydown', function (event) {
             if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
@@ -6823,6 +6885,7 @@ function destroyRemoteEditor(editor) {
     if (editor.controller) { try { editor.controller.abort(); } catch (e) { } }
     if (editor._clampFrame) { cancelAnimationFrame(editor._clampFrame); editor._clampFrame = 0; }
     if (editor._decorateFrame) { cancelAnimationFrame(editor._decorateFrame); editor._decorateFrame = 0; }
+    if (editor._metricsTimer) { clearTimeout(editor._metricsTimer); editor._metricsTimer = null; }
     if (editor._loadRetryTimer) { clearTimeout(editor._loadRetryTimer); editor._loadRetryTimer = null; }
     if (editor.minimapResizeObserver) { editor.minimapResizeObserver.disconnect(); editor.minimapResizeObserver = null; }
     var session = remoteEditorSession(editor);

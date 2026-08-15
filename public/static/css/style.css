@@ -492,7 +492,11 @@ html[data-theme="light"] .sftp-transfer-progress{background:rgba(15,23,42,.1)}
 .remote-editor-textarea{z-index:1;background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent;caret-color:#67e8f9;resize:none;outline:none;box-shadow:none!important}
 .remote-editor-textarea::selection{background:rgba(34,211,238,.28);-webkit-text-fill-color:transparent}
 .remote-editor-textarea:read-only{cursor:default;caret-color:transparent}
-.remote-editor-document.highlight-disabled .remote-editor-highlight{color:#f8fafc}
+.remote-editor-document.highlight-disabled .remote-editor-highlight{display:none}
+.remote-editor-document.highlight-disabled .remote-editor-textarea{background:#020304!important;color:#f8fafc!important;-webkit-text-fill-color:#f8fafc!important}
+.remote-editor-document.highlight-disabled .remote-editor-textarea::selection{-webkit-text-fill-color:#f8fafc}
+.remote-editor-document.is-large-file .remote-editor-code-body{grid-template-columns:minmax(0,1fr)}
+.remote-editor-document.is-large-file .remote-editor-gutter,.remote-editor-document.is-large-file .remote-editor-minimap-wrap{display:none}
 .remote-editor-minimap-wrap{position:relative;width:74px;height:100%;min-height:0;overflow:hidden;border-left:1px solid rgba(255,255,255,.075);background:#05070a;cursor:pointer;touch-action:none;user-select:none;outline:none}
 .remote-editor-minimap-wrap:focus-visible{box-shadow:0 0 0 1px rgba(34,211,238,.65) inset}
 .remote-editor-minimap-wrap.is-scrollable{cursor:grab}.remote-editor-minimap-wrap.is-dragging{cursor:grabbing}
@@ -528,6 +532,8 @@ html[data-theme="light"] .remote-editor-tab-close{color:#64748b}
 html[data-theme="light"] .remote-editor-document,html[data-theme="light"] .remote-editor-code-surface,html[data-theme="light"] .remote-editor-highlight{background:#fff}
 html[data-theme="light"] .remote-editor-document-bar{border-bottom-color:rgba(15,23,42,.1);background:#f1f5f9}
 html[data-theme="light"] .remote-editor-highlight{color:#1e293b}
+html[data-theme="light"] .remote-editor-document.highlight-disabled .remote-editor-textarea{background:#fff!important;color:#0f172a!important;-webkit-text-fill-color:#0f172a!important}
+html[data-theme="light"] .remote-editor-document.highlight-disabled .remote-editor-textarea::selection{-webkit-text-fill-color:#0f172a}
 html[data-theme="light"] .remote-editor-minimap-wrap{border-left-color:rgba(15,23,42,.1);background:#f1f5f9}
 html[data-theme="light"] .remote-editor-minimap-viewport{border-color:rgba(2,132,199,.58);background:rgba(2,132,199,.1);box-shadow:0 0 0 1px rgba(255,255,255,.35) inset}
 html[data-theme="light"] .remote-editor-media-stage{background:radial-gradient(circle at 50% 45%,rgba(2,132,199,.06),transparent 54%),#f8fafc}
@@ -544,6 +550,7 @@ html[data-theme="light"] .tok-comment{color:#008000}html[data-theme="light"] .to
     html:not([data-theme]) .remote-editor-tab:hover{background:#e2e8f0;color:#0f172a}
     html:not([data-theme]) .remote-editor-tab.is-active{background:#fff;color:#0f172a;box-shadow:0 2px 0 #0284c7 inset}
     html:not([data-theme]) .remote-editor-document,html:not([data-theme]) .remote-editor-code-surface,html:not([data-theme]) .remote-editor-highlight{background:#fff;color:#1e293b}
+    html:not([data-theme]) .remote-editor-document.highlight-disabled .remote-editor-textarea{background:#fff!important;color:#0f172a!important;-webkit-text-fill-color:#0f172a!important}
     html:not([data-theme]) .remote-editor-document-bar{border-bottom-color:rgba(15,23,42,.1);background:#f1f5f9}
     html:not([data-theme]) .remote-editor-minimap-wrap{border-left-color:rgba(15,23,42,.1);background:#f1f5f9}
     html:not([data-theme]) .remote-editor-minimap-viewport{border-color:rgba(2,132,199,.58);background:rgba(2,132,199,.1)}
@@ -1324,6 +1331,7 @@ html[data-theme="dark"] .bg-animation,html[data-theme="dark"] .gradient-orb,html
 html[data-theme="dark"] .glass-card,html[data-theme="dark"] .glass-bar,html[data-theme="dark"] .settings-panel,html[data-theme="dark"] .settings-hd,html[data-theme="dark"] .settings-body,html[data-theme="dark"] .set-group,html[data-theme="dark"] .drawer-body,html[data-theme="dark"] .sftp-panel,html[data-theme="dark"] .cmd-bar,html[data-theme="dark"] .cmd-input,html[data-theme="dark"] .cmd-send,html[data-theme="dark"] .modal-card,html[data-theme="dark"] .auth-card,html[data-theme="dark"] .account-admin-card{background:#000!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html[data-theme="dark"] .input-wrapper input,html[data-theme="dark"] textarea,html[data-theme="dark"] .script-input,html[data-theme="dark"] .script-textarea,html[data-theme="dark"] .sftp-path-input,html[data-theme="dark"] .bm-item,html[data-theme="dark"] .ssh-tab,html[data-theme="dark"] .tb-btn,html[data-theme="dark"] .tab-add-btn,html[data-theme="dark"] .edge-btn,html[data-theme="dark"] .metric-pill{background:#050505!important;box-shadow:none!important}
 html[data-theme="dark"] .remote-editor-code-surface .remote-editor-textarea{background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent!important}
+html[data-theme="dark"] .remote-editor-document.highlight-disabled .remote-editor-code-surface .remote-editor-textarea{background:#000!important;color:#f8fafc!important;-webkit-text-fill-color:#f8fafc!important}
 html[data-theme="dark"] .server-info-card-modal,html[data-theme="dark"] .server-detail-pop-card,html[data-theme="dark"] .server-info-body,html[data-theme="dark"] .server-detail-pop-body,html[data-theme="dark"] .server-info-card,html[data-theme="dark"] .server-net-chart,html[data-theme="dark"] .server-net-canvas,html[data-theme="dark"] .server-summary-grid div,html[data-theme="dark"] .server-info-facts div,html[data-theme="dark"] .server-net-pair div,html[data-theme="dark"] .server-detail-kv div{background:#000!important;box-shadow:none!important}
 
 .server-info-header-ip{cursor:copy;border-radius:6px;padding:2px 4px;margin-left:-4px;transition:background .18s ease,color .18s ease}
@@ -1378,6 +1386,7 @@ html[data-theme="dark"] .server-net-canvas .chart-hover-line,html[data-theme="da
     html:not([data-theme]) .term-edge-btns .edge-btn{border-color:rgba(0,212,255,.22)!important}
     html:not([data-theme]) .term-body{border:1px solid rgba(255,255,255,.12)}
     html:not([data-theme]) .remote-editor-code-surface .remote-editor-textarea{background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent!important}
+    html:not([data-theme]) .remote-editor-document.highlight-disabled .remote-editor-code-surface .remote-editor-textarea{background:#000!important;color:#f8fafc!important;-webkit-text-fill-color:#f8fafc!important}
 }
 @media(max-width:520px){
     .server-facts-card .server-info-facts-main .facts-two{grid-template-columns:1fr;gap:3px}
