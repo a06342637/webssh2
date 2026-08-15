@@ -638,6 +638,175 @@ test('SFTP folder downloads show real compression progress before byte download 
     assert.match(styleSource, /archive-compressing .*animation:none/);
 });
 
+test('SFTP uploads expose real browser progress and a remote-write stage', () => {
+    const uploadSource = extractFunction('runSftpUpload');
+    const renderSource = extractFunction('renderSftpUploadTransfer');
+    const cancelSource = extractFunction('cancelSftpUploadById');
+    const queueSource = extractFunction('pumpSftpUploadQueue');
+    const refreshSource = extractFunction('scheduleSftpUploadRefresh');
+    assert.match(uploadSource, /new XMLHttpRequest\(\)/);
+    assert.match(uploadSource, /xhr\.upload\.onprogress/);
+    assert.match(uploadSource, /upload\.sent = Math\.min/);
+    assert.match(uploadSource, /upload\.status = 'processing'/);
+    assert.match(queueSource, /SFTP_UPLOAD_CONCURRENCY/);
+    assert.match(refreshSource, /clearTimeout\(session\._sftpUploadRefreshTimer\)/);
+    assert.match(refreshSource, /normalizeSftpDir\(session\.sftpPath \|\| '\/'\) !== path/);
+    assert.match(renderSource, /<i>1<\/i>发送/);
+    assert.match(renderSource, /<i>2<\/i>远端写入/);
+    assert.match(renderSource, /fmtB\(speed\) \+ '\/s · 剩余 '/);
+    assert.match(cancelSource, /upload\.xhr\.abort\(\)/);
+    assert.match(styleSource, /sftp-transfer-item\.upload\.processing/);
+});
+
+test('SFTP upload progress transitions through send, remote write and completion', () => {
+    let lastXHR;
+    let refreshed = '';
+    class FakeXHR {
+        constructor() {
+            this.upload = {};
+            this.status = 0;
+            this.responseText = '';
+            lastXHR = this;
+        }
+        open(method, url) { this.method = method; this.url = url; }
+        send(body) { this.body = body; }
+        abort() { if (this.onabort) this.onabort(); if (this.onloadend) this.onloadend(); }
+    }
+    class FakeFormData {
+        constructor() { this.values = []; }
+        append(name, value) { this.values.push([name, value]); }
+    }
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '/tmp', _sftpUploadControllers: [] };
+    const upload = { id: 'upload-1', sessionId: session.id, path: '/tmp', name: 'large.bin', file: { name: 'large.bin', size: 100 }, total: 100, sent: 0, status: 'queued', xhr: null };
+    const sandbox = loadFunctions(
+        ['newSftpUploadId', 'runSftpUpload'],
+        {
+            sessions: [session],
+            getSessionById: () => session,
+            XMLHttpRequest: FakeXHR,
+            FormData: FakeFormData,
+            window: { crypto: { randomUUID: () => 'request-id' } },
+            renderSftpTransfers: () => {},
+            showToast: () => {},
+            normalizeSftpDir: (value) => value,
+            scheduleSftpUploadRefresh: (_session, value) => { refreshed = value; },
+            pumpSftpUploadQueue: () => {},
+            Date, Math, JSON,
+        },
+    );
+    sandbox.runSftpUpload(upload);
+    assert.equal(upload.status, 'running');
+    assert.equal(lastXHR.method, 'POST');
+    assert.equal(lastXHR.url, '/file/upload');
+    lastXHR.upload.onprogress({ lengthComputable: true, loaded: 55, total: 110 });
+    assert.equal(upload.sent, 50);
+    lastXHR.upload.onload();
+    assert.equal(upload.status, 'processing');
+    assert.equal(upload.sent, 100);
+    lastXHR.status = 200;
+    lastXHR.responseText = JSON.stringify({ Msg: 'success' });
+    lastXHR.onload();
+    assert.equal(upload.status, 'completed');
+    assert.equal(refreshed, '/tmp');
+    lastXHR.onloadend();
+    assert.equal(upload.xhr, null);
+    assert.equal(session._sftpUploadControllers.length, 0);
+});
+
+test('SFTP upload queue respects the server per-client limit and advances after completion', () => {
+    const xhrs = [];
+    class FakeXHR {
+        constructor() {
+            this.upload = {};
+            this.status = 0;
+            this.responseText = '';
+            xhrs.push(this);
+        }
+        open(method, url) { this.method = method; this.url = url; }
+        send(body) { this.body = body; }
+        abort() { if (this.onabort) this.onabort(); if (this.onloadend) this.onloadend(); }
+    }
+    class FakeFormData {
+        append() {}
+    }
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', sftpPath: '/tmp', _sftpUploadControllers: [], _sftpUploads: [] };
+    session._sftpUploads = [1, 2, 3].map((queueOrder) => ({
+        id: 'upload-' + queueOrder,
+        sessionId: session.id,
+        path: '/tmp',
+        name: queueOrder + '.bin',
+        file: { name: queueOrder + '.bin', size: 100 },
+        total: 100,
+        sent: 0,
+        status: 'queued',
+        queueOrder,
+        xhr: null,
+    }));
+    const sandbox = loadFunctions(
+        ['sftpActiveUploadCount', 'pumpSftpUploadQueue', 'runSftpUpload'],
+        {
+            sessions: [session],
+            SFTP_UPLOAD_CONCURRENCY: 2,
+            getSessionById: () => session,
+            newSftpUploadId: () => 'request-id',
+            XMLHttpRequest: FakeXHR,
+            FormData: FakeFormData,
+            renderSftpTransfers: () => {},
+            showToast: () => {},
+            scheduleSftpUploadRefresh: () => {},
+            Date, Math, JSON,
+        },
+    );
+
+    sandbox.pumpSftpUploadQueue();
+    assert.equal(xhrs.length, 2);
+    assert.deepEqual(session._sftpUploads.map((upload) => upload.status), ['running', 'running', 'queued']);
+
+    xhrs[0].upload.onload();
+    xhrs[0].status = 200;
+    xhrs[0].responseText = JSON.stringify({ Msg: 'success' });
+    xhrs[0].onload();
+    xhrs[0].onloadend();
+
+    assert.equal(xhrs.length, 3);
+    assert.deepEqual(session._sftpUploads.map((upload) => upload.status), ['completed', 'running', 'running']);
+});
+
+test('late upload events cannot turn a disconnected upload into a success', () => {
+    let xhr;
+    class FakeXHR {
+        constructor() { this.upload = {}; this.status = 0; this.responseText = ''; xhr = this; }
+        open() {}
+        send() {}
+    }
+    const upload = { id: 'upload-1', sessionId: 'session-1', path: '/tmp', name: 'file.bin', file: { size: 10 }, total: 10, sent: 0, status: 'queued', xhr: null };
+    const session = { id: 'session-1', _connected: true, sshInfo: 'ssh', _sftpUploadControllers: [], _sftpUploads: [upload] };
+    const sandbox = loadFunctions(['runSftpUpload'], {
+        sessions: [session],
+        getSessionById: () => session,
+        newSftpUploadId: () => 'request-id',
+        XMLHttpRequest: FakeXHR,
+        FormData: class FormData { append() {} },
+        renderSftpTransfers: () => {},
+        showToast: () => {},
+        scheduleSftpUploadRefresh: () => { throw new Error('stale response refreshed the directory'); },
+        pumpSftpUploadQueue: () => {},
+        Date, Math, JSON,
+    });
+
+    sandbox.runSftpUpload(upload);
+    upload.abortReason = 'SSH 连接已中断，上传已停止';
+    upload.status = 'error';
+    upload.error = upload.abortReason;
+    xhr.status = 200;
+    xhr.responseText = JSON.stringify({ Msg: 'success' });
+    xhr.onload();
+    assert.equal(upload.status, 'error');
+    xhr.onabort();
+    assert.equal(upload.status, 'error');
+    assert.match(upload.error, /SSH 连接已中断/);
+});
+
 test('SFTP download requests preserve file and directory intent', async () => {
     let submitted;
     const session = { id: 'session-1', _connected: true, sshInfo: 'encoded-ssh-info' };
@@ -1001,11 +1170,41 @@ test('remote text workbench includes a lightweight synchronized minimap', () => 
     const createSource = extractFunction('createRemoteEditorElement');
     const drawSource = extractFunction('drawRemoteEditorMinimap');
     const scrollSource = extractFunction('scrollRemoteEditorFromMinimap');
+    const setupSource = extractFunction('setupRemoteEditorMinimap');
+    const destroySource = extractFunction('destroyRemoteEditor');
+    assert.match(createSource, /remote-editor-minimap-wrap/);
     assert.match(createSource, /remote-editor-minimap/);
+    assert.match(createSource, /remote-editor-minimap-viewport/);
     assert.match(drawSource, /textarea\.scrollTop/);
     assert.match(drawSource, /viewportHeight/);
+    assert.match(drawSource, /rowIndex \* rowHeight/);
+    assert.match(drawSource, /classList\.toggle\('is-scrollable'/);
     assert.match(scrollSource, /textarea\.scrollTop =/);
-    assert.match(styleSource, /\.remote-editor-minimap\{/);
+    assert.match(setupSource, /setPointerCapture/);
+    assert.match(setupSource, /releasePointerCapture/);
+    assert.match(setupSource, /event\.key === 'PageDown'/);
+    assert.match(createSource, /minimapResizeObserver = new ResizeObserver/);
+    assert.match(destroySource, /minimapResizeObserver\.disconnect\(\)/);
+    assert.match(styleSource, /\.remote-editor-minimap-wrap\{/);
+    assert.match(styleSource, /\.remote-editor-minimap-viewport\{/);
+});
+
+test('remote minimap drag maps its visible handle to the editor scroll range', () => {
+    const textarea = { scrollHeight: 1000, clientHeight: 200, scrollTop: 0 };
+    const sandbox = loadFunctions(
+        ['scrollRemoteEditorFromMinimap'],
+        {
+            syncRemoteEditorCodeScroll: () => {},
+            drawRemoteEditorMinimap: () => {},
+            isFinite,
+        },
+    );
+    const editor = {
+        textarea,
+        minimapWrap: { getBoundingClientRect: () => ({ top: 100, height: 200 }) },
+    };
+    sandbox.scrollRemoteEditorFromMinimap(editor, 200, 20);
+    assert.ok(textarea.scrollTop > 390 && textarea.scrollTop < 410);
 });
 
 test('image, icon and video previews use the authenticated cancellable preview endpoint', () => {

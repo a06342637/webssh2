@@ -17,6 +17,8 @@ var remoteEditorBoundsObserver = null;
 var remoteEditorDecorationMaxBytes = 384 * 1024;
 var sftpDownloadConfirmRequest = null;
 var sftpDeleteConfirmRequest = null;
+var SFTP_UPLOAD_CONCURRENCY = 2;
+var sftpUploadSequence = 0;
 var serverInfoModalIdx = -1;
 var serverInfoTimer = null;
 var serverInfoSelectedIface = {};
@@ -557,6 +559,8 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _sftpRemoteController: null,
         _sftpDeleteController: null,
         _sftpUploadControllers: [],
+        _sftpUploads: [],
+        _sftpUploadRefreshTimer: null,
         _sftpDownloads: [],
         _remoteEditorControllers: []
     };
@@ -4802,6 +4806,10 @@ function cancelSessionSftpBrowsing(session) {
 function cancelSessionSftpRequests(session, cancelDownloads) {
     if (!session) return;
     cancelSessionSftpBrowsing(session);
+    if (session._sftpUploadRefreshTimer) {
+        clearTimeout(session._sftpUploadRefreshTimer);
+        session._sftpUploadRefreshTimer = null;
+    }
     abortSessionController(session, '_sftpRemoteController');
     abortSessionController(session, '_sftpDeleteController');
     if (sftpDeleteConfirmRequest && sftpDeleteConfirmRequest.sessionId === session.id) {
@@ -4813,6 +4821,14 @@ function cancelSessionSftpRequests(session, cancelDownloads) {
         try { controller.abort(); } catch (e) { }
     });
     session._remoteEditorControllers = [];
+    (session._sftpUploads || []).forEach(function (upload) {
+        if (upload.status === 'queued' || upload.status === 'running' || upload.status === 'processing') {
+            upload.abortReason = 'SSH 连接已中断，上传已停止';
+            upload.status = 'error';
+            upload.error = upload.abortReason;
+            upload.finishedAt = Date.now();
+        }
+    });
     (session._sftpUploadControllers || []).forEach(function (controller) {
         try { controller.abort(); } catch (e) { }
     });
@@ -5157,14 +5173,64 @@ function formatSftpEta(seconds) {
     return Math.floor(minutes / 60) + ' 小时 ' + (minutes % 60) + ' 分';
 }
 
+function sftpUploadStatusLabel(upload) {
+    if (upload.status === 'queued') return '等待上传';
+    if (upload.status === 'processing') return '写入远端';
+    if (upload.status === 'completed') return '上传完成';
+    if (upload.status === 'cancelled') return '已取消';
+    if (upload.status === 'error') return '上传失败';
+    return '正在上传';
+}
+
+function sftpUploadSpeed(upload, now) {
+    if (!upload || !upload.startedAt || upload.status !== 'running') return 0;
+    var elapsed = Math.max(0.001, ((now || Date.now()) - upload.startedAt) / 1000);
+    return upload.sent / elapsed;
+}
+
+function renderSftpUploadTransfer(upload) {
+    var total = Math.max(0, upload.total || (upload.file && upload.file.size) || 0);
+    var sent = Math.max(0, Math.min(total || upload.sent, upload.sent || 0));
+    var percent = total > 0 ? Math.max(0, Math.min(100, Math.round(sent / total * 100))) : (upload.status === 'processing' || upload.status === 'completed' ? 100 : 0);
+    var speed = sftpUploadSpeed(upload);
+    var remaining = total > sent && speed > 0 ? formatSftpEta((total - sent) / speed) : '计算中';
+    var detail = '等待可用上传通道…';
+    if (upload.status === 'running') {
+        detail = fmtB(sent) + (total ? ' / ' + fmtB(total) : '') + (speed > 0 ? ' · ' + fmtB(speed) + '/s · 剩余 ' + remaining : '');
+    } else if (upload.status === 'processing') {
+        detail = (total ? fmtB(total) + ' · ' : '') + '数据已发送，正在写入目标服务器…';
+    } else if (upload.status === 'completed') {
+        detail = (total ? fmtB(total) + ' · ' : '') + '远端文件写入完成';
+    } else if (upload.status === 'cancelled') {
+        detail = '上传已取消';
+    } else if (upload.status === 'error') {
+        detail = upload.error || '上传失败';
+    }
+    var sendDone = upload.status === 'processing' || upload.status === 'completed' || (upload.status === 'error' && percent >= 100);
+    var sendClass = upload.status === 'running' ? 'active' : (sendDone ? 'done' : (upload.status === 'error' ? 'error' : (upload.status === 'cancelled' ? 'cancelled' : '')));
+    var writeClass = upload.status === 'processing' ? 'active' : (upload.status === 'completed' ? 'done' : (upload.status === 'error' && sendDone ? 'error' : (upload.status === 'cancelled' && sendDone ? 'cancelled' : '')));
+    var retry = upload.status === 'error' ? '<button type="button" onclick="event.stopPropagation();retrySftpUpload(\'' + escAttr(upload.id) + '\')">重试</button>' : '';
+    var cancel = upload.status === 'queued' || upload.status === 'running' || upload.status === 'processing'
+        ? '<button class="danger" type="button" onclick="event.stopPropagation();cancelSftpUploadById(\'' + escAttr(upload.id) + '\')">取消</button>'
+        : '<button type="button" onclick="event.stopPropagation();dismissSftpUpload(\'' + escAttr(upload.id) + '\')">关闭</button>';
+    var progressLabel = upload.status === 'queued' ? '…' : percent + '%';
+    return '<div class="sftp-transfer-item upload ' + escAttr(upload.status) + '">' +
+        '<div class="sftp-transfer-stages"><span class="' + sendClass + '"><i>1</i>发送</span><b></b><span class="' + writeClass + '"><i>2</i>远端写入</span></div>' +
+        '<div class="sftp-transfer-head"><div><b>' + esc(upload.name) + '</b><span>' + esc(sftpUploadStatusLabel(upload)) + '</span></div><div class="sftp-transfer-actions">' + retry + cancel + '</div></div>' +
+        '<div class="sftp-transfer-progress"><i style="width:' + percent + '%"></i></div>' +
+        '<div class="sftp-transfer-detail"><span>' + esc(detail) + '</span><b>' + progressLabel + '</b></div></div>';
+}
+
 function renderSftpTransfers(session) {
     session = session || getActiveSession();
     var panel = document.getElementById('sftpTransferPanel');
     if (!panel) return;
+    var uploads = session && Array.isArray(session._sftpUploads) ? session._sftpUploads : [];
     var downloads = session && Array.isArray(session._sftpDownloads) ? session._sftpDownloads : [];
-    if (!downloads.length || getActiveSession() !== session) { panel.className = 'sftp-transfer-panel'; panel.innerHTML = ''; return; }
+    if ((!uploads.length && !downloads.length) || getActiveSession() !== session) { panel.className = 'sftp-transfer-panel'; panel.innerHTML = ''; return; }
     panel.className = 'sftp-transfer-panel show';
-    panel.innerHTML = downloads.map(function (download) {
+    var uploadMarkup = uploads.map(renderSftpUploadTransfer).join('');
+    var downloadMarkup = downloads.map(function (download) {
         var total = download.total || download.expectedSize || 0;
         var preparing = download.status === 'preparing';
         var percent = preparing ? Math.max(0, Math.min(100, parseInt(download.archivePercent, 10) || 0)) : (total > 0 ? Math.min(100, Math.round(download.received / total * 100)) : 0);
@@ -5199,6 +5265,7 @@ function renderSftpTransfers(session) {
         var stageClass = preparing ? ' archive-' + escAttr(download.archiveStage || 'connecting') : '';
         return '<div class="sftp-transfer-item ' + escAttr(download.status) + stageClass + '">' + stages + '<div class="sftp-transfer-head"><div><b>' + esc(download.name) + '</b><span>' + esc(sftpDownloadStatusLabel(download)) + '</span></div><div class="sftp-transfer-actions">' + retry + pause + cancel + '</div></div><div class="sftp-transfer-progress"><i style="width:' + percent + '%"></i></div><div class="sftp-transfer-detail"><span>' + esc(detail) + '</span><b>' + progressLabel + '</b></div></div>';
     }).join('');
+    panel.innerHTML = uploadMarkup + downloadMarkup;
 }
 
 function findSftpDownload(id) {
@@ -5947,7 +6014,12 @@ function remoteEditorApplyLanguage(editor) {
 function updateRemoteEditorWorkspaceSummary(workspace) {
     if (!workspace) return;
     var editors = remoteEditorsForWorkspace(workspace);
-    if (workspace.summary) workspace.summary.textContent = editors.length + ' 个文档';
+    var active = activeRemoteEditorForWorkspace(workspace);
+    if (workspace.summary) workspace.summary.textContent = editors.length + ' 个标签';
+    if (workspace.activeLabel) {
+        workspace.activeLabel.textContent = active ? active.name : '';
+        workspace.activeLabel.title = active ? remoteEditorPathLabel(active) : '';
+    }
     if (workspace.el) workspace.el.classList.toggle('has-dirty-documents', editors.some(remoteEditorIsDirty));
 }
 
@@ -5977,9 +6049,10 @@ function syncRemoteEditorCodeScroll(editor) {
 }
 
 function drawRemoteEditorMinimap(editor) {
-    if (!editor || !editor.minimap || !editor.textarea || !editor.el || !editor.el.classList.contains('is-active')) return;
+    if (!editor || !editor.minimap || !editor.minimapWrap || !editor.textarea || !editor.el || !editor.el.classList.contains('is-active')) return;
     var canvas = editor.minimap;
-    var rect = canvas.getBoundingClientRect();
+    var wrap = editor.minimapWrap;
+    var rect = wrap.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) return;
     var ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     var width = Math.max(1, Math.round(rect.width * ratio));
@@ -5993,58 +6066,121 @@ function drawRemoteEditorMinimap(editor) {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, rect.width, rect.height);
     var lines = (editor.textarea.value || '').split('\n');
-    var drawableHeight = Math.max(1, rect.height - 4);
-    var step = Math.max(1, Math.ceil(lines.length / Math.max(1, Math.floor(drawableHeight / 1.35))));
+    var drawableHeight = Math.max(1, rect.height - 6);
+    var maxRows = Math.max(1, Math.floor(drawableHeight / 2));
+    var step = Math.max(1, Math.ceil(lines.length / maxRows));
+    var sampledRows = Math.max(1, Math.ceil(lines.length / step));
+    // Short files stay grouped at the top instead of being stretched over the
+    // entire minimap. Long files are sampled down to the available height.
+    var rowHeight = Math.max(1.2, Math.min(2.35, drawableHeight / sampledRows));
     var languageColor = editor.language && editor.language.id === 'html' ? '#fb923c' :
         (editor.language && editor.language.id === 'python' ? '#60a5fa' :
             (editor.language && editor.language.id === 'css' ? '#c084fc' : '#67e8f9'));
     context.globalAlpha = .66;
+    var rowIndex = 0;
     for (var i = 0; i < lines.length; i += step) {
         var line = lines[i] || '';
         var trimmed = line.trim();
+        var y = 3 + rowIndex * rowHeight;
+        rowIndex++;
         if (!trimmed) continue;
         var indent = Math.min(22, line.length - line.replace(/^\s+/, '').length);
         var x = 3 + Math.min(rect.width * .34, indent * .65);
         var lineWidth = Math.max(2, Math.min(rect.width - x - 4, trimmed.length * .72));
-        var y = 2 + (i / Math.max(1, lines.length - 1)) * drawableHeight;
         context.fillStyle = /^(#|\/\/|\/\*|<!--|--)/.test(trimmed) ? '#4ade80' :
             (/^["'\x60]/.test(trimmed) ? '#fbbf24' : languageColor);
-        context.fillRect(x, y, lineWidth, Math.max(1, Math.min(1.4, drawableHeight / Math.max(1, lines.length / step))));
+        context.fillRect(x, y, lineWidth, Math.max(1, Math.min(1.45, rowHeight - .25)));
     }
     var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
-    var viewportHeight = Math.max(14, rect.height * editor.textarea.clientHeight / scrollHeight);
-    var maxScroll = Math.max(1, editor.textarea.scrollHeight - editor.textarea.clientHeight);
-    var viewportTop = (rect.height - viewportHeight) * editor.textarea.scrollTop / maxScroll;
-    context.globalAlpha = 1;
-    context.fillStyle = 'rgba(148, 163, 184, .13)';
-    context.strokeStyle = 'rgba(103, 232, 249, .55)';
-    context.lineWidth = 1;
-    context.fillRect(0, viewportTop, rect.width, viewportHeight);
-    context.strokeRect(.5, viewportTop + .5, Math.max(1, rect.width - 1), Math.max(1, viewportHeight - 1));
+    var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
+    var trackHeight = Math.max(1, rect.height - 4);
+    var viewportHeight = maxScroll > 0 ? Math.max(20, trackHeight * editor.textarea.clientHeight / scrollHeight) : trackHeight;
+    viewportHeight = Math.min(trackHeight, viewportHeight);
+    var viewportTravel = Math.max(0, trackHeight - viewportHeight);
+    var viewportTop = 2 + (maxScroll > 0 ? viewportTravel * editor.textarea.scrollTop / maxScroll : 0);
+    wrap.classList.toggle('is-scrollable', maxScroll > 0);
+    wrap.classList.toggle('is-static', maxScroll <= 0);
+    wrap.title = maxScroll > 0 ? '拖动滑块快速滚动，点击缩略图可跳转' : '当前文件已完整显示，无需滚动';
+    wrap.setAttribute('aria-valuenow', maxScroll > 0 ? String(Math.round(editor.textarea.scrollTop / maxScroll * 100)) : '0');
+    wrap.setAttribute('aria-disabled', maxScroll > 0 ? 'false' : 'true');
+    if (editor.minimapViewport) {
+        editor.minimapViewport.style.top = viewportTop + 'px';
+        editor.minimapViewport.style.height = viewportHeight + 'px';
+    }
 }
 
-function scrollRemoteEditorFromMinimap(editor, clientY) {
-    if (!editor || !editor.minimap || !editor.textarea) return;
-    var rect = editor.minimap.getBoundingClientRect();
-    var ratio = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
+function scrollRemoteEditorFromMinimap(editor, clientY, dragOffset) {
+    if (!editor || !editor.minimapWrap || !editor.textarea) return;
+    var rect = editor.minimapWrap.getBoundingClientRect();
     var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
-    editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, ratio * maxScroll));
+    if (maxScroll <= 0) return;
+    var trackHeight = Math.max(1, rect.height - 4);
+    var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
+    var viewportHeight = Math.min(trackHeight, Math.max(20, trackHeight * editor.textarea.clientHeight / scrollHeight));
+    var viewportTravel = Math.max(1, trackHeight - viewportHeight);
+    if (!isFinite(dragOffset)) dragOffset = viewportHeight / 2;
+    var viewportTop = clientY - rect.top - 2 - dragOffset;
+    var ratio = Math.max(0, Math.min(1, viewportTop / viewportTravel));
+    editor.textarea.scrollTop = ratio * maxScroll;
+    syncRemoteEditorCodeScroll(editor);
+    drawRemoteEditorMinimap(editor);
 }
 
 function setupRemoteEditorMinimap(editor) {
-    if (!editor || !editor.minimap) return;
+    if (!editor || !editor.minimapWrap || !editor.minimap) return;
+    var wrap = editor.minimapWrap;
     var dragging = false;
-    editor.minimap.addEventListener('pointerdown', function (event) {
+    var dragOffset = 0;
+    function stopDragging(event) {
+        if (!dragging) return;
+        dragging = false;
+        wrap.classList.remove('is-dragging');
+        if (event && event.pointerId != null) {
+            try { wrap.releasePointerCapture(event.pointerId); } catch (e) { }
+        }
+    }
+    wrap.addEventListener('pointerdown', function (event) {
+        var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
+        if (maxScroll <= 0) { wrap.focus(); return; }
+        var viewportRect = editor.minimapViewport ? editor.minimapViewport.getBoundingClientRect() : null;
+        dragOffset = viewportRect && event.clientY >= viewportRect.top && event.clientY <= viewportRect.bottom
+            ? event.clientY - viewportRect.top
+            : (viewportRect ? viewportRect.height / 2 : 10);
         dragging = true;
-        try { editor.minimap.setPointerCapture(event.pointerId); } catch (e) { }
-        scrollRemoteEditorFromMinimap(editor, event.clientY);
+        wrap.classList.add('is-dragging');
+        try { wrap.setPointerCapture(event.pointerId); } catch (e) { }
+        scrollRemoteEditorFromMinimap(editor, event.clientY, dragOffset);
         event.preventDefault();
     });
-    editor.minimap.addEventListener('pointermove', function (event) {
-        if (dragging) scrollRemoteEditorFromMinimap(editor, event.clientY);
+    wrap.addEventListener('pointermove', function (event) {
+        if (dragging) scrollRemoteEditorFromMinimap(editor, event.clientY, dragOffset);
     });
-    editor.minimap.addEventListener('pointerup', function () { dragging = false; });
-    editor.minimap.addEventListener('pointercancel', function () { dragging = false; });
+    wrap.addEventListener('pointerup', stopDragging);
+    wrap.addEventListener('pointercancel', stopDragging);
+    wrap.addEventListener('wheel', function (event) {
+        var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
+        if (maxScroll <= 0) return;
+        editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, editor.textarea.scrollTop + event.deltaY));
+        syncRemoteEditorCodeScroll(editor);
+        drawRemoteEditorMinimap(editor);
+        event.preventDefault();
+    }, { passive: false });
+    wrap.addEventListener('keydown', function (event) {
+        var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
+        if (maxScroll <= 0) return;
+        var next = editor.textarea.scrollTop;
+        if (event.key === 'ArrowUp') next -= 40;
+        else if (event.key === 'ArrowDown') next += 40;
+        else if (event.key === 'PageUp') next -= editor.textarea.clientHeight * .9;
+        else if (event.key === 'PageDown') next += editor.textarea.clientHeight * .9;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = maxScroll;
+        else return;
+        editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, next));
+        syncRemoteEditorCodeScroll(editor);
+        drawRemoteEditorMinimap(editor);
+        event.preventDefault();
+    });
 }
 
 function createRemoteEditorWorkspace(session) {
@@ -6060,7 +6196,9 @@ function createRemoteEditorWorkspace(session) {
     win.setAttribute('aria-label', 'SFTP 在线工作台');
     win.dataset.sessionId = session.id;
     win.innerHTML = '<div class="remote-editor-header" data-editor-drag="1">' +
-        '<div class="remote-editor-workspace-brand">' + remoteEditorIconSVG('text') + '<span><b>SFTP 工作台</b><small></small></span></div>' +
+        '<div class="remote-editor-workspace-brand">' + remoteEditorIconSVG('text') +
+        '<span class="remote-editor-workspace-title"><span><b>SFTP 工作台</b><i>SFTP</i></span><small class="remote-editor-workspace-host"></small></span>' +
+        '<span class="remote-editor-workspace-active"></span><small class="remote-editor-workspace-summary"></small></div>' +
         '<div class="remote-editor-actions"><button type="button" class="remote-editor-btn" data-workspace-action="minimize" title="最小化工作台"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg></button><button type="button" class="remote-editor-btn" data-workspace-action="maximize" title="最大化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" rx="1"/></svg></button><button type="button" class="remote-editor-btn close" data-workspace-action="close" title="关闭工作台"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>' +
         '<div class="remote-editor-tabs" role="tablist" aria-label="已打开的远端文件"></div>' +
         '<div class="remote-editor-panes"></div>';
@@ -6071,13 +6209,21 @@ function createRemoteEditorWorkspace(session) {
         header: win.querySelector('.remote-editor-header'),
         tabs: win.querySelector('.remote-editor-tabs'),
         panes: win.querySelector('.remote-editor-panes'),
-        summary: win.querySelector('.remote-editor-workspace-brand small'),
+        summary: win.querySelector('.remote-editor-workspace-summary'),
+        host: win.querySelector('.remote-editor-workspace-host'),
+        activeLabel: win.querySelector('.remote-editor-workspace-active'),
         maxBtn: win.querySelector('[data-workspace-action="maximize"]'),
         minimized: false,
         maximized: false,
         restoreRect: null,
         activeEditorId: ''
     };
+    if (workspace.host) {
+        var hostLabel = session.hostname || '远端主机';
+        if (session.username) hostLabel = session.username + '@' + hostLabel;
+        workspace.host.textContent = hostLabel;
+        workspace.host.title = hostLabel;
+    }
     session._remoteEditorWorkspace = workspace;
     win.querySelectorAll('[data-workspace-action]').forEach(function (button) {
         button.addEventListener('click', function (event) {
@@ -6126,7 +6272,7 @@ function createRemoteEditorElement(editor) {
         ? '<button type="button" class="remote-editor-btn primary remote-editor-save" data-editor-action="save" title="保存 (Ctrl+S)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>保存</span></button>'
         : '<button type="button" class="remote-editor-btn remote-media-fit" data-editor-action="media-fit" title="切换适应窗口/原始尺寸"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg><span>适应</span></button>';
     var body = kind === 'text'
-        ? '<div class="remote-editor-body remote-editor-code-body"><pre class="remote-editor-gutter" aria-hidden="true"></pre><div class="remote-editor-code-surface"><pre class="remote-editor-highlight" aria-hidden="true"><code></code></pre><textarea class="remote-editor-textarea" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="文件内容"></textarea></div><canvas class="remote-editor-minimap" aria-label="代码快速滚动预览"></canvas><div class="remote-editor-loading">正在读取远程文件…</div></div>'
+        ? '<div class="remote-editor-body remote-editor-code-body"><pre class="remote-editor-gutter" aria-hidden="true"></pre><div class="remote-editor-code-surface"><pre class="remote-editor-highlight" aria-hidden="true"><code></code></pre><textarea class="remote-editor-textarea" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="文件内容"></textarea></div><div class="remote-editor-minimap-wrap" role="scrollbar" aria-label="代码快速滚动预览" aria-orientation="vertical" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><canvas class="remote-editor-minimap" aria-hidden="true"></canvas><i class="remote-editor-minimap-viewport" aria-hidden="true"></i></div><div class="remote-editor-loading">正在读取远程文件…</div></div>'
         : '<div class="remote-editor-body remote-editor-media-body"><div class="remote-editor-media-stage"><div class="remote-editor-media-placeholder">' + remoteEditorIconSVG(kind) + '<span>正在准备' + (kind === 'video' ? '视频' : '图片') + '预览…</span></div></div><div class="remote-editor-loading">正在读取远程媒体…</div></div>';
     pane.innerHTML = '<div class="remote-editor-document-bar">' + toolbarAction +
         '<span class="remote-editor-file-icon" aria-hidden="true">' + remoteEditorIconSVG(kind) + '</span><span class="remote-editor-title"><input class="remote-editor-name" type="text" maxlength="255" autocomplete="off" spellcheck="false" aria-label="文件名"><small></small></span><span class="remote-editor-language"></span><i class="remote-editor-dirty" aria-label="有未保存修改"></i></div>' +
@@ -6175,7 +6321,9 @@ function createRemoteEditorElement(editor) {
         editor.gutter = pane.querySelector('.remote-editor-gutter');
         editor.highlight = pane.querySelector('.remote-editor-highlight');
         editor.highlightCode = pane.querySelector('.remote-editor-highlight code');
+        editor.minimapWrap = pane.querySelector('.remote-editor-minimap-wrap');
         editor.minimap = pane.querySelector('.remote-editor-minimap');
+        editor.minimapViewport = pane.querySelector('.remote-editor-minimap-viewport');
         editor.textarea.readOnly = true;
         editor.nameInput.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') { event.preventDefault(); editor.textarea.focus(); }
@@ -6202,6 +6350,12 @@ function createRemoteEditorElement(editor) {
             }
         });
         setupRemoteEditorMinimap(editor);
+        if (typeof ResizeObserver === 'function') {
+            editor.minimapResizeObserver = new ResizeObserver(function () {
+                scheduleRemoteEditorDecorations(editor);
+            });
+            editor.minimapResizeObserver.observe(editor.minimapWrap);
+        }
         remoteEditorApplyLanguage(editor);
     } else {
         editor.mediaStage = pane.querySelector('.remote-editor-media-stage');
@@ -6670,6 +6824,7 @@ function destroyRemoteEditor(editor) {
     if (editor._clampFrame) { cancelAnimationFrame(editor._clampFrame); editor._clampFrame = 0; }
     if (editor._decorateFrame) { cancelAnimationFrame(editor._decorateFrame); editor._decorateFrame = 0; }
     if (editor._loadRetryTimer) { clearTimeout(editor._loadRetryTimer); editor._loadRetryTimer = null; }
+    if (editor.minimapResizeObserver) { editor.minimapResizeObserver.disconnect(); editor.minimapResizeObserver = null; }
     var session = remoteEditorSession(editor);
     if (session) removeRemoteEditorController(session, editor.controller);
     if (editor.mediaElement) {
@@ -7054,35 +7209,225 @@ function confirmSftpDirPicker() {
     hideSftpDirPicker();
 }
 
+function newSftpUploadId(prefix) {
+    var value = '';
+    try {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') value = window.crypto.randomUUID();
+    } catch (e) { }
+    if (!value) value = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+    return (prefix || 'upload') + '_' + value;
+}
+
+function findSftpUpload(id) {
+    for (var i = 0; i < sessions.length; i++) {
+        var list = sessions[i]._sftpUploads || [];
+        for (var j = 0; j < list.length; j++) if (list[j].id === id) return list[j];
+    }
+    return null;
+}
+
+function sftpActiveUploadCount() {
+    var count = 0;
+    sessions.forEach(function (session) {
+        (session._sftpUploads || []).forEach(function (upload) {
+            if (upload.xhr) count++;
+        });
+    });
+    return count;
+}
+
+function pumpSftpUploadQueue() {
+    var queued = [];
+    sessions.forEach(function (session) {
+        (session._sftpUploads || []).forEach(function (upload) {
+            if (upload.status === 'queued' && !upload.xhr) queued.push(upload);
+        });
+    });
+    queued.sort(function (left, right) {
+        return (left.queueOrder || 0) - (right.queueOrder || 0);
+    });
+    for (var i = 0; i < queued.length && sftpActiveUploadCount() < SFTP_UPLOAD_CONCURRENCY; i++) {
+        runSftpUpload(queued[i]);
+    }
+}
+
+function scheduleSftpUploadRefresh(session, path) {
+    if (!session || sessions.indexOf(session) < 0) return;
+    path = normalizeSftpDir(path || '/');
+    if (normalizeSftpDir(session.sftpPath || '/') !== path) return;
+    if (session._sftpUploadRefreshTimer) clearTimeout(session._sftpUploadRefreshTimer);
+    session._sftpUploadRefreshTimer = setTimeout(function () {
+        session._sftpUploadRefreshTimer = null;
+        if (sessions.indexOf(session) < 0 || normalizeSftpDir(session.sftpPath || '/') !== path) return;
+        sftpLoad(path, session);
+    }, 140);
+}
+
+function runSftpUpload(upload) {
+    if (!upload || upload.xhr || upload.status !== 'queued') return;
+    var session = getSessionById(upload.sessionId);
+    if (!session || !session._connected) {
+        upload.status = 'error';
+        upload.error = 'SSH 连接已断开';
+        upload.finishedAt = Date.now();
+        if (session) renderSftpTransfers(session);
+        return;
+    }
+    upload.status = 'running';
+    upload.error = '';
+    upload.abortReason = '';
+    upload.sent = 0;
+    upload.startedAt = Date.now();
+    upload.finishedAt = 0;
+    var xhr = new XMLHttpRequest();
+    upload.xhr = xhr;
+    (session._sftpUploadControllers || (session._sftpUploadControllers = [])).push(xhr);
+    var fd = new FormData();
+    fd.append('sshInfo', session.sshInfo);
+    fd.append('path', upload.path);
+    fd.append('id', newSftpUploadId('request'));
+    fd.append('file', upload.file);
+    xhr.open('POST', '/file/upload', true);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = function (event) {
+        if (upload.xhr !== xhr || upload.status !== 'running') return;
+        if (event.lengthComputable && event.total > 0 && upload.total > 0) {
+            upload.sent = Math.min(upload.total, Math.round(upload.total * event.loaded / event.total));
+        } else {
+            upload.sent = Math.min(upload.total || event.loaded, event.loaded);
+        }
+        renderSftpTransfers(session);
+    };
+    xhr.upload.onload = function () {
+        if (upload.xhr !== xhr || upload.status !== 'running') return;
+        upload.sent = upload.total;
+        upload.status = 'processing';
+        renderSftpTransfers(session);
+    };
+    xhr.onload = function () {
+        if (upload.xhr !== xhr || (upload.status !== 'running' && upload.status !== 'processing')) return;
+        var data = {};
+        try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch (e) { data = {}; }
+        if (xhr.status >= 200 && xhr.status < 300 && data.Msg === 'success') {
+            upload.sent = upload.total;
+            upload.status = 'completed';
+            upload.finishedAt = Date.now();
+            showToast('上传成功: ' + upload.name, 'success');
+            scheduleSftpUploadRefresh(session, upload.path);
+        } else {
+            upload.status = 'error';
+            upload.error = data.Msg || (xhr.status >= 200 && xhr.status < 300 ? '服务器返回了无效响应' : ('上传失败（HTTP ' + xhr.status + '）'));
+            upload.finishedAt = Date.now();
+            showToast('上传失败: ' + upload.error, 'error');
+        }
+        renderSftpTransfers(session);
+    };
+    xhr.onerror = function () {
+        if (upload.xhr !== xhr || (upload.status !== 'running' && upload.status !== 'processing')) return;
+        upload.status = 'error';
+        upload.error = '网络请求失败';
+        upload.finishedAt = Date.now();
+        showToast('上传失败: ' + upload.name, 'error');
+        renderSftpTransfers(session);
+    };
+    xhr.onabort = function () {
+        if (upload.xhr !== xhr) return;
+        if (upload.abortReason) {
+            upload.status = 'error';
+            upload.error = upload.abortReason;
+        } else {
+            upload.status = 'cancelled';
+        }
+        upload.abortReason = '';
+        upload.finishedAt = Date.now();
+        renderSftpTransfers(session);
+    };
+    xhr.onloadend = function () {
+        var index = (session._sftpUploadControllers || []).indexOf(xhr);
+        if (index >= 0) session._sftpUploadControllers.splice(index, 1);
+        if (upload.xhr === xhr) upload.xhr = null;
+        renderSftpTransfers(session);
+        pumpSftpUploadQueue();
+    };
+    renderSftpTransfers(session);
+    try {
+        xhr.send(fd);
+    } catch (err) {
+        var index = (session._sftpUploadControllers || []).indexOf(xhr);
+        if (index >= 0) session._sftpUploadControllers.splice(index, 1);
+        if (upload.xhr === xhr) upload.xhr = null;
+        upload.status = 'error';
+        upload.error = (err && err.message) || '无法启动上传请求';
+        upload.finishedAt = Date.now();
+        renderSftpTransfers(session);
+        pumpSftpUploadQueue();
+    }
+}
+
+function cancelSftpUploadById(id) {
+    var upload = findSftpUpload(id);
+    if (!upload || ['completed', 'cancelled', 'error'].indexOf(upload.status) >= 0) return;
+    upload.status = 'cancelled';
+    upload.abortReason = '';
+    upload.finishedAt = Date.now();
+    if (upload.xhr) {
+        try { upload.xhr.abort(); } catch (e) { }
+    }
+    renderSftpTransfers(getSessionById(upload.sessionId));
+    pumpSftpUploadQueue();
+}
+
+function retrySftpUpload(id) {
+    var upload = findSftpUpload(id);
+    if (!upload || upload.status !== 'error' || upload.xhr) return;
+    upload.status = 'queued';
+    upload.error = '';
+    upload.sent = 0;
+    upload.startedAt = 0;
+    upload.finishedAt = 0;
+    upload.abortReason = '';
+    upload.queueOrder = ++sftpUploadSequence;
+    renderSftpTransfers(getSessionById(upload.sessionId));
+    pumpSftpUploadQueue();
+}
+
+function dismissSftpUpload(id) {
+    var upload = findSftpUpload(id);
+    if (!upload || ['queued', 'running', 'processing'].indexOf(upload.status) >= 0) return;
+    var session = getSessionById(upload.sessionId);
+    if (!session) return;
+    session._sftpUploads = (session._sftpUploads || []).filter(function (item) { return item !== upload; });
+    renderSftpTransfers(session);
+}
+
 function sftpUpload() {
     var input = document.getElementById('sftpUploadInput');
     var session = getActiveSession();
     if (!input.files.length || !session) return;
     if (!session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
-    var sshInfo = session.sshInfo;
     var uploadPath = normalizeSftpDir(session.sftpPath);
-    Array.from(input.files).forEach(function (f, index) {
-        var controller = new AbortController();
-        session._sftpUploadControllers.push(controller);
-        var fd = new FormData();
-        var uploadId = window.crypto && typeof window.crypto.randomUUID === 'function'
-            ? window.crypto.randomUUID()
-            : Date.now().toString(36) + '_' + index + '_' + Math.random().toString(36).slice(2);
-        fd.append('sshInfo', sshInfo); fd.append('path', uploadPath); fd.append('id', uploadId); fd.append('file', f);
-        fetch('/file/upload', { method: 'POST', body: fd, signal: controller.signal })
-            .then(function (r) { return r.json(); })
-            .then(function (d) {
-                if (sessions.indexOf(session) === -1) return;
-                if (d.Msg === 'success') { showToast('上传成功: ' + f.name, 'success'); sftpLoad(uploadPath, session); }
-                else showToast('上传失败: ' + (d.Msg || f.name), 'error');
-            })
-            .catch(function (err) { if (!requestWasAborted(err)) showToast('上传失败', 'error'); })
-            .finally(function () {
-                var idx = session._sftpUploadControllers.indexOf(controller);
-                if (idx >= 0) session._sftpUploadControllers.splice(idx, 1);
-            });
+    var uploads = Array.from(input.files).map(function (file) {
+        return {
+            id: newSftpUploadId('upload'),
+            sessionId: session.id,
+            path: uploadPath,
+            name: file.name,
+            file: file,
+            total: Math.max(0, file.size || 0),
+            sent: 0,
+            status: 'queued',
+            queueOrder: ++sftpUploadSequence,
+            startedAt: 0,
+            finishedAt: 0,
+            xhr: null,
+            error: '',
+            abortReason: ''
+        };
     });
+    session._sftpUploads = uploads.concat(session._sftpUploads || []);
     input.value = '';
+    renderSftpTransfers(session);
+    pumpSftpUploadQueue();
 }
 
 document.getElementById('sftpPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') sftpGo(); });
@@ -8040,7 +8385,19 @@ function initPreviewMode() {
             var remove = item.isDir ? '' : '<button class="sftp-delete" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
             return '<div class="sftp-row">' + icon + '<span class="sftp-name">' + esc(item.name) + '</span><span class="sftp-meta">' + item.size + '</span>' + edit + download + remove + '</div>';
         }).join('');
-        if (params.get('delete') === 'confirm') {
+        if (params.get('upload') === 'progress') {
+            var uploadPreviewPanel = document.getElementById('sftpTransferPanel');
+            if (uploadPreviewPanel) {
+                uploadPreviewPanel.className = 'sftp-transfer-panel show';
+                uploadPreviewPanel.innerHTML = renderSftpUploadTransfer({ id: 'preview-upload', name: 'website-backup.tar.gz', total: 128 * 1024 * 1024, sent: 71 * 1024 * 1024, status: 'running', startedAt: Date.now() - 9200 });
+            }
+        } else if (params.get('upload') === 'processing') {
+            var processingPreviewPanel = document.getElementById('sftpTransferPanel');
+            if (processingPreviewPanel) {
+                processingPreviewPanel.className = 'sftp-transfer-panel show';
+                processingPreviewPanel.innerHTML = renderSftpUploadTransfer({ id: 'preview-upload', name: 'website-backup.tar.gz', total: 128 * 1024 * 1024, sent: 128 * 1024 * 1024, status: 'processing', startedAt: Date.now() - 14000 });
+            }
+        } else if (params.get('delete') === 'confirm') {
             sftpDeleteConfirmRequest = { sessionId: 'preview', path: '/var/log/archive.log', parentPath: '/var/log', name: 'archive.log', deleting: false };
             document.getElementById('sftpDeleteConfirmName').textContent = 'archive.log';
             document.getElementById('sftpDeleteConfirmPath').textContent = '/var/log/archive.log';
