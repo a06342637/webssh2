@@ -281,17 +281,20 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .sftp-icon.file{color:var(--t3)}
 .sftp-name{flex:1;font-size:11px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sftp-meta{font-size:9px;color:var(--t3);white-space:nowrap}
-.sftp-dl,.sftp-edit,.sftp-delete{width:22px;height:22px;border:1px solid transparent;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:5px;transition:all var(--tr);opacity:.72;flex-shrink:0}
-.sftp-row:hover .sftp-dl,.sftp-row:focus-within .sftp-dl,.sftp-row:hover .sftp-delete,.sftp-row:focus-within .sftp-delete{opacity:1}
+.sftp-dl,.sftp-edit,.sftp-preview,.sftp-delete{width:22px;height:22px;border:1px solid transparent;background:transparent;color:var(--t3);cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:5px;transition:all var(--tr);opacity:.72;flex-shrink:0}
+.sftp-row:hover .sftp-dl,.sftp-row:focus-within .sftp-dl,.sftp-row:hover .sftp-preview,.sftp-row:focus-within .sftp-preview,.sftp-row:hover .sftp-delete,.sftp-row:focus-within .sftp-delete{opacity:1}
 .sftp-dl.directory:not(.disabled){color:var(--c1);opacity:.92;border-color:rgba(0,212,255,.14);background:rgba(0,212,255,.06)}
 .sftp-dl:hover,.sftp-dl:focus-visible{color:var(--c1);background:rgba(0,212,255,.1)}
 .sftp-row:hover .sftp-edit,.sftp-row:focus-within .sftp-edit{opacity:1}
 .sftp-edit{color:var(--t2)}
 .sftp-edit:hover{color:var(--ok);background:rgba(0,255,136,.1)}
+.sftp-preview{color:#a78bfa}
+.sftp-preview:hover,.sftp-preview:focus-visible{color:#c4b5fd;border-color:rgba(167,139,250,.32);background:rgba(139,92,246,.12)}
 .sftp-delete{color:var(--t3)}
 .sftp-delete:hover,.sftp-delete:focus-visible{color:var(--err);border-color:rgba(255,0,110,.28);background:rgba(255,0,110,.1)}
-.sftp-edit.disabled,.sftp-dl.disabled{opacity:.28;cursor:help}
-.sftp-edit.disabled:hover,.sftp-dl.disabled:hover{color:var(--t3);background:transparent;border-color:transparent}
+.sftp-edit.disabled,.sftp-preview.disabled,.sftp-dl.disabled{opacity:.28;cursor:help}
+.sftp-edit.disabled:hover,.sftp-preview.disabled:hover,.sftp-dl.disabled:hover{color:var(--t3);background:transparent;border-color:transparent}
+.sftp-icon.file.image{color:#a78bfa}.sftp-icon.file.video{color:#fb7185}
 .sftp-link-mark{display:inline-flex;align-items:center;color:var(--t3);margin-left:-4px}
 .sftp-link-mark svg{width:10px;height:10px}
 
@@ -422,13 +425,120 @@ html[data-theme="light"] .sftp-transfer-progress{background:rgba(15,23,42,.1)}
     .sftp-download-confirm-actions{grid-template-columns:1fr}
 }
 @media(hover:none),(pointer:coarse){
-    .sftp-edit,.sftp-dl,.sftp-delete{opacity:.78}
+    .sftp-edit,.sftp-preview,.sftp-dl,.sftp-delete{opacity:.78}
 }
 @media(max-width:420px){
     .remote-editor-actions{gap:2px}
     .remote-editor-btn{min-width:25px;padding:0 4px}
     .remote-editor-dock{left:7px;bottom:7px;max-width:calc(100% - 14px)}
     .remote-editor-dock-item{max-width:150px;padding:0 8px}
+}
+
+/* Shared SFTP workbench: one window, wrapped document tabs, lightweight
+   syntax layer and media panes. No external editor runtime is required. */
+.remote-editor-workspace{background:#07090c}
+.remote-editor-workspace-brand{min-width:0;display:flex;align-items:center;gap:9px;flex:1}
+.remote-editor-workspace-brand>svg{width:25px;height:25px;padding:5px;flex-shrink:0;border:1px solid rgba(34,211,238,.28);border-radius:7px;background:rgba(34,211,238,.08);color:#22d3ee}
+.remote-editor-workspace-brand span{min-width:0;display:flex;flex-direction:column;gap:1px}
+.remote-editor-workspace-brand b{font:700 12px/1.2 'WebSSH Noto Sans SC',sans-serif;color:#f8fafc}
+.remote-editor-workspace-brand small{font:9px/1.25 'WebSSH JetBrains Mono','JetBrains Mono',monospace;color:rgba(255,255,255,.46)}
+.remote-editor-tabs{display:flex;flex-wrap:wrap;align-content:flex-start;gap:1px;max-height:104px;overflow:auto;flex-shrink:0;padding:5px 6px 4px;border-bottom:1px solid rgba(255,255,255,.1);background:#090c10;scrollbar-width:thin}
+.remote-editor-tabs::-webkit-scrollbar{width:3px;height:3px}.remote-editor-tabs::-webkit-scrollbar-thumb{background:rgba(148,163,184,.24);border-radius:4px}
+.remote-editor-tab{height:31px;min-width:112px;max-width:205px;display:flex;align-items:center;gap:6px;padding:0 5px 0 9px;border:1px solid transparent;border-radius:6px;background:transparent;color:rgba(226,232,240,.64);font:10px/1 'WebSSH Noto Sans SC',sans-serif;cursor:pointer;user-select:none;outline:none}
+.remote-editor-tab:hover{background:rgba(255,255,255,.045);color:#f8fafc}
+.remote-editor-tab.is-active{border-color:rgba(34,211,238,.23);background:#111820;color:#fff;box-shadow:0 -2px 0 #22d3ee inset}
+.remote-editor-tab:focus-visible{outline:2px solid rgba(34,211,238,.7);outline-offset:-2px}
+.remote-editor-tab-icon{width:15px;height:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#67e8f9}
+.remote-editor-tab[data-language="html"] .remote-editor-tab-icon{color:#fb923c}.remote-editor-tab[data-language="css"] .remote-editor-tab-icon{color:#c084fc}.remote-editor-tab[data-language="python"] .remote-editor-tab-icon{color:#60a5fa}.remote-editor-tab[data-language="image"] .remote-editor-tab-icon{color:#a78bfa}.remote-editor-tab[data-language="video"] .remote-editor-tab-icon{color:#fb7185}
+.remote-editor-tab-icon svg{width:14px;height:14px}
+.remote-editor-tab-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-editor-tab-dirty{width:7px;height:7px;display:none;flex-shrink:0;border-radius:50%;background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,.55)}
+.remote-editor-tab.is-dirty .remote-editor-tab-dirty{display:block}
+.remote-editor-tab.is-loading .remote-editor-tab-icon{animation:pulse 1s infinite}
+.remote-editor-tab-close{width:21px;height:21px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0;border:0;border-radius:4px;background:transparent;color:rgba(226,232,240,.45);cursor:pointer}
+.remote-editor-tab-close:hover{background:rgba(244,63,94,.14);color:#fb7185}.remote-editor-tab-close svg{width:11px;height:11px}
+.remote-editor-panes{position:relative;flex:1;min-height:0;display:flex}
+.remote-editor-document{display:none;min-width:0;min-height:0;flex:1;flex-direction:column;background:#020304}
+.remote-editor-document.is-active{display:flex}
+.remote-editor-document-bar{height:45px;display:flex;align-items:center;gap:9px;padding:0 10px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.09);background:#080b0f}
+.remote-editor-document-bar .remote-editor-title{flex:1}
+.remote-editor-document.is-new .remote-editor-name{padding:0 5px;border:1px solid rgba(34,211,238,.4);background:rgba(34,211,238,.08);cursor:text}
+.remote-editor-document.is-new .remote-editor-name:focus{border-color:#22d3ee;background:rgba(34,211,238,.13)}
+.remote-editor-document.is-dirty .remote-editor-dirty{display:block}
+.remote-editor-language{min-width:38px;height:20px;display:inline-flex;align-items:center;justify-content:center;padding:0 7px;flex-shrink:0;border:1px solid rgba(103,232,249,.18);border-radius:10px;background:rgba(34,211,238,.07);color:#67e8f9;font:700 8px/1 'WebSSH JetBrains Mono','JetBrains Mono',monospace;letter-spacing:.25px}
+.remote-editor-language[data-language="html"]{border-color:rgba(251,146,60,.25);background:rgba(251,146,60,.08);color:#fb923c}
+.remote-editor-language[data-language="css"]{border-color:rgba(192,132,252,.25);background:rgba(192,132,252,.08);color:#c084fc}
+.remote-editor-language[data-language="python"]{border-color:rgba(96,165,250,.25);background:rgba(96,165,250,.08);color:#60a5fa}
+.remote-editor-language[data-language="image"]{border-color:rgba(167,139,250,.25);background:rgba(139,92,246,.08);color:#c4b5fd}
+.remote-editor-language[data-language="video"]{border-color:rgba(251,113,133,.25);background:rgba(244,63,94,.08);color:#fb7185}
+.remote-editor-code-body{display:grid;grid-template-columns:50px minmax(0,1fr) 88px;overflow:hidden}
+.remote-editor-code-surface{position:relative;min-width:0;min-height:0;overflow:hidden;background:#020304}
+.remote-editor-highlight,.remote-editor-textarea{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:13px 16px 18px;border:0;border-radius:0;tab-size:4;font:12px/1.65 'WebSSH JetBrains Mono','JetBrains Mono','Cascadia Code',Consolas,monospace;white-space:pre;overflow:auto}
+.remote-editor-highlight{z-index:0;background:#020304;color:#dbeafe;pointer-events:none;scrollbar-width:none}
+.remote-editor-highlight::-webkit-scrollbar{display:none}
+.remote-editor-highlight code{font:inherit}
+.remote-editor-textarea{z-index:1;background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent;caret-color:#67e8f9;resize:none;outline:none;box-shadow:none!important}
+.remote-editor-textarea::selection{background:rgba(34,211,238,.28);-webkit-text-fill-color:transparent}
+.remote-editor-textarea:read-only{cursor:default;caret-color:transparent}
+.remote-editor-document.highlight-disabled .remote-editor-highlight{color:#f8fafc}
+.remote-editor-minimap{width:88px;height:100%;display:block;border-left:1px solid rgba(255,255,255,.07);background:#05070a;cursor:ns-resize;touch-action:none}
+.remote-editor-document.is-loading .remote-editor-textarea{pointer-events:none}
+.remote-editor-document.is-loading .remote-editor-loading{display:flex}
+.remote-editor-media-body{display:flex;overflow:hidden;background:#030407}
+.remote-editor-media-stage{position:relative;flex:1;min-width:0;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;padding:18px;background:radial-gradient(circle at 50% 45%,rgba(34,211,238,.045),transparent 54%),#030407}
+.remote-editor-image,.remote-editor-video{display:block;max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;box-shadow:0 14px 44px rgba(0,0,0,.3)}
+.remote-editor-video{width:min(100%,980px);height:auto;background:#000}
+.remote-editor-document.media-actual-size .remote-editor-image{max-width:none;max-height:none}.remote-editor-document.media-actual-size .remote-editor-video{max-width:none;max-height:none}
+.remote-editor-media-placeholder{display:flex;flex-direction:column;align-items:center;gap:11px;color:rgba(226,232,240,.46);font-size:11px}
+.remote-editor-media-placeholder svg{width:48px;height:48px;color:rgba(103,232,249,.46)}
+.remote-editor-loading{pointer-events:none}
+.remote-editor-status{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.remote-editor-dock-item b{min-width:0;color:#67e8f9;font:800 9px/1 'WebSSH JetBrains Mono','JetBrains Mono',monospace}
+.tok-comment{color:#6a9955}.tok-string{color:#ce9178}.tok-keyword{color:#c586c0}.tok-number{color:#b5cea8}.tok-tag{color:#569cd6}.tok-attr{color:#9cdcfe}.tok-property{color:#9cdcfe}.tok-builtin{color:#4ec9b0}.tok-variable{color:#9cdcfe}.tok-function{color:#dcdcaa}.tok-decorator{color:#d7ba7d}.tok-entity{color:#d7ba7d}.tok-punctuation{color:#808080}
+
+html[data-theme="light"] .remote-editor-workspace{background:#f8fafc}
+html[data-theme="light"] .remote-editor-workspace-brand b{color:#0f172a}
+html[data-theme="light"] .remote-editor-workspace-brand small{color:rgba(15,23,42,.52)}
+html[data-theme="light"] .remote-editor-tabs{border-bottom-color:rgba(15,23,42,.1);background:#e8eef5}
+html[data-theme="light"] .remote-editor-tab{color:#475569}html[data-theme="light"] .remote-editor-tab:hover{background:rgba(2,132,199,.07);color:#0f172a}
+html[data-theme="light"] .remote-editor-tab.is-active{border-color:rgba(2,132,199,.2);background:#fff;color:#0f172a;box-shadow:0 -2px 0 #0284c7 inset}
+html[data-theme="light"] .remote-editor-tab-close{color:#64748b}
+html[data-theme="light"] .remote-editor-document,html[data-theme="light"] .remote-editor-code-surface,html[data-theme="light"] .remote-editor-highlight{background:#fff}
+html[data-theme="light"] .remote-editor-document-bar{border-bottom-color:rgba(15,23,42,.1);background:#f1f5f9}
+html[data-theme="light"] .remote-editor-highlight{color:#1e293b}
+html[data-theme="light"] .remote-editor-minimap{border-left-color:rgba(15,23,42,.1);background:#f1f5f9}
+html[data-theme="light"] .remote-editor-media-stage{background:radial-gradient(circle at 50% 45%,rgba(2,132,199,.06),transparent 54%),#f8fafc}
+html[data-theme="light"] .tok-comment{color:#008000}html[data-theme="light"] .tok-string{color:#a31515}html[data-theme="light"] .tok-keyword{color:#af00db}html[data-theme="light"] .tok-number{color:#098658}html[data-theme="light"] .tok-tag{color:#800000}html[data-theme="light"] .tok-attr,html[data-theme="light"] .tok-property,html[data-theme="light"] .tok-variable{color:#0451a5}html[data-theme="light"] .tok-builtin{color:#267f99}html[data-theme="light"] .tok-function{color:#795e26}html[data-theme="light"] .tok-punctuation{color:#64748b}
+
+@media(prefers-color-scheme:light){
+    html:not([data-theme]) .remote-editor-workspace{background:#f8fafc}
+    html:not([data-theme]) .remote-editor-workspace-brand b{color:#0f172a}
+    html:not([data-theme]) .remote-editor-workspace-brand small{color:rgba(15,23,42,.52)}
+    html:not([data-theme]) .remote-editor-tabs{border-bottom-color:rgba(15,23,42,.1);background:#e8eef5}
+    html:not([data-theme]) .remote-editor-tab{color:#475569}
+    html:not([data-theme]) .remote-editor-tab.is-active{background:#fff;color:#0f172a;box-shadow:0 -2px 0 #0284c7 inset}
+    html:not([data-theme]) .remote-editor-document,html:not([data-theme]) .remote-editor-code-surface,html:not([data-theme]) .remote-editor-highlight{background:#fff;color:#1e293b}
+    html:not([data-theme]) .remote-editor-document-bar{border-bottom-color:rgba(15,23,42,.1);background:#f1f5f9}
+    html:not([data-theme]) .remote-editor-minimap{border-left-color:rgba(15,23,42,.1);background:#f1f5f9}
+    html:not([data-theme]) .remote-editor-media-stage{background:#f8fafc}
+}
+
+@media(max-width:700px){
+    .remote-editor-tabs{max-height:76px;padding:4px}
+    .remote-editor-tab{height:29px;min-width:96px;max-width:165px;padding-left:7px}
+    .remote-editor-document-bar{height:42px;padding:0 7px;gap:6px}
+    .remote-editor-language{min-width:32px;padding:0 5px}
+    .remote-editor-code-body{grid-template-columns:40px minmax(0,1fr) 58px}
+    .remote-editor-minimap{width:58px}
+    .remote-editor-highlight,.remote-editor-textarea{padding:11px 10px 16px;font-size:11px}
+    .remote-editor-media-stage{padding:10px}
+}
+@media(max-width:520px){
+    .remote-editor-code-body{grid-template-columns:40px minmax(0,1fr)}
+    .remote-editor-minimap{display:none}
+    .remote-editor-workspace-brand b{font-size:11px}
+    .remote-editor-document-bar .remote-editor-file-icon{display:none}
+    .remote-editor-language{max-width:58px;overflow:hidden}
 }
 .sftp-remote-card{width:min(520px,94vw)}
 .sftp-dir-card{width:min(560px,94vw)}
@@ -1183,6 +1293,7 @@ html[data-theme="dark"],html[data-theme="dark"] body{background:#000!important}
 html[data-theme="dark"] .bg-animation,html[data-theme="dark"] .gradient-orb,html[data-theme="dark"] #particles,html[data-theme="dark"] .custom-bg{display:none!important}
 html[data-theme="dark"] .glass-card,html[data-theme="dark"] .glass-bar,html[data-theme="dark"] .settings-panel,html[data-theme="dark"] .settings-hd,html[data-theme="dark"] .settings-body,html[data-theme="dark"] .set-group,html[data-theme="dark"] .drawer-body,html[data-theme="dark"] .sftp-panel,html[data-theme="dark"] .cmd-bar,html[data-theme="dark"] .cmd-input,html[data-theme="dark"] .cmd-send,html[data-theme="dark"] .modal-card,html[data-theme="dark"] .auth-card,html[data-theme="dark"] .account-admin-card{background:#000!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html[data-theme="dark"] .input-wrapper input,html[data-theme="dark"] textarea,html[data-theme="dark"] .script-input,html[data-theme="dark"] .script-textarea,html[data-theme="dark"] .sftp-path-input,html[data-theme="dark"] .bm-item,html[data-theme="dark"] .ssh-tab,html[data-theme="dark"] .tb-btn,html[data-theme="dark"] .tab-add-btn,html[data-theme="dark"] .edge-btn,html[data-theme="dark"] .metric-pill{background:#050505!important;box-shadow:none!important}
+html[data-theme="dark"] .remote-editor-code-surface .remote-editor-textarea{background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent!important}
 html[data-theme="dark"] .server-info-card-modal,html[data-theme="dark"] .server-detail-pop-card,html[data-theme="dark"] .server-info-body,html[data-theme="dark"] .server-detail-pop-body,html[data-theme="dark"] .server-info-card,html[data-theme="dark"] .server-net-chart,html[data-theme="dark"] .server-net-canvas,html[data-theme="dark"] .server-summary-grid div,html[data-theme="dark"] .server-info-facts div,html[data-theme="dark"] .server-net-pair div,html[data-theme="dark"] .server-detail-kv div{background:#000!important;box-shadow:none!important}
 
 .server-info-header-ip{cursor:copy;border-radius:6px;padding:2px 4px;margin-left:-4px;transition:background .18s ease,color .18s ease}
@@ -1236,6 +1347,7 @@ html[data-theme="dark"] .server-net-canvas .chart-hover-line,html[data-theme="da
     html:not([data-theme]) .edge-btn,html:not([data-theme]) .tb-btn,html:not([data-theme]) .tab-add-btn{border-color:rgba(255,255,255,.2)!important;background:#050505!important;box-shadow:0 0 0 1px rgba(0,212,255,.05) inset!important}
     html:not([data-theme]) .term-edge-btns .edge-btn{border-color:rgba(0,212,255,.22)!important}
     html:not([data-theme]) .term-body{border:1px solid rgba(255,255,255,.12)}
+    html:not([data-theme]) .remote-editor-code-surface .remote-editor-textarea{background:transparent!important;color:transparent!important;-webkit-text-fill-color:transparent!important}
 }
 @media(max-width:520px){
     .server-facts-card .server-info-facts-main .facts-two{grid-template-columns:1fr;gap:3px}

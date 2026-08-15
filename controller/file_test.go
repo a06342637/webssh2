@@ -204,6 +204,63 @@ func TestRemoteEditorMaxBytesRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestRemotePreviewTypesAreExplicitAndCaseInsensitive(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+		mime string
+	}{
+		{name: "photo.JPG", kind: "image", mime: "image/jpeg"},
+		{name: "icon.ico", kind: "image", mime: "image/x-icon"},
+		{name: "vector.svg", kind: "image", mime: "image/svg+xml"},
+		{name: "clip.WEBM", kind: "video", mime: "video/webm"},
+		{name: "movie.mp4", kind: "video", mime: "video/mp4"},
+	}
+	for _, test := range tests {
+		spec, ok := remotePreviewSpecForName(test.name)
+		if !ok || spec.Kind != test.kind || spec.MIME != test.mime {
+			t.Fatalf("remotePreviewSpecForName(%q) = %#v, %t", test.name, spec, ok)
+		}
+	}
+	if _, ok := remotePreviewSpecForName("secret.key"); ok {
+		t.Fatal("an unsupported extension was marked previewable")
+	}
+}
+
+func TestRemotePreviewMaxBytesRejectsUnsafeConfiguration(t *testing.T) {
+	t.Setenv("WEBSSH_PREVIEW_MAX_BYTES", "2147483648")
+	if got := remotePreviewMaxBytes(); got != defaultRemotePreviewMaxBytes {
+		t.Fatalf("remotePreviewMaxBytes() = %d, want default %d", got, defaultRemotePreviewMaxBytes)
+	}
+	t.Setenv("WEBSSH_PREVIEW_MAX_BYTES", "67108864")
+	if got := remotePreviewMaxBytes(); got != 64<<20 {
+		t.Fatalf("remotePreviewMaxBytes() = %d, want %d", got, 64<<20)
+	}
+}
+
+func TestResolveRemotePreviewTargetChecksTypeAndSize(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := pathpkg.Join(dir, "preview.png")
+	content := []byte("\x89PNG\r\n\x1a\npreview")
+	if err := os.WriteFile(imagePath, content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{})
+	info, resolved, spec, err := resolveRemotePreviewTarget(client, editorTestRemotePath(imagePath), int64(len(content)))
+	if err != nil {
+		t.Fatalf("resolveRemotePreviewTarget() error = %v", err)
+	}
+	if info.Size() != int64(len(content)) || pathpkg.Base(resolved) != "preview.png" || spec.Kind != "image" {
+		t.Fatalf("resolved preview = size %d, path %q, spec %#v", info.Size(), resolved, spec)
+	}
+	if _, _, _, err := resolveRemotePreviewTarget(client, editorTestRemotePath(imagePath), int64(len(content)-1)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized preview error = %v", err)
+	}
+	if _, _, _, err := resolveRemotePreviewTarget(client, strings.TrimSuffix(editorTestRemotePath(imagePath), ".png")+".txt", int64(len(content))); err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("unsupported preview error = %v", err)
+	}
+}
+
 type editorTestLister []os.FileInfo
 
 func (l editorTestLister) ListAt(dst []os.FileInfo, offset int64) (int, error) {

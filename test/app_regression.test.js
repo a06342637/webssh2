@@ -20,6 +20,8 @@ function extractFunction(name) {
     let escaped = false;
     let lineComment = false;
     let blockComment = false;
+    let regex = false;
+    let regexClass = false;
     for (let i = open; i < appSource.length; i++) {
         const ch = appSource[i];
         const next = appSource[i + 1];
@@ -32,6 +34,20 @@ function extractFunction(name) {
                 blockComment = false;
                 i++;
             }
+            continue;
+        }
+        if (regex) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch === '[') regexClass = true;
+            else if (ch === ']') regexClass = false;
+            else if (ch === '/' && !regexClass) regex = false;
             continue;
         }
         if (quote) {
@@ -49,6 +65,17 @@ function extractFunction(name) {
             blockComment = true;
             i++;
             continue;
+        }
+        if (ch === '/') {
+            let previousIndex = i - 1;
+            while (previousIndex >= open && /\s/.test(appSource[previousIndex])) previousIndex--;
+            const previous = previousIndex >= open ? appSource[previousIndex] : '';
+            if (!previous || /[\(\[\{=,:;!?&|+\-*%^~<>]/.test(previous)) {
+                regex = true;
+                regexClass = false;
+                escaped = false;
+                continue;
+            }
         }
         if (ch === '"' || ch === "'" || ch === '`') {
             quote = ch;
@@ -574,10 +601,13 @@ test('SFTP folders are confirmed as temporary tar.gz archives before downloading
 
 test('SFTP file rows place a delete action after edit and download', () => {
     const source = extractFunction('sftpLoad');
+    const previewIndex = source.indexOf("var preview =");
     const editIndex = source.indexOf("var edit =");
     const downloadIndex = source.indexOf("var dl =");
     const deleteIndex = source.indexOf("var del =");
-    assert.ok(editIndex >= 0 && downloadIndex > editIndex && deleteIndex > downloadIndex);
+    assert.ok(previewIndex >= 0 && editIndex > previewIndex && downloadIndex > editIndex && deleteIndex > downloadIndex);
+    assert.match(source, /f\.Previewable/);
+    assert.match(source, /openRemotePreview/);
     assert.match(source, /requestSftpDelete/);
     assert.match(source, /event\.stopPropagation\(\)/);
     assert.match(source, /isDir \? '压缩并下载文件夹' : '下载'/);
@@ -878,7 +908,8 @@ test('terminal disconnect does not cancel an independent SFTP download', () => {
 
 test('a minimized remote editor refreshes its dock dirty state after save', () => {
     const source = extractFunction('remoteEditorUpdateMetrics');
-    assert.match(source, /if \(editor\.minimized\) renderRemoteEditorDock\(getActiveSession\(\)\);/);
+    assert.match(source, /workspace && workspace\.minimized/);
+    assert.match(source, /renderRemoteEditorDock\(getActiveSession\(\)\)/);
 });
 
 test('saving a remote editor refreshes metadata in the normalized visible SFTP directory', async () => {
@@ -921,6 +952,75 @@ test('remote editor identity is scoped to the SSH session and normalized path', 
     assert.equal(sandbox.normalizeRemoteFilePath('\\etc\\app.conf/'), '/etc/app.conf');
     assert.equal(sandbox.remoteEditorFor(first, '//etc//app.conf/').sessionId, 'first');
     assert.equal(sandbox.remoteEditorFor(second, '/etc/app.conf').sessionId, 'second');
+});
+
+test('text and media views of the same remote path use separate document identities', () => {
+    const first = { id: 'session-1' };
+    const sandbox = loadFunctions(
+        ['normalizeRemoteFilePath', 'remoteEditorFor'],
+        {
+            remoteEditors: [
+                { sessionId: first.id, path: '/srv/logo.svg', viewMode: 'text' },
+                { sessionId: first.id, path: '/srv/logo.svg', viewMode: 'image' },
+            ],
+        },
+    );
+
+    assert.equal(sandbox.remoteEditorFor(first, '/srv/logo.svg', 'text').viewMode, 'text');
+    assert.equal(sandbox.remoteEditorFor(first, '/srv/logo.svg', 'image').viewMode, 'image');
+});
+
+test('remote workbench uses wrapped tabs instead of overlapping one window per file', () => {
+    const createSource = extractFunction('createRemoteEditorElement');
+    const workspaceSource = extractFunction('createRemoteEditorWorkspace');
+    assert.match(createSource, /createRemoteEditorWorkspace\(session\)/);
+    assert.match(createSource, /remote-editor-tab/);
+    assert.match(createSource, /workspace\.tabs\.appendChild\(tab\)/);
+    assert.match(workspaceSource, /remote-editor-panes/);
+    assert.match(styleSource, /\.remote-editor-tabs\{[^}]*flex-wrap:wrap/);
+    assert.match(styleSource, /\.remote-editor-document\.is-active\{display:flex\}/);
+    assert.match(styleSource, /html\[data-theme="dark"\] \.remote-editor-code-surface \.remote-editor-textarea\{background:transparent!important/);
+});
+
+test('remote text workbench detects common languages and escapes highlighted source', () => {
+    const sandbox = loadFunctions(
+        ['remoteEditorLanguageForName', 'remoteEditorEscapeCode', 'remoteEditorHighlightWithRules', 'remoteEditorHighlightMarkupTag', 'remoteEditorHighlightMarkup', 'remoteEditorHighlightCode'],
+        {},
+    );
+    assert.equal(sandbox.remoteEditorLanguageForName('app.py').label, 'Python');
+    assert.equal(sandbox.remoteEditorLanguageForName('Dockerfile').id, 'docker');
+    const html = sandbox.remoteEditorHighlightCode('<script>const answer = 42;</script>', 'html');
+    assert.match(html, /tok-tag/);
+    assert.doesNotMatch(html, /<script>/);
+    const python = sandbox.remoteEditorHighlightCode('def hello():\n    return \"world\"', 'python');
+    assert.match(python, /tok-keyword/);
+    assert.match(python, /tok-string/);
+});
+
+test('remote text workbench includes a lightweight synchronized minimap', () => {
+    const createSource = extractFunction('createRemoteEditorElement');
+    const drawSource = extractFunction('drawRemoteEditorMinimap');
+    const scrollSource = extractFunction('scrollRemoteEditorFromMinimap');
+    assert.match(createSource, /remote-editor-minimap/);
+    assert.match(drawSource, /textarea\.scrollTop/);
+    assert.match(drawSource, /viewportHeight/);
+    assert.match(scrollSource, /textarea\.scrollTop =/);
+    assert.match(styleSource, /\.remote-editor-minimap\{/);
+});
+
+test('image, icon and video previews use the authenticated cancellable preview endpoint', () => {
+    const kindSource = extractFunction('remotePreviewKindForName');
+    const openSource = extractFunction('openRemotePreview');
+    const loadSource = extractFunction('loadRemotePreview');
+    const destroySource = extractFunction('destroyRemoteEditor');
+    assert.match(kindSource, /\.ico/);
+    assert.match(kindSource, /\.mp4/);
+    assert.match(openSource, /remoteEditorFor\(session, path, kind\)/);
+    assert.match(loadSource, /fetch\('\/file\/preview'/);
+    assert.match(loadSource, /signal: controller\.signal/);
+    assert.match(loadSource, /document\.createElement\('video'\)/);
+    assert.match(loadSource, /document\.createElement\('img'\)/);
+    assert.match(destroySource, /URL\.revokeObjectURL/);
 });
 
 test('closing an SSH tab is deferred while one of its editors is dirty', () => {
@@ -1307,6 +1407,120 @@ test('duplicate imported script IDs are made unique', () => {
     assert.notEqual(result[0].id, result[1].id);
 });
 
+function loadPersonalBookmarkImportSandbox(currentScripts, currentCategories) {
+    return loadFunctions(
+        [
+            'createScriptCategoryId', 'normalizeScriptCategories', 'cleanScriptCategoryReferences',
+            'extractImportedScripts', 'extractImportedCategories', 'parseScriptUseCount',
+            'parseScriptLastUsed', 'legacyScriptBookmarkId', 'normalizeImportedScripts',
+            'importedScriptBookmarkMatches', 'mergeImportedScriptCategories',
+            'scriptBookmarkKey', 'sortScriptBookmarks', 'buildImportedScriptWorkspace',
+        ],
+        {
+            MAX_SCRIPT_COMMAND_CHARS: 20000,
+            MAX_SCRIPT_BOOKMARKS: 500,
+            MAX_SCRIPT_CATEGORIES: 100,
+            SBK: 'webssh_script_bm',
+            SCAT: 'webssh_script_categories',
+            Date,
+            isFinite,
+            Math,
+            window: { crypto: { randomUUID: () => 'generated-id' } },
+            isScriptStorageCorrupt: () => false,
+            loadScriptCategories: () => structuredClone(currentCategories),
+            loadSortedScriptBookmarks: () => structuredClone(currentScripts),
+        },
+    );
+}
+
+test('personal bookmark import restores changed records with matching IDs and adds missing records', () => {
+    const sandbox = loadPersonalBookmarkImportSandbox(
+        [
+            { id: 'script-1', name: 'Current name', cmd: 'echo current', categoryId: 'category-1' },
+            { id: 'local-only', name: 'Local only', cmd: 'echo local' },
+        ],
+        [{ id: 'category-1', emoji: '🛠️', name: 'Current category', createdAt: 1 }],
+    );
+    const result = sandbox.buildImportedScriptWorkspace({
+        type: 'script_bookmarks',
+        scope: 'personal',
+        categories: [{ id: 'category-1', emoji: '📦', name: 'Backup category', createdAt: 1 }],
+        scripts: [
+            { id: 'script-1', name: 'Backup name', cmd: 'echo backup', categoryId: 'category-1', useCount: 4, lastUsed: 20 },
+            { id: 'script-2', name: 'Missing script', cmd: 'echo missing', categoryId: 'category-1' },
+        ],
+    });
+
+    assert.equal(result.added, 1);
+    assert.equal(result.updated, 1);
+    assert.equal(result.categoryAdded, 0);
+    assert.equal(result.categoryUpdated, 1);
+    assert.equal(result.scripts.length, 3);
+    assert.equal(result.scripts.find((item) => item.id === 'script-1').cmd, 'echo backup');
+    assert.equal(result.scripts.find((item) => item.id === 'script-1').useCount, 4);
+    assert.equal(result.scripts.find((item) => item.id === 'local-only').cmd, 'echo local');
+    assert.equal(result.categories.find((item) => item.id === 'category-1').name, 'Backup category');
+});
+
+test('reimporting an unchanged personal backup is recognized as already present', () => {
+    const scripts = [{ id: 'script-1', name: 'Same', cmd: 'echo same', useCount: 2, lastUsed: 10 }];
+    const categories = [{ id: 'category-1', emoji: '📦', name: 'Same category', createdAt: 1 }];
+    const sandbox = loadPersonalBookmarkImportSandbox(scripts, categories);
+    const result = sandbox.buildImportedScriptWorkspace({ scripts, categories });
+
+    assert.equal(result.added, 0);
+    assert.equal(result.updated, 0);
+    assert.equal(result.categoryAdded, 0);
+    assert.equal(result.categoryUpdated, 0);
+    assert.equal(result.skipped, 1);
+    assert.equal(result.categorySkipped, 1);
+    assert.equal(result.sourceScriptCount, 1);
+    assert.equal(result.sourceCategoryCount, 1);
+});
+
+test('the personal import UI reports an unchanged backup as already present instead of invalid', () => {
+    const toasts = [];
+    function FakeFileReader() { this.result = ''; }
+    FakeFileReader.prototype.readAsText = function (file) {
+        this.result = file.content;
+        this.onload();
+    };
+    const sandbox = loadFunctions(
+        ['classifyScriptBookmarkBackup', 'importScriptBookmarks'],
+        {
+            SBK: 'webssh_script_bm',
+            SCAT: 'webssh_script_categories',
+            FileReader: FakeFileReader,
+            buildImportedScriptWorkspace: () => ({
+                scripts: [{ id: 'script-1', name: 'Same', cmd: 'echo same' }],
+                categories: [],
+                added: 0,
+                updated: 0,
+                categoryAdded: 0,
+                categoryUpdated: 0,
+                capacitySkipped: 0,
+                categoryCapacitySkipped: 0,
+                sourceScriptCount: 1,
+                sourceCategoryCount: 0,
+            }),
+            showToast: (message, type) => toasts.push({ message, type }),
+            preserveScriptDrawerAfterCategoryChange: () => {},
+            saveScriptWorkspaceAtomically: () => { throw new Error('unchanged backup must not be saved'); },
+        },
+    );
+    const input = {
+        files: [{ content: JSON.stringify({ type: 'script_bookmarks', scope: 'personal', scripts: [{ id: 'script-1', name: 'Same', cmd: 'echo same' }] }) }],
+        value: 'selected',
+    };
+
+    sandbox.importScriptBookmarks(input);
+
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].type, 'info');
+    assert.match(toasts[0].message, /已全部存在，无需重复导入/);
+    assert.equal(input.value, '');
+});
+
 test('personal and site bookmark backup files are classified into separate scopes', () => {
     const sandbox = loadFunctions(
         ['classifyScriptBookmarkBackup'],
@@ -1326,6 +1540,8 @@ test('new personal exports carry an explicit personal scope and cannot be confus
     assert.match(source, /version:\s*3/);
     assert.match(source, /account:\s*scriptAccountName\(currentAccount\)/);
     assert.match(extractFunction('importScriptBookmarks'), /全站书签备份，不能导入到个人书签/);
+    assert.match(extractFunction('importScriptBookmarks'), /已全部存在，无需重复导入/);
+    assert.match(extractFunction('importScriptBookmarks'), /result\.updated \|\| result\.categoryUpdated/);
     assert.match(extractFunction('importSiteScriptBookmarks'), /个人书签备份，不能用于全站恢复/);
     assert.match(extractFunction('importSiteScriptBookmarks'), /file\.size > MAX_SITE_SCRIPT_BACKUP_BYTES/);
 });

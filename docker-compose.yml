@@ -16,6 +16,8 @@ services:
       - WEBSSH_REQUIRE_ACCOUNT=${WEBSSH_REQUIRE_ACCOUNT:-false}
       - WEBSSH_ENABLE_SELF_UPDATE=${WEBSSH_ENABLE_SELF_UPDATE:-false}
       - WEBSSH_TERMINAL_WS_URL=${WEBSSH_TERMINAL_WS_URL:-}
+      - WEBSSH_EDITOR_MAX_BYTES=${WEBSSH_EDITOR_MAX_BYTES:-2097152}
+      - WEBSSH_PREVIEW_MAX_BYTES=${WEBSSH_PREVIEW_MAX_BYTES:-134217728}
       # Uncomment to enable basic auth for the web UI:
       # - authInfo=admin:your_password
     env_file:

@@ -164,6 +164,9 @@ func TestRuntimeConfigIncludesPasswordPersistencePolicy(t *testing.T) {
 	if got, ok := config["remoteEditorMaxBytes"].(int64); !ok || got != controller.RemoteEditorMaxBytes() {
 		t.Fatalf("runtime config remoteEditorMaxBytes = %#v", config["remoteEditorMaxBytes"])
 	}
+	if got, ok := config["remotePreviewMaxBytes"].(int64); !ok || got != controller.RemotePreviewMaxBytes() {
+		t.Fatalf("runtime config remotePreviewMaxBytes = %#v", config["remotePreviewMaxBytes"])
+	}
 }
 
 func TestNoStoreResponsesMiddleware(t *testing.T) {

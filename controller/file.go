@@ -40,6 +40,10 @@ type File struct {
 	IsSymlink      bool
 	Editable       bool
 	EditReason     string
+	Previewable    bool
+	PreviewKind    string
+	PreviewMime    string
+	PreviewReason  string
 	Downloadable   bool
 	DownloadReason string
 }
@@ -211,6 +215,53 @@ func statRemoteTarget(client *sftp.Client, remotePath string) (os.FileInfo, stri
 
 const defaultRemoteEditorMaxBytes = int64(2 << 20)
 
+const defaultRemotePreviewMaxBytes = int64(128 << 20)
+
+type remotePreviewSpec struct {
+	Kind string
+	MIME string
+}
+
+var remotePreviewTypes = map[string]remotePreviewSpec{
+	".jpg":  {Kind: "image", MIME: "image/jpeg"},
+	".jpeg": {Kind: "image", MIME: "image/jpeg"},
+	".png":  {Kind: "image", MIME: "image/png"},
+	".gif":  {Kind: "image", MIME: "image/gif"},
+	".webp": {Kind: "image", MIME: "image/webp"},
+	".bmp":  {Kind: "image", MIME: "image/bmp"},
+	".avif": {Kind: "image", MIME: "image/avif"},
+	".svg":  {Kind: "image", MIME: "image/svg+xml"},
+	".ico":  {Kind: "image", MIME: "image/x-icon"},
+	".mp4":  {Kind: "video", MIME: "video/mp4"},
+	".webm": {Kind: "video", MIME: "video/webm"},
+	".ogg":  {Kind: "video", MIME: "video/ogg"},
+	".ogv":  {Kind: "video", MIME: "video/ogg"},
+	".mov":  {Kind: "video", MIME: "video/quicktime"},
+	".m4v":  {Kind: "video", MIME: "video/x-m4v"},
+}
+
+func remotePreviewSpecForName(name string) (remotePreviewSpec, bool) {
+	spec, ok := remotePreviewTypes[strings.ToLower(pathpkg.Ext(strings.TrimSpace(name)))]
+	return spec, ok
+}
+
+func remotePreviewMaxBytes() int64 {
+	const maxRemotePreviewBytes = int64(1 << 30)
+	raw := strings.TrimSpace(os.Getenv("WEBSSH_PREVIEW_MAX_BYTES"))
+	if raw == "" {
+		return defaultRemotePreviewMaxBytes
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1<<20 || value > maxRemotePreviewBytes {
+		return defaultRemotePreviewMaxBytes
+	}
+	return value
+}
+
+func RemotePreviewMaxBytes() int64 {
+	return remotePreviewMaxBytes()
+}
+
 func remoteEditorMaxBytes() int64 {
 	const maxRemoteEditorBytes = int64(64 << 20)
 	raw := strings.TrimSpace(os.Getenv("WEBSSH_EDITOR_MAX_BYTES"))
@@ -243,6 +294,28 @@ func RemoteEditorRequestBodyLimit() int64 {
 		return maxInt64
 	}
 	return maxBytes*jsonExpansion + overhead
+}
+
+func resolveRemotePreviewTarget(client *sftp.Client, requestedPath string, maxBytes int64) (os.FileInfo, string, remotePreviewSpec, error) {
+	requestedPath = strings.TrimSpace(requestedPath)
+	if requestedPath == "" {
+		return nil, "", remotePreviewSpec{}, fmt.Errorf("missing path")
+	}
+	spec, ok := remotePreviewSpecForName(pathpkg.Base(requestedPath))
+	if !ok {
+		return nil, "", remotePreviewSpec{}, fmt.Errorf("this file type does not support online preview")
+	}
+	info, targetPath, err := statRemoteTarget(client, requestedPath)
+	if err != nil {
+		return nil, targetPath, remotePreviewSpec{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, targetPath, remotePreviewSpec{}, fmt.Errorf("only regular files can be previewed")
+	}
+	if info.Size() < 0 || info.Size() > maxBytes {
+		return nil, targetPath, remotePreviewSpec{}, fmt.Errorf("file is too large to preview (maximum %s)", Bytefmt(uint64(maxBytes)))
+	}
+	return info, targetPath, spec, nil
 }
 
 func remoteEditorTargetKey(client core.SSHClient, path string) string {
@@ -572,6 +645,90 @@ func OpenFileForEdit(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	responseBody.Data = remoteSnapshotData(path, snapshot, maxBytes)
+	return &responseBody
+}
+
+func PreviewFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	request, err := bindFileRequest(c)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		c.JSON(http.StatusTooManyRequests, responseBody)
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	if err := sshClient.CreateSftp(); err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
+		return &responseBody
+	}
+	defer sshClient.Close()
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
+
+	requestedPath := strings.TrimSpace(request.Path)
+	maxBytes := remotePreviewMaxBytes()
+	info, targetPath, spec, err := resolveRemotePreviewTarget(sshClient.Sftp, requestedPath, maxBytes)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	file, err := sshClient.Sftp.Open(targetPath)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
+		return &responseBody
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		responseBody.Msg = err.Error()
+		c.JSON(http.StatusInternalServerError, responseBody)
+		return &responseBody
+	}
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() < 0 || openedInfo.Size() > maxBytes {
+		responseBody.Msg = "preview target changed after it was checked"
+		c.JSON(http.StatusConflict, responseBody)
+		return &responseBody
+	}
+	info = openedInfo
+
+	filename := pathpkg.Base(requestedPath)
+	if filename == "." || filename == "/" || filename == "" {
+		filename = "preview"
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filename}))
+	c.Header("Content-Type", spec.MIME)
+	c.Header("Content-Length", strconv.FormatInt(info.Size(), 10))
+	c.Header("Cache-Control", "no-store")
+	c.Header("Accept-Ranges", "none")
+	c.Header("X-WebSSH-Preview-Kind", spec.Kind)
+	c.Header("X-WebSSH-File-Size", strconv.FormatInt(info.Size(), 10))
+	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-Preview-Kind, X-WebSSH-File-Size")
+	c.Status(http.StatusOK)
+	copied, copyErr := io.Copy(c.Writer, requestContextReader{ctx: c.Request.Context(), r: io.LimitReader(file, info.Size()+1)})
+	if copyErr == nil && copied != info.Size() {
+		copyErr = fmt.Errorf("preview size changed while streaming: copied %d bytes, expected %d", copied, info.Size())
+	}
+	if copyErr != nil {
+		responseBody.Msg = copyErr.Error()
+		_ = c.Error(copyErr)
+		c.Abort()
+	}
 	return &responseBody
 }
 
@@ -1638,8 +1795,9 @@ func FileList(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	var (
-		fileList       fileSplice
-		editorMaxBytes = remoteEditorMaxBytes()
+		fileList        fileSplice
+		editorMaxBytes  = remoteEditorMaxBytes()
+		previewMaxBytes = remotePreviewMaxBytes()
 	)
 	for _, mFile := range files {
 		if isRemoteFolderArchiveName(mFile.Name()) {
@@ -1656,7 +1814,10 @@ func FileList(c *gin.Context) *ResponseBody {
 			}
 		}
 		isDir := resolveErr == nil && info.IsDir()
-		editable := resolveErr == nil && info.Mode().IsRegular() && info.Size() <= editorMaxBytes
+		previewSpec, previewTypeKnown := remotePreviewSpecForName(mFile.Name())
+		mediaBinary := previewTypeKnown && previewSpec.Kind != "" && !strings.EqualFold(pathpkg.Ext(mFile.Name()), ".svg")
+		editable := resolveErr == nil && info.Mode().IsRegular() && info.Size() <= editorMaxBytes && !mediaBinary
+		previewable := resolveErr == nil && info.Mode().IsRegular() && previewTypeKnown && info.Size() <= previewMaxBytes
 		downloadable := resolveErr == nil && (isDir || info.Mode().IsRegular())
 		editReason := ""
 		if !isDir && !editable {
@@ -1665,8 +1826,21 @@ func FileList(c *gin.Context) *ResponseBody {
 				editReason = "符号链接目标不可访问"
 			case !info.Mode().IsRegular():
 				editReason = "仅支持普通文件"
+			case mediaBinary:
+				editReason = "媒体文件请使用在线预览"
 			case info.Size() > editorMaxBytes:
 				editReason = fmt.Sprintf("文件超过在线编辑上限 %s", Bytefmt(uint64(editorMaxBytes)))
+			}
+		}
+		previewReason := ""
+		if previewTypeKnown && !previewable {
+			switch {
+			case resolveErr != nil:
+				previewReason = "符号链接目标不可访问"
+			case !info.Mode().IsRegular():
+				previewReason = "仅支持预览普通文件"
+			case info.Size() > previewMaxBytes:
+				previewReason = fmt.Sprintf("文件超过在线预览上限 %s", Bytefmt(uint64(previewMaxBytes)))
 			}
 		}
 		downloadReason := ""
@@ -1691,6 +1865,10 @@ func FileList(c *gin.Context) *ResponseBody {
 			IsSymlink:      isSymlink,
 			Editable:       editable,
 			EditReason:     editReason,
+			Previewable:    previewable,
+			PreviewKind:    previewSpec.Kind,
+			PreviewMime:    previewSpec.MIME,
+			PreviewReason:  previewReason,
 			Downloadable:   downloadable,
 			DownloadReason: downloadReason,
 			SizeBytes:      sizeBytes,

@@ -174,13 +174,14 @@ func terminalPreconnectHTML() string {
 
 func runtimeConfig() gin.H {
 	return gin.H{
-		"appVersion":           version,
-		"showFooter":           showFooter,
-		"allowRegistration":    controller.AllowRegistration(),
-		"savePass":             savePass,
-		"requireAccount":       controller.RequireAccount(),
-		"allowLegacyPathLogin": envBool("WEBSSH_ALLOW_LEGACY_PATH_LOGIN", false),
-		"remoteEditorMaxBytes": controller.RemoteEditorMaxBytes(),
+		"appVersion":            version,
+		"showFooter":            showFooter,
+		"allowRegistration":     controller.AllowRegistration(),
+		"savePass":              savePass,
+		"requireAccount":        controller.RequireAccount(),
+		"allowLegacyPathLogin":  envBool("WEBSSH_ALLOW_LEGACY_PATH_LOGIN", false),
+		"remoteEditorMaxBytes":  controller.RemoteEditorMaxBytes(),
+		"remotePreviewMaxBytes": controller.RemotePreviewMaxBytes(),
 	}
 }
 
@@ -299,6 +300,12 @@ func main() {
 			}
 			controller.DownloadFile(c)
 		})
+		file.POST("/preview", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.PreviewFile(c)
+		})
 		file.POST("/archive/prepare", func(c *gin.Context) {
 			if !gatewayAuth(c) {
 				return
@@ -415,7 +422,7 @@ func compressionMiddleware() gin.HandlerFunc {
 	// extra streaming layer, which can turn interrupted downloads into empty or
 	// corrupt files. Keep normal pages/API responses compressed, but pass the
 	// attachment response through unchanged.
-	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download", "/file/archive/download"}))
+	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download", "/file/archive/download", "/file/preview"}))
 }
 
 func securityHeaders() gin.HandlerFunc {
