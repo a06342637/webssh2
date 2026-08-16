@@ -49,9 +49,17 @@ type File struct {
 }
 
 type fileRequest struct {
-	SSHInfo string `json:"sshInfo"`
-	Path    string `json:"path"`
-	Archive *bool  `json:"archive,omitempty"`
+	SSHInfo   string `json:"sshInfo"`
+	Path      string `json:"path"`
+	SessionID string `json:"sessionId,omitempty"`
+	Archive   *bool  `json:"archive,omitempty"`
+}
+
+type fileRenameRequest struct {
+	SSHInfo   string `json:"sshInfo"`
+	Path      string `json:"path"`
+	NewName   string `json:"newName"`
+	SessionID string `json:"sessionId,omitempty"`
 }
 
 type fileSaveRequest struct {
@@ -363,6 +371,42 @@ func acquireRemoteEditorTarget(ctx context.Context, key string) (func(), error) 
 		releaseReference()
 		return nil, ctx.Err()
 	}
+}
+
+func acquireRemoteEditorTargets(ctx context.Context, keys ...string) (func(), error) {
+	unique := make(map[string]struct{}, len(keys))
+	ordered := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := unique[key]; exists {
+			continue
+		}
+		unique[key] = struct{}{}
+		ordered = append(ordered, key)
+	}
+	sort.Strings(ordered)
+	releases := make([]func(), 0, len(ordered))
+	for _, key := range ordered {
+		release, err := acquireRemoteEditorTarget(ctx, key)
+		if err != nil {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+			return nil, err
+		}
+		releases = append(releases, release)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+		})
+	}, nil
 }
 
 func remoteFileVersion(info os.FileInfo, content []byte) string {
@@ -870,6 +914,131 @@ func DeleteFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	responseBody.Data = gin.H{"path": remotePath, "name": pathpkg.Base(remotePath)}
+	return &responseBody
+}
+
+func validateRemoteRenameName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "", fmt.Errorf("请输入有效的新名称")
+	}
+	if !utf8.ValidString(name) || len([]byte(name)) > 255 {
+		return "", fmt.Errorf("名称必须是有效 UTF-8，且不能超过 255 字节")
+	}
+	if strings.ContainsAny(name, "/\\\x00") {
+		return "", fmt.Errorf("名称不能包含 / 或 \\")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("名称不能包含控制字符")
+		}
+	}
+	return name, nil
+}
+
+func renameRemotePath(ctx context.Context, sshClient core.SSHClient, client *sftp.Client, sourcePath, newName string) (string, bool, error) {
+	sourcePath = pathpkg.Clean(strings.TrimSpace(sourcePath))
+	if sourcePath == "." || sourcePath == "/" || sourcePath == "" {
+		return "", false, fmt.Errorf("不能重命名根目录")
+	}
+	newName, err := validateRemoteRenameName(newName)
+	if err != nil {
+		return "", false, err
+	}
+	targetPath := pathpkg.Join(pathpkg.Dir(sourcePath), newName)
+	if targetPath == sourcePath {
+		return "", false, fmt.Errorf("新名称与原名称相同")
+	}
+	release, err := acquireRemoteEditorTargets(ctx,
+		remoteEditorTargetKey(sshClient, sourcePath),
+		remoteEditorTargetKey(sshClient, targetPath),
+	)
+	if err != nil {
+		return "", false, err
+	}
+	defer release()
+	sourceInfo, err := client.Lstat(sourcePath)
+	if err != nil {
+		if os.IsNotExist(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+			return "", false, fmt.Errorf("原文件或文件夹不存在")
+		}
+		if os.IsPermission(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxPermissionDenied)) {
+			return "", false, fmt.Errorf("没有权限读取原路径")
+		}
+		return "", false, err
+	}
+	sourceIsDir := sourceInfo.IsDir()
+	if sourceInfo.Mode()&os.ModeSymlink != 0 {
+		if resolvedInfo, statErr := client.Stat(sourcePath); statErr == nil {
+			sourceIsDir = resolvedInfo.IsDir()
+		}
+	}
+	if _, err := client.Lstat(targetPath); err == nil {
+		return "", sourceIsDir, fmt.Errorf("同目录下已存在名为 %s 的项目", newName)
+	} else if !os.IsNotExist(err) && !isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+		if os.IsPermission(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxPermissionDenied)) {
+			return "", sourceIsDir, fmt.Errorf("没有权限检查目标路径")
+		}
+		return "", sourceIsDir, err
+	}
+	if err := client.Rename(sourcePath, targetPath); err != nil {
+		if os.IsPermission(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxPermissionDenied)) {
+			return "", sourceIsDir, fmt.Errorf("没有权限重命名此项目")
+		}
+		if os.IsNotExist(err) || isSFTPStatus(err, uint32(sftp.ErrSSHFxNoSuchFile)) {
+			return "", sourceIsDir, fmt.Errorf("原文件或文件夹已不存在")
+		}
+		return "", sourceIsDir, err
+	}
+	return targetPath, sourceIsDir, nil
+}
+
+func RenameFile(c *gin.Context) *ResponseBody {
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+	var request fileRenameRequest
+	if err := bindStrictJSON(c, &request); err != nil {
+		responseBody.Msg = fmt.Errorf("invalid request: %w", err).Error()
+		return &responseBody
+	}
+	if strings.TrimSpace(request.SSHInfo) == "" {
+		responseBody.Msg = "missing sshInfo"
+		return &responseBody
+	}
+	if _, err := normalizeSFTPSessionID(request.SessionID); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	release, ok := acquireSSHSlot(c)
+	if !ok {
+		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer release()
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	lease, err := acquireSFTPSessionLease(c, request.SessionID, request.SSHInfo, sshClient)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	discardLease := false
+	defer func() { lease.Release(discardLease) }()
+	newPath, isDir, err := renameRemotePath(c.Request.Context(), *lease.Client, lease.Client.Sftp, request.Path, request.NewName)
+	if err != nil {
+		discardLease = sftpSessionConnectionBroken(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	responseBody.Data = gin.H{
+		"oldPath": pathpkg.Clean(strings.TrimSpace(request.Path)),
+		"newPath": newPath,
+		"name":    pathpkg.Base(newPath),
+		"isDir":   isDir,
+	}
 	return &responseBody
 }
 
@@ -1744,6 +1913,35 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 	}
 }
 
+func readSFTPDirectoryForList(client *core.SSHClient, requestedPath string) (string, string, []os.FileInfo, error) {
+	path := strings.TrimSpace(requestedPath)
+	home := ""
+	if path == "" {
+		if client.Username == "root" {
+			path = "/"
+			home = "/root"
+		} else {
+			home = detectHomeDir(client.Sftp, client.Username)
+			path = home
+		}
+	} else {
+		path = pathpkg.Clean(path)
+		if path == "." {
+			path = "/"
+		}
+		if path == "/" && client.Username != "root" {
+			home = detectHomeDir(client.Sftp, client.Username)
+			if home != "/" {
+				path = home
+			}
+		} else if client.Username == "root" {
+			home = "/root"
+		}
+	}
+	files, err := client.Sftp.ReadDir(path)
+	return path, home, files, err
+}
+
 func FileList(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
@@ -1752,40 +1950,39 @@ func FileList(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	path := request.Path
-	sshInfo := request.SSHInfo
+	if _, err := normalizeSFTPSessionID(request.SessionID); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
 	release, ok := acquireSSHSlot(c)
 	if !ok {
 		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
 		return &responseBody
 	}
 	defer release()
-	sshClient, err := decodeSSHClient(c, sshInfo)
+	sshClient, err := decodeSSHClient(c, request.SSHInfo)
 	if err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	lease, err := acquireSFTPSessionLease(c, request.SessionID, request.SSHInfo, sshClient)
+	if err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	defer sshClient.Close()
-	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
-	defer stopCancellation()
-	home := detectHomeDir(sshClient.Sftp, sshClient.Username)
-	if path == "/" && home != "/" && sshClient.Username != "root" {
-		path = home
-	}
-	if path == "" {
-		if sshClient.Username == "root" {
-			path = "/"
-		} else {
-			path = home
+	path, home, files, err := readSFTPDirectoryForList(lease.Client, request.Path)
+	if err != nil && lease.isPersistent && sftpSessionConnectionBroken(err) {
+		lease.Release(true)
+		lease, err = acquireSFTPSessionLease(c, request.SessionID, request.SSHInfo, sshClient)
+		if err == nil {
+			path, home, files, err = readSFTPDirectoryForList(lease.Client, request.Path)
 		}
 	}
-	files, err := sshClient.Sftp.ReadDir(path)
+	if lease != nil {
+		defer lease.Release(err != nil && sftpSessionConnectionBroken(err))
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "exist") {
 			responseBody.Msg = fmt.Sprintf("Directory %s: no such file or directory", path)
@@ -1807,7 +2004,7 @@ func FileList(c *gin.Context) *ResponseBody {
 		isSymlink := mFile.Mode()&os.ModeSymlink != 0
 		resolveErr := error(nil)
 		if isSymlink {
-			resolved, _, statErr := statRemoteTarget(sshClient.Sftp, pathpkg.Join(path, mFile.Name()))
+			resolved, statErr := lease.Client.Sftp.Stat(pathpkg.Join(path, mFile.Name()))
 			resolveErr = statErr
 			if resolveErr == nil {
 				info = resolved

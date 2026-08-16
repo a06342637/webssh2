@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	pathpkg "path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -885,6 +886,124 @@ func TestDeleteRemoteFileRejectsMissingAndRootPaths(t *testing.T) {
 	missing := editorTestRemotePath(t.TempDir() + string(os.PathSeparator) + "missing.txt")
 	if err := deleteRemoteFile(client, missing); err == nil || !strings.Contains(err.Error(), "file does not exist") {
 		t.Fatalf("missing file delete error = %v", err)
+	}
+}
+
+func TestRenameRemotePathRenamesFileAndDirectory(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	sshClient := core.NewSSHClient()
+	sshClient.Hostname = "rename.test"
+	sshClient.Username = "root"
+
+	oldFileLocal := filepath.Join(dir, "old.txt")
+	if err := os.WriteFile(oldFileLocal, []byte("rename content\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := editorTestRemotePath(oldFileLocal)
+	newFile, isDir, err := renameRemotePath(context.Background(), sshClient, client, oldFile, "new.txt")
+	if err != nil {
+		t.Fatalf("renameRemotePath() file error = %v", err)
+	}
+	if isDir || pathpkg.Base(newFile) != "new.txt" {
+		t.Fatalf("renamed file result = path %q, isDir %v", newFile, isDir)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "new.txt"))
+	if err != nil || string(content) != "rename content\n" {
+		t.Fatalf("renamed file content = %q, error = %v", content, err)
+	}
+	if _, err := os.Lstat(oldFileLocal); !os.IsNotExist(err) {
+		t.Fatalf("old file still exists or returned unexpected error: %v", err)
+	}
+
+	oldDirLocal := filepath.Join(dir, "old-folder")
+	if err := os.MkdirAll(filepath.Join(oldDirLocal, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDirLocal, "nested", "keep.txt"), []byte("nested\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newDir, isDir, err := renameRemotePath(context.Background(), sshClient, client, editorTestRemotePath(oldDirLocal), "new-folder")
+	if err != nil {
+		t.Fatalf("renameRemotePath() directory error = %v", err)
+	}
+	if !isDir || pathpkg.Base(newDir) != "new-folder" {
+		t.Fatalf("renamed directory result = path %q, isDir %v", newDir, isDir)
+	}
+	content, err = os.ReadFile(filepath.Join(dir, "new-folder", "nested", "keep.txt"))
+	if err != nil || string(content) != "nested\n" {
+		t.Fatalf("renamed directory content = %q, error = %v", content, err)
+	}
+}
+
+func TestRenameRemotePathRejectsExistingTargetWithoutOverwrite(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	oldLocal := filepath.Join(dir, "source.txt")
+	targetLocal := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(oldLocal, []byte("source\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetLocal, []byte("target\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	sshClient := core.NewSSHClient()
+	sshClient.Hostname = "rename.test"
+	sshClient.Username = "root"
+	if _, _, err := renameRemotePath(context.Background(), sshClient, client, editorTestRemotePath(oldLocal), "target.txt"); err == nil || !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("existing target rename error = %v", err)
+	}
+	if content, err := os.ReadFile(oldLocal); err != nil || string(content) != "source\n" {
+		t.Fatalf("source changed after rejected rename: content=%q error=%v", content, err)
+	}
+	if content, err := os.ReadFile(targetLocal); err != nil || string(content) != "target\n" {
+		t.Fatalf("target overwritten after rejected rename: content=%q error=%v", content, err)
+	}
+}
+
+func TestRenameRemotePathPreservesDirectoryIntentForSymlink(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	dir := t.TempDir()
+	targetLocal := filepath.Join(dir, "target-folder")
+	if err := os.MkdirAll(targetLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkLocal := filepath.Join(dir, "folder-link")
+	if err := os.Symlink(targetLocal, linkLocal); err != nil {
+		t.Skipf("directory symlink is unavailable on this platform: %v", err)
+	}
+	sshClient := core.NewSSHClient()
+	sshClient.Hostname = "rename.test"
+	sshClient.Username = "root"
+	newPath, isDir, err := renameRemotePath(context.Background(), sshClient, client, editorTestRemotePath(linkLocal), "renamed-link")
+	if err != nil {
+		t.Fatalf("renameRemotePath() directory symlink error = %v", err)
+	}
+	if !isDir || pathpkg.Base(newPath) != "renamed-link" {
+		t.Fatalf("renamed directory symlink result = path %q, isDir %v", newPath, isDir)
+	}
+	info, err := os.Lstat(filepath.Join(dir, "renamed-link"))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("renamed path is not the original symlink: info=%v error=%v", info, err)
+	}
+}
+
+func TestValidateRemoteRenameNameRejectsUnsafeNames(t *testing.T) {
+	for _, name := range []string{
+		"",
+		".",
+		"..",
+		"nested/name",
+		`nested\name`,
+		"line\nbreak",
+		strings.Repeat("界", 86),
+	} {
+		if _, err := validateRemoteRenameName(name); err == nil {
+			t.Fatalf("validateRemoteRenameName(%q) unexpectedly succeeded", name)
+		}
+	}
+	if got, err := validateRemoteRenameName("配置文件.yaml"); err != nil || got != "配置文件.yaml" {
+		t.Fatalf("valid Unicode name = %q, %v", got, err)
 	}
 }
 

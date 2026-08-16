@@ -18,6 +18,9 @@ var remoteEditorDecorationMaxBytes = 384 * 1024;
 var remoteEditorLargeFileMaxLines = 12000;
 var sftpDownloadConfirmRequest = null;
 var sftpDeleteConfirmRequest = null;
+var sftpRenameConfirmRequest = null;
+var SFTP_DIRECTORY_CACHE_LIMIT = 24;
+var SFTP_DIRECTORY_CACHE_FRESH_MS = 8000;
 var SFTP_UPLOAD_CONCURRENCY = 2;
 var sftpUploadSequence = 0;
 var serverInfoModalIdx = -1;
@@ -244,6 +247,8 @@ document.addEventListener('keydown', function (e) {
         if (sftpDownloadConfirmModal && sftpDownloadConfirmModal.classList.contains('show')) { hideSftpDownloadConfirm(); return; }
         var sftpDeleteConfirmModal = document.getElementById('sftpDeleteConfirmModal');
         if (sftpDeleteConfirmModal && sftpDeleteConfirmModal.classList.contains('show')) { hideSftpDeleteConfirm(); return; }
+        var sftpRenameModal = document.getElementById('sftpRenameModal');
+        if (sftpRenameModal && sftpRenameModal.classList.contains('show')) { hideSftpRenameConfirm(); return; }
     }
 });
 
@@ -551,6 +556,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _selectionDisposable: null,
         _lastSentSize: null,
         _sizeSyncTimer: null,
+        sftpSessionId: newSftpArchiveJobId(),
         sftpPath: '/',
         sftpSearchQuery: '',
         sftpSearchMode: 'fuzzy',
@@ -560,11 +566,18 @@ function createSession(hostname, port, username, sshInfo, opts) {
         _sftpListMessage: '',
         _sftpListGeneration: 0,
         _sftpListController: null,
+        _sftpDirectoryCache: Object.create(null),
+        _sftpDirectoryCacheOrder: [],
+        _sftpWarmTimer: null,
+        _sftpWarmController: null,
+        _sftpWarmPath: '',
+        _sftpWarmPromise: null,
         sftpDirPickerPath: '/',
         _sftpDirGeneration: 0,
         _sftpDirController: null,
         _sftpRemoteController: null,
         _sftpDeleteController: null,
+        _sftpRenameController: null,
         _sftpUploadControllers: [],
         _sftpUploads: [],
         _sftpUploadRefreshTimer: null,
@@ -1091,6 +1104,7 @@ function connectSession(session) {
             }
             syncTermSize(session, true);
             handleRemoteEditorsSessionConnected(session);
+            scheduleSftpWarmup(session);
         }
 
         ws.onopen = function () {
@@ -4796,6 +4810,133 @@ function getActiveSession() {
     return activeIdx >= 0 && sessions[activeIdx] ? sessions[activeIdx] : null;
 }
 
+function getSftpDirectoryCache(session, path) {
+    if (!session || !session._sftpDirectoryCache) return null;
+    return session._sftpDirectoryCache[normalizeSftpDir(path)] || null;
+}
+
+function rememberSftpDirectory(session, requestedPath, actualPath, data) {
+    if (!session) return null;
+    requestedPath = normalizeSftpDir(requestedPath || '/');
+    actualPath = normalizeSftpDir(actualPath || requestedPath);
+    var entry = {
+        requestedPath: requestedPath,
+        path: actualPath,
+        home: data && data.home ? normalizeSftpDir(data.home) : '',
+        list: Array.isArray(data && data.list) ? data.list : [],
+        updatedAt: Date.now()
+    };
+    var cache = session._sftpDirectoryCache || (session._sftpDirectoryCache = Object.create(null));
+    var order = session._sftpDirectoryCacheOrder || (session._sftpDirectoryCacheOrder = []);
+    [requestedPath, actualPath].filter(function (value, index, values) { return values.indexOf(value) === index; }).forEach(function (key) {
+        cache[key] = entry;
+        var oldIndex = order.indexOf(key);
+        if (oldIndex >= 0) order.splice(oldIndex, 1);
+        order.push(key);
+    });
+    while (order.length > SFTP_DIRECTORY_CACHE_LIMIT) {
+        var oldest = order.shift();
+        if (oldest) delete cache[oldest];
+    }
+    return entry;
+}
+
+function applySftpDirectoryCache(session, entry) {
+    if (!session || !entry) return false;
+    session.sftpPath = normalizeSftpDir(entry.path || '/');
+    session._sftpListPath = session.sftpPath;
+    session._sftpList = Array.isArray(entry.list) ? entry.list : [];
+    session._sftpListState = 'ready';
+    session._sftpListMessage = '';
+    return true;
+}
+
+function invalidateSftpDirectoryCache(session, path, includeChildren) {
+    if (!session || !session._sftpDirectoryCache) return;
+    if (!path) {
+        session._sftpDirectoryCache = Object.create(null);
+        session._sftpDirectoryCacheOrder = [];
+        return;
+    }
+    path = normalizeSftpDir(path);
+    var prefix = path === '/' ? '/' : path + '/';
+    var doomed = [];
+    Object.keys(session._sftpDirectoryCache).forEach(function (key) {
+        var entry = session._sftpDirectoryCache[key];
+        var candidates = [key, entry && entry.path, entry && entry.requestedPath].filter(Boolean).map(normalizeSftpDir);
+        var matches = candidates.some(function (candidate) {
+            return candidate === path || (includeChildren && (path === '/' || candidate.indexOf(prefix) === 0));
+        });
+        if (matches && doomed.indexOf(entry) < 0) doomed.push(entry);
+    });
+    Object.keys(session._sftpDirectoryCache).forEach(function (key) {
+        if (doomed.indexOf(session._sftpDirectoryCache[key]) >= 0) delete session._sftpDirectoryCache[key];
+    });
+    session._sftpDirectoryCacheOrder = (session._sftpDirectoryCacheOrder || []).filter(function (key) {
+        return Object.prototype.hasOwnProperty.call(session._sftpDirectoryCache, key);
+    });
+}
+
+function closeSftpSessionPool(session) {
+    if (!session || !session.sftpSessionId) return;
+    var sessionId = session.sftpSessionId;
+    // Rotate before the asynchronous close request. A late response from an
+    // old disconnect must never close the pool created by a quick reconnect.
+    session.sftpSessionId = newSftpArchiveJobId();
+    fetch('/file/session/close', {
+        method: 'POST',
+        credentials: 'same-origin',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sessionId })
+    }).catch(function () { });
+}
+
+function scheduleSftpWarmup(session) {
+    if (!session) return;
+    if (session._sftpWarmTimer) clearTimeout(session._sftpWarmTimer);
+    if (session._sftpWarmController) {
+        try { session._sftpWarmController.abort(); } catch (e) { }
+        session._sftpWarmController = null;
+        session._sftpWarmPromise = null;
+        session._sftpWarmPath = '';
+    }
+    session._sftpWarmTimer = setTimeout(function () {
+        session._sftpWarmTimer = null;
+        if (sessions.indexOf(session) < 0 || !session._connected) return;
+        var path = normalizeSftpDir(session.sftpPath || '/');
+        var cached = getSftpDirectoryCache(session, path);
+        if (cached && Date.now() - cached.updatedAt < SFTP_DIRECTORY_CACHE_FRESH_MS) return;
+        var controller = new AbortController();
+        session._sftpWarmController = controller;
+        session._sftpWarmPath = path;
+        var warmPromise = fetch('/file/list', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sshInfo: session.sshInfo, path: path, sessionId: session.sftpSessionId }),
+            signal: controller.signal
+        }).then(function (response) { return response.json(); }).then(function (data) {
+            if (sessions.indexOf(session) < 0 || data.Msg !== 'success') return null;
+            var actualPath = normalizeSftpDir(data.Data && data.Data.path ? data.Data.path : path);
+            var entry = rememberSftpDirectory(session, path, actualPath, data.Data || {});
+            var panel = document.getElementById('sftpPanel');
+            if (getActiveSession() === session && panel && panel.classList.contains('open') && normalizeSftpDir(session.sftpPath || '/') === path && session._sftpListState !== 'ready') {
+                applySftpDirectoryCache(session, entry);
+                document.getElementById('sftpPath').value = entry.path;
+                renderSftpList(session);
+            }
+            return entry;
+        }).catch(function () { return null; }).finally(function () {
+            if (session._sftpWarmPromise !== warmPromise) return;
+            if (session._sftpWarmController === controller) session._sftpWarmController = null;
+            if (session._sftpWarmPath === path) session._sftpWarmPath = '';
+            session._sftpWarmPromise = null;
+        });
+        session._sftpWarmPromise = warmPromise;
+    }, 450);
+}
+
 function abortSessionController(session, field) {
     if (!session || !session[field]) return;
     try { session[field].abort(); } catch (e) { }
@@ -4813,16 +4954,29 @@ function cancelSessionSftpBrowsing(session) {
 function cancelSessionSftpRequests(session, cancelDownloads) {
     if (!session) return;
     cancelSessionSftpBrowsing(session);
+    if (session._sftpWarmTimer) {
+        clearTimeout(session._sftpWarmTimer);
+        session._sftpWarmTimer = null;
+    }
+    abortSessionController(session, '_sftpWarmController');
+    session._sftpWarmPromise = null;
+    session._sftpWarmPath = '';
     if (session._sftpUploadRefreshTimer) {
         clearTimeout(session._sftpUploadRefreshTimer);
         session._sftpUploadRefreshTimer = null;
     }
     abortSessionController(session, '_sftpRemoteController');
     abortSessionController(session, '_sftpDeleteController');
+    abortSessionController(session, '_sftpRenameController');
     if (sftpDeleteConfirmRequest && sftpDeleteConfirmRequest.sessionId === session.id) {
         if (sftpDeleteConfirmRequest.editor) setRemoteEditorDeletePending(sftpDeleteConfirmRequest.editor, false, '删除请求已取消', 'warn');
         sftpDeleteConfirmRequest.deleting = false;
         hideSftpDeleteConfirm(true);
+    }
+    if (sftpRenameConfirmRequest && sftpRenameConfirmRequest.sessionId === session.id) {
+        (sftpRenameConfirmRequest.editors || []).forEach(function (editor) { setRemoteEditorRenamePending(editor, false, '重命名请求已取消', 'warn'); });
+        sftpRenameConfirmRequest.renaming = false;
+        hideSftpRenameConfirm(true);
     }
     (session._remoteEditorControllers || []).forEach(function (controller) {
         try { controller.abort(); } catch (e) { }
@@ -4843,6 +4997,7 @@ function cancelSessionSftpRequests(session, cancelDownloads) {
     if (cancelDownloads) {
         (session._sftpDownloads || []).slice().forEach(cancelSftpDownload);
     }
+    closeSftpSessionPool(session);
 }
 
 function requestWasAborted(err) {
@@ -4910,11 +5065,12 @@ function renderSftpRow(f, actualPath) {
     var preview = isDir || (!f.Previewable && !f.PreviewReason) ? '' : '<button class="sftp-preview' + (f.Previewable ? '' : ' disabled') + '" ' + (f.Previewable ? 'onclick="event.stopPropagation();openRemotePreview(' + fpArg + ',' + previewKindArg + ',' + previewMimeArg + ')"' : 'data-message="' + escAttr(previewTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(previewTitle) + '" aria-label="' + escAttr(previewTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="12" height="12"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg></button>';
     var editTitle = f.Editable ? '在线编辑' : (f.EditReason || '此文件不支持在线编辑');
     var edit = isDir ? '' : '<button class="sftp-edit' + (f.Editable ? '' : ' disabled') + '" ' + (f.Editable ? 'onclick="event.stopPropagation();openRemoteEditor(' + fpArg + ')"' : 'data-message="' + escAttr(editTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(editTitle) + '" aria-label="' + escAttr(editTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
+    var rename = '<button class="sftp-rename" onclick="event.stopPropagation();requestSftpRename(' + fpArg + ',' + (isDir ? 'true' : 'false') + ')" title="重命名" aria-label="' + escAttr('重命名 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" width="12" height="12"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>';
     var dlTitle = downloadable ? (isDir ? '压缩并下载文件夹' : '下载') : (f.DownloadReason || '此项目不支持下载');
     var dl = '<button class="sftp-dl' + (isDir ? ' directory' : '') + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + (isDir ? 0 : sizeBytes) + ',' + (isDir ? 'true' : 'false') + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
     var del = isDir ? '' : '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ')" title="删除" aria-label="' + escAttr('删除 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
     var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
-    return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + preview + edit + dl + del + '</div>';
+    return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + preview + edit + rename + dl + del + '</div>';
 }
 
 function renderSftpList(session) {
@@ -4976,72 +5132,106 @@ function handleSftpSearchKeydown(event) {
     clearSftpSearch();
 }
 
-function sftpLoad(path, session) {
+function sftpLoad(path, session, options) {
+    options = options || {};
     session = session || getActiveSession();
-    if (!session || sessions.indexOf(session) === -1) return;
+    if (!session || sessions.indexOf(session) === -1) return Promise.resolve(null);
+    session._sftpListGeneration = (session._sftpListGeneration || 0) + 1;
+    var generation = session._sftpListGeneration;
+    abortSessionController(session, '_sftpListController');
     path = normalizeSftpDir(path);
     var previousPath = normalizeSftpDir(session.sftpPath || '/');
     if (previousPath !== path) {
         session.sftpSearchQuery = '';
-        session._sftpList = [];
     }
     session.sftpPath = path;
+    if (session._sftpWarmTimer) {
+        clearTimeout(session._sftpWarmTimer);
+        session._sftpWarmTimer = null;
+    }
+    if (session._sftpWarmController && session._sftpWarmPath && session._sftpWarmPath !== path) {
+        abortSessionController(session, '_sftpWarmController');
+        session._sftpWarmPromise = null;
+        session._sftpWarmPath = '';
+    }
+    var cached = getSftpDirectoryCache(session, path);
+    if (cached) applySftpDirectoryCache(session, cached);
+    else if (previousPath !== path) session._sftpList = [];
     if (!session._connected) {
         session._sftpListState = 'disconnected';
         session._sftpListMessage = 'SSH 连接尚未就绪';
         renderSftpList(session);
-        return;
+        return Promise.resolve(null);
     }
-    session._sftpListGeneration = (session._sftpListGeneration || 0) + 1;
-    var generation = session._sftpListGeneration;
-    abortSessionController(session, '_sftpListController');
-    var controller = new AbortController();
-    session._sftpListController = controller;
-    session._sftpListState = 'loading';
-    session._sftpListMessage = '';
     if (getActiveSession() === session) {
-        document.getElementById('sftpPath').value = path;
+        document.getElementById('sftpPath').value = cached ? cached.path : path;
         syncSftpSearchControls(session);
         renderSftpList(session);
     }
-    fetch('/file/list', {
+    if (!options.force && cached && Date.now() - cached.updatedAt < SFTP_DIRECTORY_CACHE_FRESH_MS) return Promise.resolve(cached);
+    if (!options.force && session._sftpWarmPromise && session._sftpWarmPath === path) {
+        var warmPromise = session._sftpWarmPromise;
+        return warmPromise.then(function (entry) {
+            if (!entry || sessions.indexOf(session) < 0 || session._sftpListGeneration !== generation) return entry;
+            if (normalizeSftpDir(session.sftpPath || '/') === path) {
+                applySftpDirectoryCache(session, entry);
+                if (getActiveSession() === session) {
+                    document.getElementById('sftpPath').value = entry.path;
+                    renderSftpList(session);
+                }
+            }
+            return entry;
+        });
+    }
+    var controller = new AbortController();
+    session._sftpListController = controller;
+    session._sftpListState = cached ? 'ready' : 'loading';
+    session._sftpListMessage = '';
+    if (getActiveSession() === session) {
+        document.getElementById('sftpPath').value = cached ? cached.path : path;
+        syncSftpSearchControls(session);
+        renderSftpList(session);
+    }
+    return fetch('/file/list', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sshInfo: session.sshInfo, path: path }),
+        body: JSON.stringify({ sshInfo: session.sshInfo, path: path, sessionId: session.sftpSessionId }),
         signal: controller.signal
     })
         .then(function (r) { return r.json(); })
         .then(function (d) {
-            if (sessions.indexOf(session) === -1 || session._sftpListGeneration !== generation || getActiveSession() !== session) return;
+            if (sessions.indexOf(session) === -1 || session._sftpListGeneration !== generation) return null;
             session._sftpListController = null;
             if (d.Msg !== 'success') {
-                session._sftpListState = 'error';
+                session._sftpListState = cached ? 'ready' : 'error';
                 session._sftpListMessage = d.Msg || '加载失败';
-                renderSftpList(session);
-                return;
+                if (getActiveSession() === session) renderSftpList(session);
+                return null;
             }
             var actualPath = normalizeSftpDir(d.Data && d.Data.path ? d.Data.path : path);
             if (actualPath !== path) session.sftpSearchQuery = '';
-            session.sftpPath = actualPath;
-            session._sftpListPath = actualPath;
-            session._sftpList = Array.isArray(d.Data && d.Data.list) ? d.Data.list : [];
-            session._sftpListState = 'ready';
-            session._sftpListMessage = '';
-            document.getElementById('sftpPath').value = actualPath;
-            renderSftpList(session);
+            var entry = rememberSftpDirectory(session, path, actualPath, d.Data || {});
+            if (normalizeSftpDir(session.sftpPath || '/') === path || session.sftpPath === actualPath) applySftpDirectoryCache(session, entry);
+            if (getActiveSession() === session) {
+                document.getElementById('sftpPath').value = actualPath;
+                renderSftpList(session);
+            }
+            return entry;
         })
         .catch(function (err) {
-            if (session._sftpListGeneration !== generation || requestWasAborted(err) || getActiveSession() !== session) return;
+            if (session._sftpListGeneration !== generation || requestWasAborted(err)) return null;
             session._sftpListController = null;
-            session._sftpListState = 'error';
+            session._sftpListState = cached ? 'ready' : 'error';
             session._sftpListMessage = '加载失败';
-            renderSftpList(session);
+            if (getActiveSession() === session) renderSftpList(session);
+            return null;
         });
 }
 
 function sftpGo() {
     var session = getActiveSession();
-    if (session) sftpLoad(document.getElementById('sftpPath').value.trim() || '/', session);
+    if (session) sftpLoad(document.getElementById('sftpPath').value.trim() || '/', session, { force: true });
 }
 function sftpUp() {
     var session = getActiveSession();
@@ -5111,7 +5301,7 @@ function requestSftpDelete(path) {
     path = normalizeRemoteFilePath(path);
     if (!path || path === '/') { showToast('文件路径无效', 'error'); return; }
     var editors = typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, path) : (remoteEditorFor(session, path) ? [remoteEditorFor(session, path)] : []);
-    var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending; });
+    var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending || item.renamePending; });
     if (editor) {
         restoreRemoteEditor(editor);
         showToast('该文件有未保存的修改，请先保存或关闭编辑器', 'error');
@@ -5161,7 +5351,7 @@ function confirmSftpDelete() {
         return Promise.resolve(false);
     }
     var editors = typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, request.path) : (remoteEditorFor(session, request.path) ? [remoteEditorFor(session, request.path)] : []);
-    var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending || !item.loaded || item.controller; });
+    var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending || item.renamePending || !item.loaded || item.controller; });
     if (editor) {
         hideSftpDeleteConfirm(true);
         restoreRemoteEditor(editor);
@@ -5189,7 +5379,8 @@ function confirmSftpDelete() {
             hideSftpDeleteConfirm(true);
             showToast('已删除: ' + request.name, 'success');
             if (sessions.indexOf(session) >= 0 && session._connected && normalizeSftpDir(session.sftpPath || '/') === request.parentPath) {
-                sftpLoad(request.parentPath, session);
+                invalidateSftpDirectoryCache(session, request.parentPath, false);
+                sftpLoad(request.parentPath, session, { force: true });
             }
             return true;
         })
@@ -5210,6 +5401,215 @@ function confirmSftpDelete() {
         .finally(function () {
             if (session._sftpDeleteController === controller) session._sftpDeleteController = null;
         });
+}
+
+function remotePathIsWithin(path, root) {
+    path = normalizeRemoteFilePath(path);
+    root = normalizeRemoteFilePath(root);
+    if (!path || !root) return false;
+    return path === root || path.indexOf(root === '/' ? '/' : root + '/') === 0;
+}
+
+function replaceRemotePathPrefix(path, oldPath, newPath) {
+    path = normalizeRemoteFilePath(path);
+    oldPath = normalizeRemoteFilePath(oldPath);
+    newPath = normalizeRemoteFilePath(newPath);
+    if (!remotePathIsWithin(path, oldPath)) return path;
+    return path === oldPath ? newPath : newPath + path.slice(oldPath.length);
+}
+
+function remoteEditorsAffectedByRename(session, path, isDirectory) {
+    path = normalizeRemoteFilePath(path);
+    return remoteEditors.filter(function (editor) {
+        if (!session || editor.sessionId !== session.id) return false;
+        return isDirectory ? remotePathIsWithin(editor.path, path) : normalizeRemoteFilePath(editor.path) === path;
+    });
+}
+
+function setRemoteEditorRenamePending(editor, pending, statusText, statusType) {
+    if (!editor) return;
+    if (pending) {
+        if (editor.renamePending) return;
+        editor.renamePending = true;
+        if (editor.textarea) {
+            editor.renamePreviousReadOnly = editor.textarea.readOnly;
+            editor.textarea.readOnly = true;
+        }
+        if (editor.saveBtn) editor.saveBtn.disabled = true;
+    } else {
+        editor.renamePending = false;
+        if (editor.textarea && typeof editor.renamePreviousReadOnly === 'boolean') editor.textarea.readOnly = editor.renamePreviousReadOnly;
+        delete editor.renamePreviousReadOnly;
+        remoteEditorUpdateMetrics(editor);
+    }
+    if (statusText) remoteEditorSetStatus(editor, statusText, statusType || 'info');
+}
+
+function updateRemoteEditorsAfterRename(session, oldPath, newPath, isDirectory) {
+    var affected = remoteEditorsAffectedByRename(session, oldPath, isDirectory);
+    affected.forEach(function (editor) {
+        editor.path = replaceRemotePathPrefix(editor.path, oldPath, newPath);
+        if (editor.targetPath && remotePathIsWithin(editor.targetPath, oldPath)) {
+            editor.targetPath = replaceRemotePathPrefix(editor.targetPath, oldPath, newPath);
+        }
+        var slash = editor.path.lastIndexOf('/');
+        editor.parentPath = normalizeSftpDir(slash <= 0 ? '/' : editor.path.substring(0, slash));
+        editor.name = editor.path.substring(slash + 1) || editor.name;
+        if (editor.nameInput) editor.nameInput.value = editor.name;
+        if (editor.subtitle) editor.subtitle.textContent = remoteEditorPathLabel(editor);
+        if ((editor.viewMode || 'text') === 'text') remoteEditorApplyLanguage(editor);
+        else remoteEditorUpdateTab(editor);
+        setRemoteEditorRenamePending(editor, false, '远端路径已更新', 'success');
+    });
+    if (affected.length) {
+        updateRemoteEditorWorkspaceSummary(session._remoteEditorWorkspace);
+        renderRemoteEditorDock(getActiveSession());
+    }
+    return affected;
+}
+
+function setSftpRenameConfirmBusy(busy) {
+    var confirmButton = document.getElementById('sftpRenameConfirmButton');
+    var cancelButton = document.getElementById('sftpRenameCancelButton');
+    var closeButton = document.getElementById('sftpRenameCloseButton');
+    var input = document.getElementById('sftpRenameInput');
+    if (confirmButton) { confirmButton.disabled = !!busy; confirmButton.textContent = busy ? '正在重命名…' : '确认重命名'; }
+    if (cancelButton) cancelButton.disabled = !!busy;
+    if (closeButton) closeButton.disabled = !!busy;
+    if (input) input.disabled = !!busy;
+}
+
+function requestSftpRename(path, isDirectory) {
+    var session = getActiveSession();
+    if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
+    path = normalizeRemoteFilePath(path);
+    if (!path || path === '/') { showToast('此路径不能重命名', 'error'); return; }
+    isDirectory = !!isDirectory;
+    var editors = remoteEditorsAffectedByRename(session, path, isDirectory);
+    var blocked = editors.find(function (editor) {
+        return remoteEditorIsDirty(editor) || editor.saving || editor.deletePending || editor.renamePending || !editor.loaded || editor.controller;
+    });
+    if (blocked) {
+        restoreRemoteEditor(blocked);
+        showToast('相关文件正在编辑、加载或保存，请处理完成后再重命名', 'error');
+        return;
+    }
+    var slash = path.lastIndexOf('/');
+    var name = path.substring(slash + 1) || path;
+    sftpRenameConfirmRequest = {
+        sessionId: session.id,
+        path: path,
+        parentPath: normalizeSftpDir(slash <= 0 ? '/' : path.substring(0, slash)),
+        name: name,
+        isDirectory: isDirectory,
+        renaming: false,
+        controller: null,
+        editors: editors.slice()
+    };
+    document.getElementById('sftpRenameConfirmTitle').textContent = isDirectory ? '重命名文件夹' : '重命名文件';
+    document.getElementById('sftpRenameOriginalName').textContent = name;
+    document.getElementById('sftpRenamePath').textContent = path;
+    var input = document.getElementById('sftpRenameInput');
+    input.value = name;
+    var status = document.getElementById('sftpRenameStatus');
+    if (status) { status.textContent = '只修改名称，文件内容和所在目录不会改变。'; status.className = 'sftp-rename-status'; }
+    setSftpRenameConfirmBusy(false);
+    document.getElementById('sftpRenameModal').classList.add('show');
+    setTimeout(function () {
+        input.focus();
+        var dot = isDirectory ? -1 : name.lastIndexOf('.');
+        input.setSelectionRange(0, dot > 0 ? dot : name.length);
+    }, 0);
+}
+
+function hideSftpRenameConfirm(force) {
+    if (sftpRenameConfirmRequest && sftpRenameConfirmRequest.renaming && !force) return;
+    sftpRenameConfirmRequest = null;
+    var modal = document.getElementById('sftpRenameModal');
+    if (modal) modal.classList.remove('show');
+    setSftpRenameConfirmBusy(false);
+}
+
+function confirmSftpRename() {
+    var request = sftpRenameConfirmRequest;
+    if (!request || request.renaming) return Promise.resolve(false);
+    var session = getSessionById(request.sessionId);
+    if (!session || !session._connected) {
+        showToast('SSH 连接尚未就绪', 'error');
+        hideSftpRenameConfirm(true);
+        return Promise.resolve(false);
+    }
+    var input = document.getElementById('sftpRenameInput');
+    var newName = sanitizeRemoteFileName(input ? input.value : '');
+    var status = document.getElementById('sftpRenameStatus');
+    if (!newName) {
+        if (status) { status.textContent = '请输入有效名称，不能包含 /、\\ 或控制字符。'; status.className = 'sftp-rename-status error'; }
+        if (input) input.focus();
+        return Promise.resolve(false);
+    }
+    if (newName === request.name) {
+        if (status) { status.textContent = '新名称与原名称相同。'; status.className = 'sftp-rename-status error'; }
+        if (input) input.focus();
+        return Promise.resolve(false);
+    }
+    var editors = remoteEditorsAffectedByRename(session, request.path, request.isDirectory);
+    var blocked = editors.find(function (editor) {
+        return remoteEditorIsDirty(editor) || editor.saving || editor.deletePending || editor.renamePending || !editor.loaded || editor.controller;
+    });
+    if (blocked) {
+        hideSftpRenameConfirm(true);
+        restoreRemoteEditor(blocked);
+        showToast('编辑器状态已变化，请处理完成后再重命名', 'error');
+        return Promise.resolve(false);
+    }
+    request.editors = editors.slice();
+    request.renaming = true;
+    setSftpRenameConfirmBusy(true);
+    if (status) { status.textContent = '正在更新远端名称…'; status.className = 'sftp-rename-status working'; }
+    request.editors.forEach(function (editor) { setRemoteEditorRenamePending(editor, true, '正在重命名远端路径…', 'warn'); });
+    abortSessionController(session, '_sftpRenameController');
+    var controller = new AbortController();
+    request.controller = controller;
+    session._sftpRenameController = controller;
+    return remoteEditorRequest('/file/rename', {
+        sshInfo: session.sshInfo,
+        path: request.path,
+        newName: newName,
+        sessionId: session.sftpSessionId
+    }, controller.signal).then(function (data) {
+        if (sftpRenameConfirmRequest !== request) return false;
+        request.renaming = false;
+        request.controller = null;
+        var oldPath = normalizeRemoteFilePath(data.oldPath || request.path);
+        var newPath = normalizeRemoteFilePath(data.newPath || joinRemoteFilePath(request.parentPath, newName));
+        var renamedDirectory = typeof data.isDir === 'boolean' ? data.isDir : request.isDirectory;
+        updateRemoteEditorsAfterRename(session, oldPath, newPath, renamedDirectory);
+        var currentPath = normalizeSftpDir(session.sftpPath || '/');
+        if (renamedDirectory && remotePathIsWithin(currentPath, oldPath)) {
+            currentPath = normalizeSftpDir(replaceRemotePathPrefix(currentPath, oldPath, newPath));
+            session.sftpPath = currentPath;
+        }
+        invalidateSftpDirectoryCache(session, request.parentPath, false);
+        invalidateSftpDirectoryCache(session, oldPath, renamedDirectory);
+        invalidateSftpDirectoryCache(session, newPath, renamedDirectory);
+        hideSftpRenameConfirm(true);
+        showToast('已重命名为: ' + newName, 'success');
+        if (sessions.indexOf(session) >= 0 && session._connected) sftpLoad(currentPath, session, { force: true });
+        return true;
+    }).catch(function (err) {
+        if (sftpRenameConfirmRequest !== request) return false;
+        request.renaming = false;
+        request.controller = null;
+        setSftpRenameConfirmBusy(false);
+        var aborted = requestWasAborted(err);
+        var message = aborted ? '重命名请求已中断，请刷新目录确认当前名称。' : ((err && err.msg) || '重命名失败');
+        if (status) { status.textContent = message; status.className = 'sftp-rename-status error'; }
+        request.editors.forEach(function (editor) { setRemoteEditorRenamePending(editor, false, aborted ? '重命名请求已中断' : '重命名失败', aborted ? 'warn' : 'error'); });
+        if (!aborted) showToast(message, 'error');
+        return false;
+    }).finally(function () {
+        if (session._sftpRenameController === controller) session._sftpRenameController = null;
+    });
 }
 
 function hideSftpDownloadConfirm() {
@@ -5824,7 +6224,7 @@ function remoteEditorUpdateMetrics(editor) {
     if (editor.el) editor.el.classList.toggle('is-dirty', dirty);
     var session = remoteEditorSession(editor);
     var tooLarge = !!editor.maxBytes && bytes > editor.maxBytes;
-    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !dirty || !session || !session._connected;
+    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !!editor.renamePending || !editor.loaded || tooLarge || !dirty || !session || !session._connected;
     if (tooLarge && !editor.saving) remoteEditorSetStatus(editor, '内容超过在线编辑上限 ' + fmtB(editor.maxBytes), 'error');
     remoteEditorUpdateTab(editor);
     updateRemoteEditorWorkspaceSummary(workspace);
@@ -5851,7 +6251,7 @@ function remoteEditorHandleLargeFileInput(editor) {
     }
     var session = remoteEditorSession(editor);
     var tooLarge = !!editor.maxBytes && value.length > editor.maxBytes;
-    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !editor.loaded || tooLarge || !session || !session._connected;
+    if (editor.saveBtn) editor.saveBtn.disabled = !!editor.saving || !!editor.renamePending || !editor.loaded || tooLarge || !session || !session._connected;
     remoteEditorUpdateTab(editor);
     updateRemoteEditorWorkspaceSummary(remoteEditorWorkspaceFor(editor));
     if (editor._metricsTimer) clearTimeout(editor._metricsTimer);
@@ -6220,7 +6620,14 @@ function scheduleRemoteEditorDecorations(editor) {
         var highlightEnabled = value.length <= remoteEditorDecorationMaxBytes;
         if (editor.highlightCode) {
             editor.el.classList.toggle('highlight-disabled', !highlightEnabled);
-            if (highlightEnabled) editor.highlightCode.innerHTML = remoteEditorHighlightCode(value, editor.language ? editor.language.id : 'text') + '\n';
+            if (highlightEnabled) {
+                var highlighted = remoteEditorHighlightCode(value, editor.language ? editor.language.id : 'text');
+                // A textarea renders the empty line after a trailing newline;
+                // inline <code> does not, so add exactly one visual line only
+                // for that case. Adding it unconditionally shifts other files.
+                if (value.slice(-1) === '\n') highlighted += '\n';
+                editor.highlightCode.innerHTML = highlighted;
+            }
             else if (editor.highlightCode.textContent) editor.highlightCode.textContent = '';
         }
         syncRemoteEditorCodeScroll(editor);
@@ -6230,6 +6637,7 @@ function scheduleRemoteEditorDecorations(editor) {
 
 function syncRemoteEditorCodeScroll(editor) {
     if (!editor || !editor.textarea) return;
+    if (editor.el) editor.el.classList.toggle('has-horizontal-scroll', editor.textarea.scrollWidth > editor.textarea.clientWidth + 1);
     if (editor.gutter) editor.gutter.scrollTop = editor.textarea.scrollTop;
     if (editor.highlight) {
         editor.highlight.scrollTop = editor.textarea.scrollTop;
@@ -7131,7 +7539,7 @@ function confirmRemoteEditorSaveAndClose() {
 }
 
 function saveRemoteEditor(editor, closeAfter) {
-    if (!editor || editor.saving || editor.deletePending) return Promise.resolve(false);
+    if (!editor || editor.saving || editor.deletePending || editor.renamePending) return Promise.resolve(false);
     var session = remoteEditorSession(editor);
     if (!session || !session._connected) { remoteEditorSetStatus(editor, 'SSH 已断开，无法保存', 'error'); return Promise.resolve(false); }
     if (!remoteEditorIsDirty(editor)) { if (closeAfter) destroyRemoteEditor(editor); return Promise.resolve(true); }
@@ -7185,7 +7593,8 @@ function saveRemoteEditor(editor, closeAfter) {
             editor.subtitle.textContent = remoteEditorPathLabel(editor);
             if (editor.parentPath) {
                 var editorDirectory = normalizeSftpDir(editor.parentPath);
-                if (normalizeSftpDir(session.sftpPath || '/') === editorDirectory) sftpLoad(editorDirectory, session);
+                invalidateSftpDirectoryCache(session, editorDirectory, false);
+                if (normalizeSftpDir(session.sftpPath || '/') === editorDirectory) sftpLoad(editorDirectory, session, { force: true });
             }
             editor.saving = false;
             remoteEditorSetStatus(editor, editor.textarea.value === sentContent ? '保存成功' : '已保存，仍有新修改', editor.textarea.value === sentContent ? 'success' : 'warn');
@@ -7305,7 +7714,10 @@ function submitSftpRemoteDownload() {
                 var saved = d.Data && d.Data.path ? d.Data.path : path;
                 setSftpRemoteStatus('下载完成：' + saved, 'success');
                 showToast('远程下载完成', 'success');
-                if (sessions.indexOf(session) !== -1) sftpLoad(path, session);
+                if (sessions.indexOf(session) !== -1) {
+                    invalidateSftpDirectoryCache(session, path, false);
+                    sftpLoad(path, session, { force: true });
+                }
                 setTimeout(function () { if (sftpRemoteSessionId === session.id) hideSftpRemoteModal(); }, 800);
             } else {
                 setSftpRemoteStatus(d.Msg || '下载失败', 'error');
@@ -7455,7 +7867,8 @@ function scheduleSftpUploadRefresh(session, path) {
     session._sftpUploadRefreshTimer = setTimeout(function () {
         session._sftpUploadRefreshTimer = null;
         if (sessions.indexOf(session) < 0 || normalizeSftpDir(session.sftpPath || '/') !== path) return;
-        sftpLoad(path, session);
+        invalidateSftpDirectoryCache(session, path, false);
+        sftpLoad(path, session, { force: true });
     }, 140);
 }
 
@@ -8576,10 +8989,11 @@ function initPreviewMode() {
                 : '<svg class="sftp-icon file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
             var editTitle = item.editable ? '在线编辑' : '文件超过在线编辑上限 2MB';
             var edit = item.isDir ? '' : '<button class="sftp-edit' + (item.editable ? '' : ' disabled') + '" title="' + editTitle + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1-1 1 1-4z"/></svg></button>';
+            var rename = '<button class="sftp-rename" title="重命名"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" width="12" height="12"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>';
             var downloadTitle = item.isDir ? '压缩并下载文件夹' : '下载';
             var download = '<button class="sftp-dl' + (item.isDir ? ' directory' : '') + '" title="' + downloadTitle + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
             var remove = item.isDir ? '' : '<button class="sftp-delete" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
-            return '<div class="sftp-row">' + icon + '<span class="sftp-name">' + esc(item.name) + '</span><span class="sftp-meta">' + item.size + '</span>' + edit + download + remove + '</div>';
+            return '<div class="sftp-row">' + icon + '<span class="sftp-name">' + esc(item.name) + '</span><span class="sftp-meta">' + item.size + '</span>' + edit + rename + download + remove + '</div>';
         }).join('');
         if (params.get('upload') === 'progress') {
             var uploadPreviewPanel = document.getElementById('sftpTransferPanel');
@@ -8753,6 +9167,16 @@ if (sftpDeleteConfirmModalEl) {
         if (e.target === sftpDeleteConfirmModalEl) hideSftpDeleteConfirm();
     });
 }
+var sftpRenameModalEl = document.getElementById('sftpRenameModal');
+if (sftpRenameModalEl) {
+    sftpRenameModalEl.addEventListener('click', function (e) {
+        if (e.target === sftpRenameModalEl) hideSftpRenameConfirm();
+    });
+}
+var sftpRenameInputEl = document.getElementById('sftpRenameInput');
+if (sftpRenameInputEl) sftpRenameInputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); confirmSftpRename(); }
+});
 var editScriptModalEl = document.getElementById('editScriptModal');
 if (editScriptModalEl) {
     editScriptModalEl.addEventListener('click', function (e) {

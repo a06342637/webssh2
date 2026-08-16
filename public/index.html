@@ -552,6 +552,31 @@
         </div>
     </div>
 
+    <div class="modal-overlay sftp-rename-overlay" id="sftpRenameModal">
+        <div class="glass-card modal-card sftp-rename-card" role="dialog" aria-modal="true" aria-labelledby="sftpRenameConfirmTitle">
+            <div class="drawer-hd auth-hd">
+                <span id="sftpRenameConfirmTitle">重命名</span>
+                <button class="settings-close" id="sftpRenameCloseButton" type="button" onclick="hideSftpRenameConfirm()" title="取消重命名"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="sftp-download-confirm-body sftp-rename-body">
+                <div class="sftp-download-confirm-icon sftp-rename-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></div>
+                <div class="sftp-download-confirm-copy">
+                    <b id="sftpRenameOriginalName">-</b>
+                    <p>输入新名称后，将在原目录内完成重命名。</p>
+                </div>
+                <label class="sftp-rename-field" for="sftpRenameInput"><span>新名称</span><input type="text" id="sftpRenameInput" maxlength="255" autocomplete="off" spellcheck="false"></label>
+                <dl class="sftp-download-confirm-details">
+                    <div><dt>原路径</dt><dd id="sftpRenamePath">-</dd></div>
+                </dl>
+                <div class="sftp-rename-status" id="sftpRenameStatus" aria-live="polite">只修改名称，文件内容和所在目录不会改变。</div>
+                <div class="sftp-download-confirm-actions">
+                    <button class="drawer-add primary-action" id="sftpRenameConfirmButton" type="button" onclick="confirmSftpRename()">确认重命名</button>
+                    <button class="drawer-add" id="sftpRenameCancelButton" type="button" onclick="hideSftpRenameConfirm()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal-overlay remote-editor-close-overlay" id="remoteEditorCloseModal">
         <div class="glass-card modal-card remote-editor-close-card" role="dialog" aria-modal="true" aria-labelledby="remoteEditorCloseTitle">
             <div class="drawer-hd auth-hd">

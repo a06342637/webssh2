@@ -294,6 +294,15 @@ func main() {
 				c.JSON(200, responseBody)
 			}
 		})
+		file.POST("/session/close", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.CloseSFTPSession(c)
+			if !c.IsAborted() {
+				c.JSON(http.StatusOK, responseBody)
+			}
+		})
 		file.POST("/download", func(c *gin.Context) {
 			if !gatewayAuth(c) {
 				return
@@ -356,6 +365,16 @@ func main() {
 			}
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.DeleteFile(c)
+			if !c.IsAborted() {
+				c.JSON(http.StatusOK, responseBody)
+			}
+		})
+		file.POST("/rename", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			c.Header("Cache-Control", "no-store")
+			responseBody := controller.RenameFile(c)
 			if !c.IsAborted() {
 				c.JSON(http.StatusOK, responseBody)
 			}

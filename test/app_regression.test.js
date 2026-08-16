@@ -356,15 +356,15 @@ test('an SFTP response from another tab cannot repaint the active tab', async ()
         sftpPath: { value: '' },
         sftpBody: { innerHTML: '' },
     };
-    const first = { id: 'first', sshInfo: 'first-info', sftpPath: '/', _sftpListGeneration: 0, _connected: true };
-    const second = { id: 'second', sshInfo: 'second-info', sftpPath: '/', _sftpListGeneration: 0, _connected: true };
+    const first = { id: 'first', sshInfo: 'first-info', sftpSessionId: 'sftp-first', sftpPath: '/', _sftpListGeneration: 0, _sftpDirectoryCache: Object.create(null), _sftpDirectoryCacheOrder: [], _connected: true };
+    const second = { id: 'second', sshInfo: 'second-info', sftpSessionId: 'sftp-second', sftpPath: '/', _sftpListGeneration: 0, _sftpDirectoryCache: Object.create(null), _sftpDirectoryCacheOrder: [], _connected: true };
     const sandbox = loadFunctions(
-        ['getActiveSession', 'abortSessionController', 'cancelSessionSftpBrowsing', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpLoad'],
+        ['getActiveSession', 'getSftpDirectoryCache', 'rememberSftpDirectory', 'applySftpDirectoryCache', 'abortSessionController', 'cancelSessionSftpBrowsing', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpLoad'],
         {
             sessions: [first, second], activeIdx: 0,
             document: { getElementById: (id) => elements[id] },
             fetch: () => requests[requestIndex++].promise,
-            AbortController,
+            AbortController, Date, SFTP_DIRECTORY_CACHE_LIMIT: 24, SFTP_DIRECTORY_CACHE_FRESH_MS: 8000,
             esc: (value) => String(value), escAttr: (value) => String(value), JSON,
         },
     );
@@ -380,6 +380,76 @@ test('an SFTP response from another tab cannot repaint the active tab', async ()
     await flushPromises();
     assert.equal(elements.sftpPath.value, '/second');
     assert.match(elements.sftpBody.innerHTML, /空目录/);
+});
+
+test('SFTP browsing reuses a tab-scoped server session and a short-lived directory cache', () => {
+    const createSource = extractFunction('createSession');
+    const loadSource = extractFunction('sftpLoad');
+    const warmSource = extractFunction('scheduleSftpWarmup');
+    const closeSource = extractFunction('closeSftpSessionPool');
+    const cancelSource = extractFunction('cancelSessionSftpRequests');
+    assert.match(createSource, /sftpSessionId:\s*newSftpArchiveJobId\(\)/);
+    assert.match(loadSource, /sessionId:\s*session\.sftpSessionId/);
+    assert.match(loadSource, /getSftpDirectoryCache\(session, path\)/);
+    assert.match(loadSource, /Date\.now\(\) - cached\.updatedAt < SFTP_DIRECTORY_CACHE_FRESH_MS/);
+    assert.match(loadSource, /session\._sftpWarmPath !== path[\s\S]*abortSessionController\(session, '_sftpWarmController'\)/);
+    assert.match(warmSource, /fetch\('\/file\/list'/);
+    assert.match(warmSource, /session\._sftpWarmPromise !== warmPromise/);
+    assert.match(closeSource, /fetch\('\/file\/session\/close'/);
+    assert.match(closeSource, /keepalive:\s*true/);
+    assert.match(closeSource, /var sessionId = session\.sftpSessionId/);
+    assert.match(closeSource, /session\.sftpSessionId = newSftpArchiveJobId\(\)/);
+    assert.match(closeSource, /JSON\.stringify\(\{ sessionId: sessionId \}\)/);
+    assert.match(cancelSource, /closeSftpSessionPool\(session\)/);
+});
+
+test('SFTP directory cache aliases the requested and resolved home paths and invalidates descendants', () => {
+    let now = 1000;
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'rememberSftpDirectory', 'getSftpDirectoryCache', 'applySftpDirectoryCache', 'invalidateSftpDirectoryCache'],
+        { Date: { now: () => now }, SFTP_DIRECTORY_CACHE_LIMIT: 24, Object },
+    );
+    const session = { _sftpDirectoryCache: Object.create(null), _sftpDirectoryCacheOrder: [] };
+    const entry = sandbox.rememberSftpDirectory(session, '/', '/home/demo', { home: '/home/demo', list: [{ Name: 'file.txt' }] });
+    assert.equal(sandbox.getSftpDirectoryCache(session, '/'), entry);
+    assert.equal(sandbox.getSftpDirectoryCache(session, '/home/demo'), entry);
+    assert.equal(sandbox.applySftpDirectoryCache(session, entry), true);
+    assert.equal(session.sftpPath, '/home/demo');
+    assert.equal(session._sftpList[0].Name, 'file.txt');
+    now += 1;
+    sandbox.rememberSftpDirectory(session, '/home/demo/nested', '/home/demo/nested', { list: [] });
+    sandbox.invalidateSftpDirectoryCache(session, '/home/demo', true);
+    assert.equal(sandbox.getSftpDirectoryCache(session, '/'), null);
+    assert.equal(sandbox.getSftpDirectoryCache(session, '/home/demo'), null);
+    assert.equal(sandbox.getSftpDirectoryCache(session, '/home/demo/nested'), null);
+});
+
+test('a cached directory navigation invalidates an older in-flight response in the same tab', async () => {
+    const request = deferred();
+    const elements = { sftpPath: { value: '' }, sftpBody: { innerHTML: '' } };
+    const session = {
+        id: 'session-1', sshInfo: 'ssh', sftpSessionId: 'sftp-session-1', sftpPath: '/',
+        _sftpListGeneration: 0, _sftpDirectoryCache: Object.create(null), _sftpDirectoryCacheOrder: [], _connected: true,
+    };
+    const sandbox = loadFunctions(
+        ['getActiveSession', 'getSftpDirectoryCache', 'rememberSftpDirectory', 'applySftpDirectoryCache', 'abortSessionController', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpLoad'],
+        {
+            sessions: [session], activeIdx: 0,
+            document: { getElementById: (id) => elements[id] },
+            fetch: () => request.promise,
+            AbortController, Date, SFTP_DIRECTORY_CACHE_LIMIT: 24, SFTP_DIRECTORY_CACHE_FRESH_MS: 8000,
+            esc: String, escAttr: String, renderSftpRow: (item) => item.Name, JSON,
+        },
+    );
+    const cached = sandbox.rememberSftpDirectory(session, '/cached', '/cached', { list: [{ Name: 'cached.txt', Size: '1B' }] });
+    cached.updatedAt = Date.now();
+    sandbox.sftpLoad('/slow', session);
+    await sandbox.sftpLoad('/cached', session);
+    assert.equal(elements.sftpPath.value, '/cached');
+    request.resolve({ json: async () => ({ Msg: 'success', Data: { path: '/slow', list: [] } }) });
+    await flushPromises();
+    assert.equal(elements.sftpPath.value, '/cached');
+    assert.equal(session.sftpPath, '/cached');
 });
 
 test('SFTP search supports fuzzy keywords and exact full-name matching', () => {
@@ -648,20 +718,60 @@ test('SFTP folders are confirmed as temporary tar.gz archives before downloading
     assert.equal(classes.has('show'), true);
 });
 
-test('SFTP file rows place a delete action after edit and download', () => {
+test('SFTP file rows place rename after edit and before download/delete', () => {
     const source = extractFunction('renderSftpRow');
     const previewIndex = source.indexOf("var preview =");
     const editIndex = source.indexOf("var edit =");
+    const renameIndex = source.indexOf("var rename =");
     const downloadIndex = source.indexOf("var dl =");
     const deleteIndex = source.indexOf("var del =");
-    assert.ok(previewIndex >= 0 && editIndex > previewIndex && downloadIndex > editIndex && deleteIndex > downloadIndex);
+    assert.ok(previewIndex >= 0 && editIndex > previewIndex && renameIndex > editIndex && downloadIndex > renameIndex && deleteIndex > downloadIndex);
     assert.match(source, /f\.Previewable/);
     assert.match(source, /openRemotePreview/);
+    assert.match(source, /requestSftpRename/);
     assert.match(source, /requestSftpDelete/);
     assert.match(source, /event\.stopPropagation\(\)/);
     assert.match(source, /isDir \? '压缩并下载文件夹' : '下载'/);
     assert.match(source, /isDir \? 'true' : 'false'/);
     assert.match(source, /isDir \? ' directory' : ''/);
+});
+
+test('SFTP rename validates once, uses the pooled session and updates open editor paths', () => {
+    const requestSource = extractFunction('confirmSftpRename');
+    assert.match(indexSource, /id="sftpRenameModal"/);
+    assert.match(indexSource, /id="sftpRenameInput"/);
+    assert.match(requestSource, /remoteEditorRequest\('\/file\/rename'/);
+    assert.match(requestSource, /sessionId:\s*session\.sftpSessionId/);
+    assert.match(requestSource, /updateRemoteEditorsAfterRename\(session, oldPath, newPath, renamedDirectory\)/);
+    assert.match(requestSource, /invalidateSftpDirectoryCache\(session, request\.parentPath, false\)/);
+
+    const session = { id: 'session-1', _remoteEditorWorkspace: {} };
+    const editor = {
+        sessionId: session.id,
+        path: '/srv/project/config/app.yaml',
+        targetPath: '/srv/project/config/app.yaml',
+        name: 'app.yaml',
+        viewMode: 'text',
+        nameInput: { value: '' },
+        subtitle: { textContent: '' },
+    };
+    const sandbox = loadFunctions(
+        ['normalizeRemoteFilePath', 'normalizeSftpDir', 'remotePathIsWithin', 'replaceRemotePathPrefix', 'remoteEditorsAffectedByRename', 'updateRemoteEditorsAfterRename'],
+        {
+            remoteEditors: [editor],
+            remoteEditorPathLabel: (item) => item.path,
+            remoteEditorApplyLanguage: () => {}, remoteEditorUpdateTab: () => {},
+            setRemoteEditorRenamePending: () => {}, updateRemoteEditorWorkspaceSummary: () => {},
+            renderRemoteEditorDock: () => {}, getActiveSession: () => session,
+        },
+    );
+    const affected = sandbox.updateRemoteEditorsAfterRename(session, '/srv/project', '/srv/renamed-project', true);
+    assert.equal(affected.length, 1);
+    assert.equal(editor.path, '/srv/renamed-project/config/app.yaml');
+    assert.equal(editor.targetPath, '/srv/renamed-project/config/app.yaml');
+    assert.equal(editor.parentPath, '/srv/renamed-project/config');
+    assert.equal(editor.nameInput.value, 'app.yaml');
+    assert.equal(editor.subtitle.textContent, editor.path);
 });
 
 test('SFTP folder downloads show real compression progress before byte download progress', () => {
@@ -1045,6 +1155,7 @@ test('SFTP deletion requires confirmation, submits once and refreshes the origin
                 return request.promise;
             },
             destroyRemoteEditor: () => {},
+            invalidateSftpDirectoryCache: () => {},
             sftpLoad: (path, target) => { refreshedPath = path; refreshedSession = target; },
             setTimeout: (fn) => fn(), AbortController, Promise,
         },
@@ -1145,6 +1256,7 @@ test('saving a remote editor refreshes metadata in the normalized visible SFTP d
             getSessionById: (id) => id === session.id ? session : null,
             remoteEditorRequest: () => Promise.resolve({ version: 'v2' }),
             remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
+            invalidateSftpDirectoryCache: () => {},
             sftpLoad: (path, target) => { refreshedPath = path; assert.equal(target, session); },
             AbortController, Promise,
         },
@@ -1303,6 +1415,30 @@ test('large remote files switch to a native low-overhead editing mode', () => {
     assert.match(styleSource, /\.remote-editor-document\.highlight-disabled \.remote-editor-highlight\{display:none\}/);
 });
 
+test('remote editor selection stays aligned through the final lines', () => {
+    const textarea = { scrollTop: 321, scrollLeft: 47 };
+    textarea.scrollWidth = 1200;
+    textarea.clientWidth = 800;
+    const toggles = [];
+    const editor = { textarea, el: { classList: { toggle: (name, enabled) => toggles.push([name, enabled]) } }, gutter: { scrollTop: 0 }, highlight: { scrollTop: 0, scrollLeft: 0 } };
+    const sandbox = loadFunctions(['syncRemoteEditorCodeScroll'], {});
+    sandbox.syncRemoteEditorCodeScroll(editor);
+    assert.equal(editor.gutter.scrollTop, 321);
+    assert.equal(editor.highlight.scrollTop, 321);
+    assert.equal(editor.highlight.scrollLeft, 47);
+    assert.deepEqual(toggles, [['has-horizontal-scroll', true]]);
+
+    assert.match(styleSource, /\.remote-editor-code-body\{--remote-editor-pad-top:13px;--remote-editor-pad-inline:16px;--remote-editor-pad-bottom:42px/);
+    assert.match(styleSource, /\.remote-editor-highlight,\.remote-editor-textarea\{[^}]*padding:var\(--remote-editor-pad-top\) var\(--remote-editor-pad-inline\) var\(--remote-editor-pad-bottom\)/);
+    assert.match(styleSource, /\.remote-editor-highlight\{[^}]*scrollbar-width:thin/);
+    assert.match(styleSource, /\.remote-editor-highlight\{[^}]*padding-right:0/);
+    assert.match(styleSource, /\.remote-editor-highlight::-webkit-scrollbar\{width:10px;height:10px\}/);
+    assert.match(styleSource, /\.remote-editor-document\.has-horizontal-scroll \.remote-editor-gutter\{border-bottom:10px solid #06080a\}/);
+    const decorationSource = extractFunction('scheduleRemoteEditorDecorations');
+    assert.match(decorationSource, /if \(value\.slice\(-1\) === '\\n'\) highlighted \+= '\\n'/);
+    assert.doesNotMatch(decorationSource, /remoteEditorHighlightCode\([^;]+\)\s*\+\s*['"]\\n/);
+});
+
 test('image, icon and video previews use the authenticated cancellable preview endpoint', () => {
     const kindSource = extractFunction('remotePreviewKindForName');
     const openSource = extractFunction('openRemotePreview');
@@ -1417,7 +1553,7 @@ test('remote editor saves a symbolic link through its resolved target without re
                 return Promise.resolve({ version: 'link-v2', targetPath: '/etc/nginx/sites-available/dujiao-next.conf' });
             },
             remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
-            sftpLoad: () => {}, AbortController, Promise,
+            invalidateSftpDirectoryCache: () => {}, sftpLoad: () => {}, AbortController, Promise,
         },
     );
 
@@ -1575,6 +1711,7 @@ test('saving an empty new-file draft creates it and turns it into a normal edito
             getSessionById: (id) => id === session.id ? session : null,
             remoteEditorRequest: (url, body) => { sentBody = body; return request.promise; },
             remoteEditorUpdateMetrics: () => {}, showToast: () => {}, requestWasAborted: () => false,
+            invalidateSftpDirectoryCache: () => {},
             sftpLoad: (path) => { refreshedPath = path; }, TextEncoder, AbortController, Promise,
         },
     );

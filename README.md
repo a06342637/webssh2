@@ -335,7 +335,9 @@ SFTP 不是浏览器直接连接目标 SSH 服务器。浏览器本身也不支�
 
 因此，SFTP 目录列表、新建文件、在线编辑/保存、上传和下载的数据都会经过 WebSSH 网站服务器。目标 SSH 服务器看到的连接来源通常是 WebSSH 服务器的 IP；如果配置了 SOCKS5，则路径是 `WebSSH → SOCKS5 代理 → SSH 目标`，目标看到的是代理出口 IP。可选的终端专用 WSS 直连只改变“浏览器 → WebSSH”的终端输入/输出路径，不会让 SFTP 变成浏览器直连目标机。
 
-在 SFTP 列表中可以在当前目录新建文件，或打开现有 UTF-8 文本文件（包括可访问的符号链接目标）进行在线编辑。同一个 SSH 会话中的文件共用一个工作台：顶部标签过多时会自动换行，支持逐个关闭、整体最小化/恢复和最大化，关闭未保存内容前会要求选择保存、不保存或取消。编辑器会按扩展名识别 HTML、CSS、JavaScript/TypeScript、JSON、Python、Shell、YAML、Go、SQL、配置文件和 Markdown 等常见文本，提供轻量语法着色、行号以及右侧可点击/拖动的代码缩略图；文本超过 384 KiB 时自动关闭语法着色以减少浏览器开销，但仍可继续编辑和保存。
+在 SFTP 列表中可以在当前目录新建文件，重命名文件、文件夹或符号链接，也可以打开现有 UTF-8 文本文件（包括可访问的符号链接目标）进行在线编辑。重命名不会覆盖同目录已有目标；文件夹改名后，其中已经打开的工作台标签会同步更新路径。同一个 SSH 会话中的文件共用一个工作台：顶部标签过多时会自动换行，支持逐个关闭、整体最小化/恢复和最大化，关闭未保存内容前会要求选择保存、不保存或取消。编辑器会按扩展名识别 HTML、CSS、JavaScript/TypeScript、JSON、Python、Shell、YAML、Go、SQL、配置文件和 Markdown 等常见文本，提供轻量语法着色、行号以及右侧可点击/拖动的代码缩略图；文本超过 384 KiB 时自动关闭语法着色以减少浏览器开销，但仍可继续编辑和保存。
+
+首次建立 SSH 终端连接后，页面会在后台预热该标签的 SFTP 会话；后续切换目录会复用同一条短期 SFTP 连接，并使用 8 秒目录缓存立即显示最近结果，再按需刷新，避免每次进入文件夹都重新进行 SSH 握手。标签关闭、重连、连接中断、请求取消或空闲超时后会主动释放连接。默认空闲 120 秒、全局最多 32 条、同一来源最多 4 条，可通过下方环境变量调整。
 
 图片、图标和视频也会在同一工作台中以独立标签预览，支持 JPG/JPEG、PNG、GIF、WebP、BMP、AVIF、SVG、ICO、MP4、WebM、OGG/OGV、MOV 和 M4V。SVG 既可以按文本编辑，也可以按图片预览。媒体预览请求可以随标签关闭、SSH 断开或页面离开而取消，标签关闭时会释放浏览器 Blob URL。服务端只允许显式支持的扩展名和普通文件，并在打开后再次校验文件类型与大小；默认媒体预览上限为 128 MiB。
 
@@ -350,6 +352,9 @@ WEBSSH_UPLOAD_MAX_BYTES=1073741824
 WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES=1073741824
 WEBSSH_EDITOR_MAX_BYTES=2097152
 WEBSSH_PREVIEW_MAX_BYTES=134217728
+WEBSSH_SFTP_SESSION_IDLE_SECONDS=120
+WEBSSH_MAX_SFTP_SESSIONS=32
+WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT=4
 ```
 
 普通上传和远程下载都会先写同目录随机临时文件，完整写入并关闭成功后再原子替换目标；失败、超限、关闭标签或离开页面会取消请求并清理临时文件，不会先截断已有目标。浏览器下载使用原生流式下载，不再先把整个大文件读进内存。
@@ -377,6 +382,7 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 - 默认普通请求体上限为 4 MiB，上传接口使用独立限制。
 - JSON 接口必须使用 `application/json`，拒绝未知字段、多个 JSON 值和超过 30 秒仍未读完的请求体；`/api` 响应统一 `no-store`。
 - 默认最多同时建立 64 个 SSH 任务、同一客户端 8 个；可用 `WEBSSH_MAX_CONCURRENT_SSH` 和 `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` 调整。
+- SFTP 目录浏览默认复用空闲 120 秒的短期连接池，全局最多 32 条、同一客户端 4 条；可用 `WEBSSH_SFTP_SESSION_IDLE_SECONDS`、`WEBSSH_MAX_SFTP_SESSIONS` 和 `WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT` 调整。
 - 默认最多同时进行 4 个上传、同一客户端 2 个；可用 `WEBSSH_MAX_CONCURRENT_UPLOADS` 和 `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` 调整。
 - 系统信息命令最长执行 12 秒、输出最多 1 MiB；客户端断开时会关闭对应 SSH/SFTP 连接。
 - 服务端发送 `nosniff`、`SAMEORIGIN`、`no-referrer` 和权限策略响应头。
@@ -528,6 +534,9 @@ go run . -a admin:password
 | `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` | 8 | 同一来源客户端的 SSH 任务上限 |
 | `WEBSSH_MAX_CONCURRENT_UPLOADS` | 4 | 全局并发上传任务上限 |
 | `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` | 2 | 同一来源客户端的并发上传任务上限 |
+| `WEBSSH_SFTP_SESSION_IDLE_SECONDS` | 120 | SFTP 目录浏览复用连接的空闲保留秒数（15 至 900） |
+| `WEBSSH_MAX_SFTP_SESSIONS` | 32 | 全站短期 SFTP 连接池上限 |
+| `WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT` | 4 | 同一来源客户端的短期 SFTP 连接池上限 |
 | `WEBSSH_HOST_KEY_POLICY` | tofu | SSH 主机密钥策略 |
 | `WEBSSH_ALLOW_LEGACY_CIPHERS` | false | 是否加入老旧 CBC cipher |
 | `WEBSSH_UPLOAD_MAX_BYTES` | 1073741824 | 单次上传请求上限 |
