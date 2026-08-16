@@ -74,16 +74,22 @@ func AdminExportScriptBookmarks(c *gin.Context) {
 		return
 	}
 
-	accountStore.mu.Lock()
-	usernames := make([]string, 0, len(accountStore.db.Users))
-	for username := range accountStore.db.Users {
-		usernames = append(usernames, username)
+	accountStore.mu.RLock()
+	type rawWorkspace struct {
+		username string
+		scripts  StoredScripts
 	}
-	sort.Strings(usernames)
-	users := make([]siteScriptBackupUser, 0, len(usernames))
+	workspaces := make([]rawWorkspace, 0, len(accountStore.db.Users))
+	for username := range accountStore.db.Users {
+		workspaces = append(workspaces, rawWorkspace{username: username, scripts: cloneStoredScripts(accountStore.db.Scripts[username])})
+	}
+	accountStore.mu.RUnlock()
+	sort.Slice(workspaces, func(i, j int) bool { return workspaces[i].username < workspaces[j].username })
+	users := make([]siteScriptBackupUser, 0, len(workspaces))
 	now := time.Now().UnixMilli()
-	for _, username := range usernames {
-		workspace := accountStore.db.Scripts[username]
+	for _, item := range workspaces {
+		username := item.username
+		workspace := item.scripts
 		categories := sanitizeScriptCategories(workspace.Categories)
 		scripts := sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(workspace.Items), categories)
 		if scripts == nil {
@@ -100,7 +106,6 @@ func AdminExportScriptBookmarks(c *gin.Context) {
 			Revision:   sanitizeScriptRevision(workspace.Revision),
 		})
 	}
-	accountStore.mu.Unlock()
 
 	backup := siteScriptBookmarksBackup{
 		App:        siteScriptBackupApp,
@@ -111,7 +116,16 @@ func AdminExportScriptBookmarks(c *gin.Context) {
 		ExportedBy: adminUsername,
 		Users:      users,
 	}
-	encoded, err := json.Marshal(backup)
+	stats := siteScriptBackupStatsFor(backup)
+	response := gin.H{"ok": true, "data": gin.H{
+		"backup":        backup,
+		"userCount":     stats.Users,
+		"scriptCount":   stats.Scripts,
+		"categoryCount": stats.Categories,
+	}}
+	// Encode exactly once. c.JSON would encode the whole multi-user backup a
+	// second time after the old size probe, doubling peak memory.
+	encoded, err := json.Marshal(response)
 	if err != nil {
 		writeSiteScriptBackupError(c, http.StatusInternalServerError, "backup_encode_failed", "全站书签备份生成失败")
 		return
@@ -120,13 +134,7 @@ func AdminExportScriptBookmarks(c *gin.Context) {
 		writeSiteScriptBackupError(c, http.StatusRequestEntityTooLarge, "backup_too_large", "全站书签备份超过 256 MiB 上限")
 		return
 	}
-	stats := siteScriptBackupStatsFor(backup)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{
-		"backup":        backup,
-		"userCount":     stats.Users,
-		"scriptCount":   stats.Scripts,
-		"categoryCount": stats.Categories,
-	}})
+	c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
 }
 
 func decodeSiteScriptBookmarksBackup(c *gin.Context) (siteScriptBookmarksBackup, *siteScriptBackupValidationError) {
@@ -216,8 +224,8 @@ func validateSiteScriptBookmarksBackup(backup siteScriptBookmarksBackup) ([]site
 		}
 		validated = append(validated, siteScriptBackupUser{
 			Username:   username,
-			Scripts:    append([]ScriptBookmark(nil), scripts...),
-			Categories: append([]ScriptCategory(nil), categories...),
+			Scripts:    scripts,
+			Categories: categories,
 			UpdatedAt:  user.UpdatedAt,
 			Revision:   user.Revision,
 		})
@@ -240,9 +248,11 @@ func AdminRestoreScriptBookmarks(c *gin.Context) {
 		writeSiteScriptBackupError(c, http.StatusBadRequest, validationErr.Code, validationErr.Msg)
 		return
 	}
+	// The validated workspaces own sanitized slices; release the decoded input
+	// graph before taking a database snapshot for rollback.
+	backup.Users = nil
 
 	accountStore.mu.Lock()
-	defer accountStore.mu.Unlock()
 	matched := make([]siteScriptBackupUser, 0, len(validated))
 	missingUsers := make([]string, 0)
 	for _, user := range validated {
@@ -253,6 +263,7 @@ func AdminRestoreScriptBookmarks(c *gin.Context) {
 		matched = append(matched, user)
 	}
 	if len(matched) == 0 {
+		accountStore.mu.Unlock()
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "code": "no_matching_users", "msg": "备份中的用户在当前网站均不存在，未修改任何书签", "data": gin.H{
 			"restoredUsers": 0,
 			"skippedUsers":  len(missingUsers),
@@ -290,9 +301,11 @@ func AdminRestoreScriptBookmarks(c *gin.Context) {
 	}
 	if err := accountStore.saveLocked(); err != nil {
 		accountStore.restoreLocked(before)
+		accountStore.mu.Unlock()
 		writeSiteScriptBackupError(c, http.StatusInternalServerError, "backup_restore_failed", "全站书签恢复失败，原数据未改变")
 		return
 	}
+	accountStore.mu.Unlock()
 
 	sort.Strings(missingUsers)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "msg": "全站书签恢复完成", "data": gin.H{

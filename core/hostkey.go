@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -252,7 +253,22 @@ func replaceKnownHostKey(path, hostname string, key ssh.PublicKey) error {
 	if err := os.Rename(tempPath, path); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0600)
+	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	return syncHostKeyParentDirectory(path)
+}
+
+func syncHostKeyParentDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func knownHostAliases(hostname string) map[string]struct{} {

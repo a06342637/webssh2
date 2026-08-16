@@ -53,6 +53,17 @@ func TestFolderArchiveJobIDValidation(t *testing.T) {
 	}
 }
 
+func TestFolderArchiveLimitsAreCapped(t *testing.T) {
+	t.Setenv("WEBSSH_FOLDER_ARCHIVE_MAX_ENTRIES", "999999999")
+	if got := folderArchiveMaxEntries(); got != 200000 {
+		t.Fatalf("folder archive entry cap = %d, want 200000", got)
+	}
+	t.Setenv("WEBSSH_FOLDER_ARCHIVE_MAX_BYTES", "9223372036854775807")
+	if got := folderArchiveMaxBytes(); got != int64(20<<30) {
+		t.Fatalf("invalid folder archive byte limit = %d, want default", got)
+	}
+}
+
 func TestFolderArchiveCancellationBeforePreparePreventsJobCreation(t *testing.T) {
 	owner := "owner-before-prepare"
 	id := testFolderArchiveID(t)
@@ -155,6 +166,26 @@ func TestFolderArchiveCancellationInterruptsSSHBeforeWorkerFinishes(t *testing.T
 			t.Fatal("cancelling the job did not close the SFTP transport")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestFolderArchiveCancellationIsSafeAfterCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	workDone := make(chan struct{})
+	close(workDone)
+	job := &folderArchiveJob{
+		ctx:      ctx,
+		cancel:   cancel,
+		status:   "ready",
+		workDone: workDone,
+	}
+	job.cleanupResources()
+	// Ready timers, explicit cancellation and shutdown can converge on the same
+	// job. Repeated cancellation must remain idempotent after cleanup.
+	cancelFolderArchiveJob(job)
+	cancelFolderArchiveJob(job)
+	if job.status != "cancelled" {
+		t.Fatalf("job status after cancellation = %q", job.status)
 	}
 }
 

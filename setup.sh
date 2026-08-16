@@ -32,7 +32,27 @@ has_usable_ipv6() {
 
 # 检测已启动容器内是否具有 IPv6 地址和到公网 IPv6 地址的路由。
 container_has_usable_ipv6() {
-    docker compose exec -T webssh sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q "inet6 " && ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1'
+    docker compose exec -T webssh sh -c 'ip -6 addr show scope global 2>/dev/null | grep -q "inet6 " && ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1 && ping -6 -c 1 -W 3 2606:4700:4700::1111 >/dev/null 2>&1'
+}
+
+install_ipv6_egress_helper() {
+    helper_dir=$(dirname "$0")
+    helper_path="$helper_dir/scripts/webssh-ipv6-egress.sh"
+    unit_path="$helper_dir/scripts/webssh-ipv6-egress.service"
+    if [ ! -f "$helper_path" ] || [ ! -f "$unit_path" ]; then
+        echo "⚠️  IPv6 helper files are missing; continuing without automatic Docker IPv6 NAT."
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ] || ! command -v install >/dev/null 2>&1; then
+        echo "⚠️  未以 root 运行，无法安装持久化 IPv6 Docker 出口规则。"
+        return 0
+    fi
+    install -m 700 "$helper_path" /usr/local/sbin/webssh-ipv6-egress
+    install -m 644 "$unit_path" /etc/systemd/system/webssh-ipv6-egress.service
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable webssh-ipv6-egress.service >/dev/null 2>&1 || true
+    fi
 }
 
 # 统计 UTF-8 码点数量，不依赖宿主机 locale；od 是 POSIX 基础工具。
@@ -263,16 +283,32 @@ if ! has_usable_ipv6; then
     echo ""
 fi
 
+if [ "$HOST_IPV6_AVAILABLE" = "true" ]; then
+    # A private Docker ULA subnet is not globally routed by providers. Install
+    # a host-side, idempotent NAT helper only on machines that actually have a
+    # public IPv6 route, avoiding a pointless boot-time wait on IPv4-only hosts.
+    install_ipv6_egress_helper
+fi
+
 # ── 启动 ──────────────────────────────────────────────────────────────────────
 echo "🚀 正在启动 WebSSH..."
 docker compose up -d --build
 
+if [ "$HOST_IPV6_AVAILABLE" = "true" ] && [ -x /usr/local/sbin/webssh-ipv6-egress ]; then
+    if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/webssh-ipv6-egress.service ]; then
+        # Keep the oneshot unit active so a later docker.service restart also
+        # reapplies the NAT rule through PartOf=docker.service.
+        systemctl restart webssh-ipv6-egress.service >/dev/null 2>&1 || \
+            /usr/local/sbin/webssh-ipv6-egress --quiet || true
+    else
+        /usr/local/sbin/webssh-ipv6-egress --quiet || true
+    fi
+fi
+
 if [ "$HOST_IPV6_AVAILABLE" = "true" ] && ! container_has_usable_ipv6; then
     echo ""
     echo "⚠️  宿主机支持 IPv6，但 WebSSH 容器内没有检测到可用的 IPv6 路由。"
-    echo "   IPv6 SSH 暂时无法连接，请检查 Docker daemon 的 IPv6 配置后重建容器。"
-    printf "按回车继续..."
-    IFS= read -r IPV6_CONTAINER_CONTINUE
+    echo "   已尝试自动配置 IPv6 NAT；如果仍失败，请检查宿主机防火墙是否允许 IPv6 转发。"
 fi
 
 echo ""

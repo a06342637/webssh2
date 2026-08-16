@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"os"
 	pathpkg "path"
 
@@ -52,7 +51,15 @@ func (r contextReader) Read(p []byte) (int, error) {
 	}
 }
 
-func (sclient *SSHClient) Upload(ctx context.Context, file multipart.File, id, dstPath string) error {
+func (sclient *SSHClient) Upload(ctx context.Context, file io.Reader, id, dstPath string) error {
+	return sclient.UploadChecked(ctx, file, id, dstPath, nil)
+}
+
+// UploadChecked keeps the remote write in a private temporary file until the
+// caller validates the rest of its protocol framing. This lets the HTTP
+// multipart handler reject trailing/duplicate fields without committing a
+// file and then returning an error that would encourage a duplicate retry.
+func (sclient *SSHClient) UploadChecked(ctx context.Context, file io.Reader, id, dstPath string, beforeCommit func() error) error {
 	dir := pathpkg.Dir(dstPath)
 	randomBytes := make([]byte, 12)
 	if _, err := rand.Read(randomBytes); err != nil {
@@ -98,6 +105,11 @@ func (sclient *SSHClient) Upload(ctx context.Context, file multipart.File, id, d
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			return err
+		}
 	}
 	if err := replaceSFTPFile(sclient.Sftp, tmpPath, dstPath); err != nil {
 		return err

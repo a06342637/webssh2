@@ -131,16 +131,19 @@ func scrubSFTPSessionCredentials(client *core.SSHClient) {
 	client.ProxyPass = ""
 }
 
-func getOrCreateSFTPSessionEntry(key, clientID, trustScope, sessionID string) (*sftpSessionEntry, bool) {
+func getOrCreateSFTPSessionEntry(key, clientID, trustScope, sessionID string) (*sftpSessionEntry, bool, error) {
 	sftpSessionRegistry.Lock()
 	defer sftpSessionRegistry.Unlock()
+	if runtimeShuttingDown.Load() {
+		return nil, false, errRuntimeShuttingDown
+	}
 	if entry := sftpSessionRegistry.entries[key]; entry != nil {
-		return entry, true
+		return entry, true, nil
 	}
 	globalLimit := envPositiveInt("WEBSSH_MAX_SFTP_SESSIONS", 32)
 	clientLimit := envPositiveInt("WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT", 4)
 	if len(sftpSessionRegistry.entries) >= globalLimit || sftpSessionRegistry.clients[clientID] >= clientLimit {
-		return nil, false
+		return nil, false, nil
 	}
 	entry := &sftpSessionEntry{
 		key:        key,
@@ -151,7 +154,7 @@ func getOrCreateSFTPSessionEntry(key, clientID, trustScope, sessionID string) (*
 	}
 	sftpSessionRegistry.entries[key] = entry
 	sftpSessionRegistry.clients[clientID]++
-	return entry, true
+	return entry, true, nil
 }
 
 func removeSFTPSessionEntry(entry *sftpSessionEntry) bool {
@@ -202,12 +205,19 @@ func expireSFTPSessionEntry(entry *sftpSessionEntry) {
 }
 
 func newTransientSFTPSessionLease(c *gin.Context, decoded core.SSHClient) (*sftpSessionLease, error) {
+	if runtimeShuttingDown.Load() {
+		return nil, errRuntimeShuttingDown
+	}
 	client, err := createSFTPSessionClient(cloneSFTPClientConfig(decoded))
 	if err != nil {
 		if client != nil {
 			client.Close()
 		}
 		return nil, err
+	}
+	if runtimeShuttingDown.Load() {
+		client.Close()
+		return nil, errRuntimeShuttingDown
 	}
 	return &sftpSessionLease{
 		Client:      client,
@@ -226,7 +236,10 @@ func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded 
 	clientID := requestIP(c)
 	key := sftpSessionKey(decoded, clientID, normalizedID, sshInfo)
 	for attempt := 0; attempt < 2; attempt++ {
-		entry, pooled := getOrCreateSFTPSessionEntry(key, clientID, decoded.TrustScope, normalizedID)
+		entry, pooled, registryErr := getOrCreateSFTPSessionEntry(key, clientID, decoded.TrustScope, normalizedID)
+		if registryErr != nil {
+			return nil, registryErr
+		}
 		if !pooled {
 			return newTransientSFTPSessionLease(c, decoded)
 		}

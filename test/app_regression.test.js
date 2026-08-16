@@ -1510,19 +1510,23 @@ test('remote editor selection stays aligned through the final lines', () => {
     assert.doesNotMatch(decorationSource, /remoteEditorHighlightCode\([^;]+\)\s*\+\s*['"]\\n/);
 });
 
-test('image, icon and video previews use the authenticated cancellable preview endpoint', () => {
+test('image, icon and video previews use authenticated cancellable range streaming', () => {
     const kindSource = extractFunction('remotePreviewKindForName');
     const openSource = extractFunction('openRemotePreview');
     const loadSource = extractFunction('loadRemotePreview');
+    const revokeSource = extractFunction('revokeRemotePreviewToken');
     const destroySource = extractFunction('destroyRemoteEditor');
     assert.match(kindSource, /\.ico/);
     assert.match(kindSource, /\.mp4/);
     assert.match(openSource, /remoteEditorFor\(session, path, kind\)/);
-    assert.match(loadSource, /fetch\('\/file\/preview'/);
-    assert.match(loadSource, /signal: controller\.signal/);
+    assert.match(loadSource, /remoteEditorRequest\('\/file\/preview\/authorize'/);
+    assert.match(loadSource, /controller\.signal/);
     assert.match(loadSource, /document\.createElement\('video'\)/);
     assert.match(loadSource, /document\.createElement\('img'\)/);
-    assert.match(destroySource, /URL\.revokeObjectURL/);
+    assert.match(loadSource, /media\.src = editor\.previewUrl/);
+    assert.match(revokeSource, /fetch\('\/file\/preview\/revoke'/);
+    assert.match(revokeSource, /keepalive: true/);
+    assert.match(destroySource, /releaseRemotePreviewAuthorization\(editor\)/);
 });
 
 test('closing an SSH tab is deferred while one of its editors is dirty', () => {

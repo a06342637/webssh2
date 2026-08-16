@@ -3,7 +3,6 @@ package controller
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -601,14 +600,31 @@ func createRemoteTextFile(client *sftp.Client, path string, content []byte, maxB
 			_ = file.Close()
 		}
 	}()
+	cleanupIncomplete := func(cause error) error {
+		closeErr := file.Close()
+		closed = true
+		removeErr := client.Remove(path)
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("%w; cleanup of the incomplete file failed (close: %v, remove: %v)", cause, closeErr, removeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("%w; the incomplete file was removed after close reported: %v", cause, closeErr)
+		}
+		return cause
+	}
 	if _, err := io.Copy(file, bytes.NewReader(content)); err != nil {
-		return remoteFileSnapshot{}, fmt.Errorf("create file write failed; an incomplete file may remain: %w", err)
+		return remoteFileSnapshot{}, cleanupIncomplete(fmt.Errorf("create file write failed: %w", err))
 	}
 	if err := file.Sync(); err != nil && !isSFTPUnsupported(err) {
-		return remoteFileSnapshot{}, fmt.Errorf("create file sync failed; an incomplete file may remain: %w", err)
+		return remoteFileSnapshot{}, cleanupIncomplete(fmt.Errorf("create file sync failed: %w", err))
 	}
 	if err := file.Close(); err != nil {
-		return remoteFileSnapshot{}, fmt.Errorf("create file close failed; verify the remote file before retrying: %w", err)
+		closed = true
+		removeErr := client.Remove(path)
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			return remoteFileSnapshot{}, fmt.Errorf("create file close failed: %w; cleanup of the incomplete file also failed: %v", err, removeErr)
+		}
+		return remoteFileSnapshot{}, fmt.Errorf("create file close failed and the incomplete file was removed: %w", err)
 	}
 	closed = true
 	// Re-read after close because some SFTP servers finalize size or mtime only
@@ -701,6 +717,12 @@ func PreviewFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
+	releaseDownload, ok := acquireDownloadSlot(c)
+	if !ok {
+		responseBody.Msg = "下载任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer releaseDownload()
 	release, ok := acquireSSHSlot(c)
 	if !ok {
 		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
@@ -764,10 +786,7 @@ func PreviewFile(c *gin.Context) *ResponseBody {
 	c.Header("X-WebSSH-File-Size", strconv.FormatInt(info.Size(), 10))
 	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-Preview-Kind, X-WebSSH-File-Size")
 	c.Status(http.StatusOK)
-	copied, copyErr := io.Copy(c.Writer, requestContextReader{ctx: c.Request.Context(), r: io.LimitReader(file, info.Size()+1)})
-	if copyErr == nil && copied != info.Size() {
-		copyErr = fmt.Errorf("preview size changed while streaming: copied %d bytes, expected %d", copied, info.Size())
-	}
+	_, copyErr := streamDownloadResponse(c, c.Request.Context(), io.LimitReader(file, info.Size()+1), info.Size())
 	if copyErr != nil {
 		responseBody.Msg = copyErr.Error()
 		_ = c.Error(copyErr)
@@ -1053,11 +1072,56 @@ func (f fileSplice) Less(i, j int) bool {
 	return strings.ToLower(f[i].Name) < strings.ToLower(f[j].Name)
 }
 
+const (
+	uploadBodyReadIdleTimeout  = 60 * time.Second
+	uploadBodyMaxReadTime      = 30 * time.Minute
+	uploadMetadataMaxBytes     = 256 << 10
+	uploadProgressWriteTimeout = 10 * time.Second
+	downloadWriteIdleTimeout   = 2 * time.Minute
+)
+
+type idleReadCloser struct {
+	body    io.ReadCloser
+	timeout time.Duration
+}
+
+func (reader *idleReadCloser) Read(buffer []byte) (int, error) {
+	timer := time.AfterFunc(reader.timeout, func() { _ = reader.body.Close() })
+	count, err := reader.body.Read(buffer)
+	timer.Stop()
+	return count, err
+}
+
+func (reader *idleReadCloser) Close() error {
+	return reader.body.Close()
+}
+
+func validateUploadSubdirectory(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsRune(value, 0) {
+		return "", fmt.Errorf("invalid upload directory")
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return "", fmt.Errorf("invalid upload directory")
+		}
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", fmt.Errorf("invalid upload directory")
+		}
+	}
+	cleaned := pathpkg.Clean(value)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("invalid upload directory")
+	}
+	return cleaned, nil
+}
+
 func UploadFile(c *gin.Context) *ResponseBody {
-	var (
-		sshClient core.SSHClient
-		err       error
-	)
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
 	releaseUpload, ok := acquireUploadSlot(c)
@@ -1066,64 +1130,143 @@ func UploadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer releaseUpload()
-	// Apply the body limit before ParseMultipartForm/PostForm reads any bytes.
+	// Parse multipart fields incrementally. The browser sends connection
+	// metadata before the file part, so file bytes go directly to the remote
+	// SFTP temp file instead of being spooled on this server's disk.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, uploadMaxBytes()+(1<<20))
-	sshInfo := c.PostForm("sshInfo")
-	id := c.PostForm("id")
-	release, ok := acquireSSHSlot(c)
-	if !ok {
-		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
-		return &responseBody
-	}
-	defer release()
-	if sshClient, err = decodeSSHClient(c, sshInfo); err != nil {
-		fmt.Println(err)
-		responseBody.Msg = err.Error()
-		return &responseBody
-	}
-	if err := sshClient.CreateSftp(); err != nil {
-		fmt.Println(err)
-		responseBody.Msg = err.Error()
-		return &responseBody
-	}
-	defer sshClient.Close()
-	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
-	defer stopCancellation()
-	file, header, err := c.Request.FormFile("file")
+	c.Request.Body = &idleReadCloser{body: c.Request.Body, timeout: uploadBodyReadIdleTimeout}
+	bodyTimer := time.AfterFunc(uploadBodyMaxReadTime, func() { _ = c.Request.Body.Close() })
+	defer bodyTimer.Stop()
+	multipartReader, err := c.Request.MultipartReader()
 	if err != nil {
-		responseBody.Msg = err.Error()
+		responseBody.Msg = fmt.Errorf("invalid multipart upload: %w", err).Error()
 		return &responseBody
 	}
-	defer file.Close()
-	path := strings.TrimSpace(c.DefaultPostForm("path", ""))
-	if path == "" {
-		path = detectHomeDir(sshClient.Sftp, sshClient.Username)
-	}
-	pathArr := []string{strings.TrimRight(path, "/")}
-	if dir := c.DefaultPostForm("dir", ""); dir != "" {
-		pathArr = append(pathArr, dir)
-		if err := sshClient.Mkdirs(strings.Join(pathArr, "/")); err != nil {
-			responseBody.Msg = err.Error()
+	fields := make(map[string]string, 4)
+	for {
+		part, nextErr := multipartReader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			responseBody.Msg = nextErr.Error()
 			return &responseBody
 		}
+		name := part.FormName()
+		if name == "file" {
+			if strings.TrimSpace(fields["sshInfo"]) == "" {
+				_ = part.Close()
+				responseBody.Msg = "upload metadata must appear before the file part"
+				return &responseBody
+			}
+			releaseSSH, slotOK := acquireSSHSlot(c)
+			if !slotOK {
+				_ = part.Close()
+				return &responseBody
+			}
+			client, decodeErr := decodeSSHClient(c, fields["sshInfo"])
+			if decodeErr != nil {
+				releaseSSH()
+				_ = part.Close()
+				responseBody.Msg = decodeErr.Error()
+				return &responseBody
+			}
+			if err := client.CreateSftp(); err != nil {
+				releaseSSH()
+				_ = part.Close()
+				responseBody.Msg = err.Error()
+				return &responseBody
+			}
+			stopCancellation := closeSSHOnContextDone(c.Request.Context(), &client)
+			path := strings.TrimSpace(fields["path"])
+			if path == "" {
+				path = detectHomeDir(client.Sftp, client.Username)
+			}
+			pathArr := []string{strings.TrimRight(path, "/")}
+			dir, dirErr := validateUploadSubdirectory(fields["dir"])
+			if dirErr != nil {
+				stopCancellation()
+				client.Close()
+				releaseSSH()
+				_ = part.Close()
+				responseBody.Msg = dirErr.Error()
+				return &responseBody
+			}
+			if dir != "" {
+				pathArr = append(pathArr, dir)
+				if err := client.Mkdirs(strings.Join(pathArr, "/")); err != nil {
+					stopCancellation()
+					client.Close()
+					releaseSSH()
+					_ = part.Close()
+					responseBody.Msg = err.Error()
+					return &responseBody
+				}
+			}
+			filename := sanitizeRemoteFilename(part.FileName())
+			if filename == "" {
+				stopCancellation()
+				client.Close()
+				releaseSSH()
+				_ = part.Close()
+				responseBody.Msg = "invalid upload filename"
+				return &responseBody
+			}
+			pathArr = append(pathArr, filename)
+			err = client.UploadChecked(c.Request.Context(), part, fields["id"], strings.Join(pathArr, "/"), func() error {
+				extraPart, extraErr := multipartReader.NextPart()
+				if errors.Is(extraErr, io.EOF) {
+					return nil
+				}
+				if extraPart != nil {
+					_ = extraPart.Close()
+				}
+				if extraErr != nil {
+					return extraErr
+				}
+				return fmt.Errorf("upload file must be the final multipart field")
+			})
+			_ = part.Close()
+			stopCancellation()
+			client.Close()
+			releaseSSH()
+			if err != nil {
+				responseBody.Msg = err.Error()
+			}
+			return &responseBody
+		}
+		switch name {
+		case "sshInfo", "path", "dir", "id":
+		default:
+			_ = part.Close()
+			responseBody.Msg = "unknown upload field"
+			return &responseBody
+		}
+		if _, exists := fields[name]; exists {
+			_ = part.Close()
+			responseBody.Msg = "duplicate upload field"
+			return &responseBody
+		}
+		value, readErr := io.ReadAll(io.LimitReader(part, uploadMetadataMaxBytes+1))
+		_ = part.Close()
+		if readErr != nil {
+			responseBody.Msg = readErr.Error()
+			return &responseBody
+		}
+		if len(value) > uploadMetadataMaxBytes {
+			responseBody.Msg = "upload metadata is too large"
+			return &responseBody
+		}
+		fields[name] = string(value)
 	}
-	filename := sanitizeRemoteFilename(header.Filename)
-	if filename == "" {
-		responseBody.Msg = "invalid upload filename"
-		return &responseBody
-	}
-	pathArr = append(pathArr, filename)
-	err = sshClient.Upload(c.Request.Context(), file, id, strings.Join(pathArr, "/"))
-	if err != nil {
-		fmt.Println(err)
-		responseBody.Msg = err.Error()
-	}
+	responseBody.Msg = "missing upload file"
 	return &responseBody
 }
 
 const (
-	remoteFolderArchivePrefix = ".webssh-folder-"
-	remoteFolderArchiveSuffix = ".tar.gz"
+	remoteFolderArchivePrefix   = ".webssh-folder-"
+	remoteFolderArchiveSuffix   = ".tar.gz"
+	remoteFolderArchiveStaleAge = 6 * time.Hour
 )
 
 type remoteDirectoryArchiver func(ctx context.Context, sourcePath, archivePath string) error
@@ -1285,6 +1428,44 @@ func removeRemoteFolderArchive(client *sftp.Client, archivePath string) error {
 	return nil
 }
 
+func removeStaleRemoteFolderArchive(client *sftp.Client, directory string, info os.FileInfo, now time.Time) bool {
+	if client == nil || info == nil || !isRemoteFolderArchiveName(info.Name()) {
+		return false
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < remoteFolderArchiveStaleAge {
+		return false
+	}
+	return removeRemoteFolderArchive(client, pathpkg.Join(directory, info.Name())) == nil
+}
+
+func cleanupStaleRemoteFolderArchives(client *sftp.Client, directories ...string) {
+	seen := make(map[string]struct{}, len(directories))
+	now := time.Now()
+	for _, directory := range directories {
+		directory = pathpkg.Clean(strings.TrimSpace(directory))
+		if directory == "." || directory == "" {
+			continue
+		}
+		if _, exists := seen[directory]; exists {
+			continue
+		}
+		seen[directory] = struct{}{}
+		entries, err := client.ReadDir(directory)
+		if err != nil {
+			continue
+		}
+		removed := 0
+		for _, entry := range entries {
+			if removeStaleRemoteFolderArchive(client, directory, entry, now) {
+				removed++
+				if removed >= 128 {
+					break
+				}
+			}
+		}
+	}
+}
+
 func prepareRemoteDirectoryArchive(ctx context.Context, client *sftp.Client, sourcePath string, archive remoteDirectoryArchiver) (string, os.FileInfo, error) {
 	sourcePath = pathpkg.Clean(strings.TrimSpace(sourcePath))
 	if sourcePath == "." || sourcePath == "" {
@@ -1380,6 +1561,38 @@ type requestContextWriter struct {
 	w   io.Writer
 }
 
+type idleDeadlineResponseWriter struct {
+	controller *http.ResponseController
+	writer     io.Writer
+	timeout    time.Duration
+}
+
+func (writer idleDeadlineResponseWriter) Write(buffer []byte) (int, error) {
+	if writer.controller != nil {
+		_ = writer.controller.SetWriteDeadline(time.Now().Add(writer.timeout))
+	}
+	return writer.writer.Write(buffer)
+}
+
+func streamDownloadResponse(c *gin.Context, ctx context.Context, reader io.Reader, expectedSize int64) (int64, error) {
+	controller := http.NewResponseController(c.Writer)
+	_ = controller.SetWriteDeadline(time.Now().Add(downloadWriteIdleTimeout))
+	defer controller.SetWriteDeadline(time.Time{})
+	buffer := make([]byte, 256<<10)
+	streamReader := io.Reader(requestContextReader{ctx: ctx, r: reader})
+	if expectedSize >= 0 {
+		// Stream the size that was authorized/stat'ed, even if the remote file is
+		// concurrently appended. This prevents a growing log file from turning a
+		// bounded download into an unbounded connection.
+		streamReader = io.LimitReader(streamReader, expectedSize)
+	}
+	written, err := io.CopyBuffer(idleDeadlineResponseWriter{controller: controller, writer: c.Writer, timeout: downloadWriteIdleTimeout}, streamReader, buffer)
+	if err == nil && expectedSize >= 0 && written != expectedSize {
+		err = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", written, expectedSize)
+	}
+	return written, err
+}
+
 func (w requestContextWriter) Write(p []byte) (int, error) {
 	select {
 	case <-w.ctx.Done():
@@ -1467,56 +1680,30 @@ func addRemoteDirectoryArchiveEntry(ctx context.Context, client *sftp.Client, wr
 }
 
 func writeRemoteDirectoryArchiveViaSFTP(ctx context.Context, client *sftp.Client, sourcePath, archivePath string) error {
-	sourceInfo, err := client.Lstat(sourcePath)
-	if err != nil {
-		return err
-	}
-	if !sourceInfo.IsDir() {
-		return fmt.Errorf("remote archive source is no longer a directory")
-	}
-	archiveFile, err := client.OpenFile(archivePath, os.O_WRONLY|os.O_TRUNC)
-	if err != nil {
-		return err
-	}
-	gzipWriter := gzip.NewWriter(requestContextWriter{ctx: ctx, w: archiveFile})
-	tarWriter := tar.NewWriter(gzipWriter)
 	archiveName := pathpkg.Base(pathpkg.Clean(sourcePath))
-	resultErr := addRemoteDirectoryArchiveEntry(ctx, client, tarWriter, sourcePath, archiveName, archivePath, sourceInfo, 0)
-	if err := tarWriter.Close(); resultErr == nil && err != nil {
-		resultErr = err
+	manifest, err := scanRemoteArchiveManifest(ctx, client, sourcePath, archiveName, nil)
+	if err != nil {
+		return err
 	}
-	if err := gzipWriter.Close(); resultErr == nil && err != nil {
-		resultErr = err
-	}
-	if err := archiveFile.Close(); resultErr == nil && err != nil {
-		resultErr = err
-	}
-	return resultErr
+	return writeRemoteArchiveManifest(ctx, client, archivePath, manifest, nil)
 }
 
 func downloadRemoteDirectoryArchive(c *gin.Context, sshClient *core.SSHClient, requestedPath, sourcePath string, responseBody *ResponseBody) {
-	archivePath, archiveInfo, err := prepareRemoteDirectoryArchive(c.Request.Context(), sshClient.Sftp, sourcePath, func(ctx context.Context, sourcePath, archivePath string) error {
-		var commandErr error
-		if remotePathWithin(archivePath, sourcePath) {
-			commandErr = fmt.Errorf("temporary archive is inside the source folder")
-		} else {
-			commandErr = runRemoteTarArchive(ctx, sshClient.Client, sourcePath, archivePath)
-		}
-		if commandErr == nil {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		fallbackErr := writeRemoteDirectoryArchiveViaSFTP(ctx, sshClient.Sftp, sourcePath, archivePath)
-		if fallbackErr == nil {
-			return nil
-		}
-		return fmt.Errorf("remote tar failed (%v); SFTP compression fallback failed: %w", commandErr, fallbackErr)
+	archiveCtx, cancelArchive := context.WithTimeout(c.Request.Context(), folderArchiveJobMaxRun)
+	defer cancelArchive()
+	stopCancellation := closeSSHOnContextDone(archiveCtx, sshClient)
+	defer stopCancellation()
+	cleanupStaleRemoteFolderArchives(sshClient.Sftp, "/tmp", pathpkg.Dir(sourcePath))
+	archivePath, archiveInfo, err := prepareRemoteDirectoryArchive(archiveCtx, sshClient.Sftp, sourcePath, func(ctx context.Context, sourcePath, archivePath string) error {
+		// The legacy synchronous endpoint is kept for older clients, but it must
+		// obey the same entry/byte limits as the progress-based archive API. A
+		// manifest also prevents files added after the scan from silently growing
+		// the archive beyond the configured bound.
+		return writeRemoteDirectoryArchiveViaSFTP(ctx, sshClient.Sftp, sourcePath, archivePath)
 	})
 	if err != nil {
 		responseBody.Msg = err.Error()
-		status := http.StatusInternalServerError
+		status := ResponseHTTPStatus(responseBody)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusRequestTimeout
 		}
@@ -1545,10 +1732,7 @@ func downloadRemoteDirectoryArchive(c *gin.Context, sshClient *core.SSHClient, r
 	c.Header("X-WebSSH-Download-Kind", "directory-archive")
 	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-File-Size, X-WebSSH-Download-Kind")
 	c.Status(http.StatusOK)
-	copied, copyErr := io.Copy(c.Writer, requestContextReader{ctx: c.Request.Context(), r: archiveFile})
-	if copyErr == nil && copied != archiveInfo.Size() {
-		copyErr = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", copied, archiveInfo.Size())
-	}
+	_, copyErr := streamDownloadResponse(c, archiveCtx, archiveFile, archiveInfo.Size())
 	if copyErr != nil {
 		responseBody.Msg = copyErr.Error()
 		_ = c.Error(copyErr)
@@ -1569,6 +1753,12 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
+	releaseDownload, ok := acquireDownloadSlot(c)
+	if !ok {
+		responseBody.Msg = "下载任务过多，请稍后重试"
+		return &responseBody
+	}
+	defer releaseDownload()
 	path := strings.TrimSpace(request.Path)
 	sshInfo := request.SSHInfo
 	release, ok := acquireSSHSlot(c)
@@ -1590,6 +1780,8 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer sshClient.Close()
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
+	defer stopCancellation()
 	if path == "" {
 		path = detectHomeDir(sshClient.Sftp, sshClient.Username)
 	}
@@ -1605,11 +1797,15 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	if fileInfo.IsDir() {
+		releaseArchive, archiveOK := acquireFolderArchiveSlot(c)
+		if !archiveOK {
+			responseBody.Msg = "文件夹压缩任务过多，请稍后重试"
+			return &responseBody
+		}
+		defer releaseArchive()
 		downloadRemoteDirectoryArchive(c, &sshClient, path, resolvedPath, &responseBody)
 		return &responseBody
 	}
-	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
-	defer stopCancellation()
 	if !fileInfo.Mode().IsRegular() {
 		responseBody.Msg = "only regular files can be downloaded"
 		c.JSON(http.StatusBadRequest, responseBody)
@@ -1636,10 +1832,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.Header("X-WebSSH-File-Size", strconv.FormatInt(fileInfo.Size(), 10))
 		c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-File-Size")
 		c.Status(http.StatusOK)
-		copied, copyErr := io.Copy(c.Writer, sftpFile)
-		if copyErr == nil && copied != fileInfo.Size() {
-			copyErr = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", copied, fileInfo.Size())
-		}
+		_, copyErr := streamDownloadResponse(c, c.Request.Context(), sftpFile, fileInfo.Size())
 		if copyErr != nil {
 			responseBody.Msg = copyErr.Error()
 			_ = c.Error(copyErr)
@@ -1750,6 +1943,9 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 	}()
 	limited := &io.LimitedReader{R: resp.Body, N: maxBytes + 1}
 	written, copyErr := io.Copy(dstFile, limited)
+	if copyErr == nil && written <= maxBytes {
+		copyErr = validateRemoteDownloadByteCount(resp.ContentLength, written)
+	}
 	if copyErr != nil || written > maxBytes {
 		if copyErr != nil {
 			fmt.Println(copyErr)
@@ -1771,6 +1967,13 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 	}
 	responseBody.Data = gin.H{"path": dstPath, "filename": filename}
 	return &responseBody
+}
+
+func validateRemoteDownloadByteCount(expected, actual int64) error {
+	if expected >= 0 && actual != expected {
+		return fmt.Errorf("remote download was incomplete: received %d bytes, expected %d", actual, expected)
+	}
+	return nil
 }
 
 func replaceRemoteFile(client *sftp.Client, oldPath, newPath string) error {
@@ -1860,6 +2063,18 @@ func sanitizeRemoteFilename(filename string) string {
 func UploadProgressWs(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
+	id := strings.TrimSpace(c.Query("id"))
+	if id == "" || len(id) > 128 {
+		responseBody.Msg = "invalid upload id"
+		c.JSON(http.StatusBadRequest, responseBody)
+		return &responseBody
+	}
+	releaseProgress, ok := acquireUploadProgressSlot(c)
+	if !ok {
+		responseBody.Msg = "上传进度连接过多，请稍后重试"
+		return &responseBody
+	}
+	defer releaseProgress()
 	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		fmt.Println(err)
@@ -1867,11 +2082,12 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer wsConn.Close()
-	id := c.Query("id")
-	if strings.TrimSpace(id) == "" {
-		responseBody.Msg = "missing upload id"
+	unregisterCloser, registered := registerRuntimeCloser(func() { _ = wsConn.Close() })
+	if !registered {
+		responseBody.Msg = errRuntimeShuttingDown.Error()
 		return &responseBody
 	}
+	defer unregisterCloser()
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	waitTimer := time.NewTimer(30 * time.Second)
@@ -1888,6 +2104,7 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		core.WcMu.Unlock()
 		if found {
 			ready = true
+			_ = wsConn.SetWriteDeadline(time.Now().Add(uploadProgressWriteTimeout))
 			if err := wsConn.WriteMessage(1, []byte(strconv.FormatInt(total, 10))); err != nil {
 				responseBody.Msg = err.Error()
 				return &responseBody
@@ -1998,6 +2215,7 @@ func FileList(c *gin.Context) *ResponseBody {
 	)
 	for _, mFile := range files {
 		if isRemoteFolderArchiveName(mFile.Name()) {
+			_ = removeStaleRemoteFolderArchive(lease.Client.Sftp, path, mFile, time.Now())
 			continue
 		}
 		info := mFile
@@ -2084,13 +2302,16 @@ func FileList(c *gin.Context) *ResponseBody {
 }
 
 func uploadMaxBytes() int64 {
-	const defaultLimit = int64(1 << 30)
+	const (
+		defaultLimit = int64(1 << 30)
+		hardLimit    = int64(8 << 30)
+	)
 	raw := strings.TrimSpace(os.Getenv("WEBSSH_UPLOAD_MAX_BYTES"))
 	if raw == "" {
 		return defaultLimit
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value < 1<<20 {
+	if err != nil || value < 1<<20 || value > hardLimit {
 		return defaultLimit
 	}
 	return value

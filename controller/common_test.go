@@ -75,6 +75,26 @@ func TestBindStrictJSON(t *testing.T) {
 	}
 }
 
+func TestResponseHTTPStatusClassifiesCommonFailures(t *testing.T) {
+	tests := []struct {
+		message string
+		status  int
+	}{
+		{message: "success", status: http.StatusOK},
+		{message: "duplicate upload field", status: http.StatusBadRequest},
+		{message: "remote file is too large", status: http.StatusRequestEntityTooLarge},
+		{message: "folder contains more than 50000 entries", status: http.StatusRequestEntityTooLarge},
+		{message: "failed to connect: network is unreachable", status: http.StatusBadGateway},
+		{message: "SSH connection task is too many", status: http.StatusTooManyRequests},
+		{message: "WebSSH server is shutting down", status: http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		if got := ResponseHTTPStatus(&ResponseBody{Msg: test.message}); got != test.status {
+			t.Fatalf("ResponseHTTPStatus(%q) = %d, want %d", test.message, got, test.status)
+		}
+	}
+}
+
 func TestEnsureTrustScopeCookieCreatesAndReusesScope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

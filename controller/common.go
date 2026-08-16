@@ -239,6 +239,35 @@ type ResponseBody struct {
 	Msg      string
 }
 
+func ResponseHTTPStatus(body *ResponseBody) int {
+	if body == nil || strings.EqualFold(strings.TrimSpace(body.Msg), "success") {
+		return http.StatusOK
+	}
+	message := strings.ToLower(strings.TrimSpace(body.Msg))
+	switch {
+	case strings.Contains(message, "shutting down"):
+		return http.StatusServiceUnavailable
+	case strings.Contains(message, "too many"), strings.Contains(message, "任务过多"):
+		return http.StatusTooManyRequests
+	case strings.Contains(message, "permission denied"), strings.Contains(message, "没有权限"), strings.Contains(message, "forbidden"):
+		return http.StatusForbidden
+	case strings.Contains(message, "not found"), strings.Contains(message, "does not exist"), strings.Contains(message, "no such file"):
+		return http.StatusNotFound
+	case strings.Contains(message, "too large"), strings.Contains(message, "exceeds"), strings.Contains(message, "more than"), strings.Contains(message, "超过"):
+		return http.StatusRequestEntityTooLarge
+	case strings.Contains(message, "changed"), strings.Contains(message, "already exists"), strings.Contains(message, "conflict"), strings.Contains(message, "已存在"):
+		return http.StatusConflict
+	case strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return http.StatusRequestTimeout
+	case strings.Contains(message, "failed to connect"), strings.Contains(message, "connection refused"), strings.Contains(message, "network is unreachable"), strings.Contains(message, "no route to host"), strings.Contains(message, "handshake failed"), strings.Contains(message, "remote server returned"):
+		return http.StatusBadGateway
+	case strings.Contains(message, "missing"), strings.Contains(message, "invalid"), strings.Contains(message, "unknown"), strings.Contains(message, "duplicate"), strings.Contains(message, "unsupported"), strings.Contains(message, "only "), strings.Contains(message, "cannot "), strings.Contains(message, "must "), strings.Contains(message, "不支持"):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 func TimeCost(start time.Time, body *ResponseBody) {
 	body.Duration = time.Since(start).String()
 }

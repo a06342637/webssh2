@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,11 +36,19 @@ const (
 )
 
 var (
-	accountStore *AccountStore
-	usernameRule = regexp.MustCompile(`^[A-Za-z0-9]{5,32}$`)
-	versionRule  = regexp.MustCompile(`^\d+(?:\.\d+){1,3}$`)
-	updaterRule  = regexp.MustCompile(`^webssh-updater-[0-9]+$`)
-	updateMu     sync.Mutex
+	accountStore     *AccountStore
+	usernameRule     = regexp.MustCompile(`^[A-Za-z0-9]{5,32}$`)
+	versionRule      = regexp.MustCompile(`^\d+(?:\.\d+){1,3}$`)
+	updaterRule      = regexp.MustCompile(`^webssh-updater-[0-9]+$`)
+	updateMu         sync.Mutex
+	versionInfoCache = struct {
+		sync.Mutex
+		info       gin.H
+		err        error
+		expires    time.Time
+		inFlight   chan struct{}
+		generation uint64
+	}{}
 	// A real bcrypt hash keeps unknown-user login attempts on the same expensive
 	// comparison path as known users, reducing username timing disclosure.
 	dummyPasswordHash = []byte("$2a$10$n/xeHI5pTVU2jCXvFHTKEO079VngBOppyqH06LHfVOsKK4YD81JmO")
@@ -100,7 +110,7 @@ type accountDB struct {
 }
 
 type AccountStore struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	path string
 	db   accountDB
 }
@@ -127,6 +137,7 @@ func InitAccountStore(dataDir string) error {
 		return err
 	}
 	store.mu.Lock()
+	store.migrateSessionKeysLocked()
 	store.cleanupExpiredSessionsLocked(time.Now().Unix())
 	store.migrateScriptRevisionsLocked()
 	if err := store.ensureDefaultAdminLocked(); err != nil {
@@ -230,6 +241,12 @@ func cloneAccountDB(db accountDB) accountDB {
 	return cloned
 }
 
+func cloneStoredScripts(scripts StoredScripts) StoredScripts {
+	scripts.Items = append([]ScriptBookmark(nil), scripts.Items...)
+	scripts.Categories = append([]ScriptCategory(nil), scripts.Categories...)
+	return scripts
+}
+
 func (s *AccountStore) snapshotLocked() accountDB {
 	s.ensureMaps()
 	return cloneAccountDB(s.db)
@@ -271,7 +288,15 @@ func (s *AccountStore) saveLocked() error {
 	}
 
 	if _, err := os.Stat(s.path); errors.Is(err, os.ErrNotExist) {
-		return os.Rename(tmp, s.path)
+		if err := os.Rename(tmp, s.path); err != nil {
+			return err
+		}
+		if err := syncParentDirectory(s.path); err != nil {
+			_ = os.Remove(s.path)
+			_ = syncParentDirectory(s.path)
+			return err
+		}
+		return nil
 	} else if err != nil {
 		return err
 	}
@@ -283,14 +308,44 @@ func (s *AccountStore) saveLocked() error {
 	if err := os.Rename(s.path, backup); err != nil {
 		return err
 	}
+	if err := syncParentDirectory(s.path); err != nil {
+		if restoreErr := os.Rename(backup, s.path); restoreErr != nil {
+			return fmt.Errorf("sync account database backup: %v; restore old database: %w", err, restoreErr)
+		}
+		_ = syncParentDirectory(s.path)
+		return err
+	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		if restoreErr := os.Rename(backup, s.path); restoreErr != nil {
 			return fmt.Errorf("替换账号数据库失败: %v；恢复旧数据库也失败: %w", err, restoreErr)
 		}
+		_ = syncParentDirectory(s.path)
+		return err
+	}
+	if err := syncParentDirectory(s.path); err != nil {
+		removeErr := os.Remove(s.path)
+		restoreErr := os.Rename(backup, s.path)
+		_ = syncParentDirectory(s.path)
+		if removeErr != nil || restoreErr != nil {
+			return fmt.Errorf("sync replacement database: %v; remove incomplete database: %v; restore old database: %v", err, removeErr, restoreErr)
+		}
 		return err
 	}
 	_ = os.Remove(backup)
+	_ = syncParentDirectory(s.path)
 	return nil
+}
+
+func syncParentDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func (s *AccountStore) cleanupExpiredSessionsLocked(now int64) {
@@ -298,6 +353,29 @@ func (s *AccountStore) cleanupExpiredSessionsLocked(now int64) {
 		if sess.ExpiresAt <= now {
 			delete(s.db.Sessions, token)
 		}
+	}
+}
+
+func sessionStorageKey(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func sessionKeyMatchesToken(storedKey, token string) bool {
+	return storedKey == token || storedKey == sessionStorageKey(token)
+}
+
+func (s *AccountStore) migrateSessionKeysLocked() {
+	s.ensureMaps()
+	for key, session := range s.db.Sessions {
+		if strings.HasPrefix(key, "sha256:") {
+			continue
+		}
+		hashed := sessionStorageKey(key)
+		if existing, found := s.db.Sessions[hashed]; !found || existing.ExpiresAt < session.ExpiresAt {
+			s.db.Sessions[hashed] = session
+		}
+		delete(s.db.Sessions, key)
 	}
 }
 
@@ -360,7 +438,6 @@ func (s *AccountStore) adminCountLocked() int {
 }
 
 func (s *AccountStore) accountSummariesLocked(currentUsername string) []accountSummary {
-	s.ensureMaps()
 	now := time.Now().Unix()
 	sessionCounts := map[string]int{}
 	for _, sess := range s.db.Sessions {
@@ -391,7 +468,7 @@ func (s *AccountStore) accountSummariesLocked(currentUsername string) []accountS
 
 func (s *AccountStore) deleteUserSessionsLocked(username, exceptToken string) {
 	for token, sess := range s.db.Sessions {
-		if sess.Username == username && token != exceptToken {
+		if sess.Username == username && (exceptToken == "" || !sessionKeyMatchesToken(token, exceptToken)) {
 			delete(s.db.Sessions, token)
 		}
 	}
@@ -553,30 +630,51 @@ func currentAccount(c *gin.Context) (string, bool) {
 		return "", false
 	}
 	now := time.Now().Unix()
+	accountStore.mu.RLock()
+	storageKey, sess, ok := accountStore.sessionForTokenLocked(token)
+	if !ok {
+		accountStore.mu.RUnlock()
+		return "", false
+	}
+	_, userExists := accountStore.db.Users[sess.Username]
+	if sess.ExpiresAt > now && userExists {
+		accountStore.mu.RUnlock()
+		return sess.Username, true
+	}
+	accountStore.mu.RUnlock()
+
+	// Only invalid sessions need the exclusive lock and a disk write. Recheck
+	// after upgrading the lock because another request may have logged out or
+	// recreated the account in the meantime.
 	accountStore.mu.Lock()
 	defer accountStore.mu.Unlock()
-	sess, ok := accountStore.db.Sessions[token]
+	now = time.Now().Unix()
+	storageKey, sess, ok = accountStore.sessionForTokenLocked(token)
 	if !ok {
-		// An arbitrary/forged cookie must not rewrite the whole account database.
 		return "", false
 	}
-	if sess.ExpiresAt <= now {
-		before := accountStore.snapshotLocked()
-		delete(accountStore.db.Sessions, token)
-		if err := accountStore.saveLocked(); err != nil {
-			accountStore.restoreLocked(before)
-		}
-		return "", false
+	_, userExists = accountStore.db.Users[sess.Username]
+	if sess.ExpiresAt > now && userExists {
+		return sess.Username, true
 	}
-	if _, ok := accountStore.db.Users[sess.Username]; !ok {
-		before := accountStore.snapshotLocked()
-		delete(accountStore.db.Sessions, token)
-		if err := accountStore.saveLocked(); err != nil {
-			accountStore.restoreLocked(before)
-		}
-		return "", false
+	before := accountStore.snapshotLocked()
+	delete(accountStore.db.Sessions, storageKey)
+	if err := accountStore.saveLocked(); err != nil {
+		accountStore.restoreLocked(before)
 	}
-	return sess.Username, true
+	return "", false
+}
+
+func (s *AccountStore) sessionForTokenLocked(token string) (string, StoredSession, bool) {
+	storageKey := sessionStorageKey(token)
+	session, ok := s.db.Sessions[storageKey]
+	if ok {
+		return storageKey, session, true
+	}
+	// Compatibility for in-memory test stores and databases loaded before the
+	// startup migration was introduced.
+	session, ok = s.db.Sessions[token]
+	return token, session, ok
 }
 
 func requireAccount(c *gin.Context) (string, bool) {
@@ -641,9 +739,9 @@ func requireAdmin(c *gin.Context) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	user := accountStore.db.Users[username]
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	if !user.IsAdmin {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "msg": "请登录管理员账号后使用"})
 		return "", false
@@ -676,7 +774,7 @@ func createLoginSession(username string) (string, time.Time, error) {
 		return "", time.Time{}, err
 	}
 	expires := time.Now().Add(30 * 24 * time.Hour)
-	accountStore.db.Sessions[token] = StoredSession{Username: username, ExpiresAt: expires.Unix()}
+	accountStore.db.Sessions[sessionStorageKey(token)] = StoredSession{Username: username, ExpiresAt: expires.Unix()}
 	return token, expires, nil
 }
 
@@ -763,9 +861,9 @@ func AuthLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": msg})
 		return
 	}
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	user, exists := accountStore.db.Users[username]
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	passwordHash := dummyPasswordHash
 	if exists {
 		passwordHash = []byte(user.PasswordHash)
@@ -827,9 +925,9 @@ func AuthChangePassword(c *gin.Context) {
 		return
 	}
 
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	user, exists := accountStore.db.Users[username]
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	if !exists {
 		clearLoginCookie(c)
 		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "账号不存在，请重新登录"})
@@ -864,7 +962,7 @@ func AuthChangePassword(c *gin.Context) {
 	user.PasswordHash = string(hash)
 	accountStore.db.Users[username] = user
 	for token, sess := range accountStore.db.Sessions {
-		if sess.Username == username && token != currentToken {
+		if sess.Username == username && !sessionKeyMatchesToken(token, currentToken) {
 			delete(accountStore.db.Sessions, token)
 		}
 	}
@@ -882,9 +980,13 @@ func AuthLogout(c *gin.Context) {
 	if accountStore != nil {
 		if token, err := c.Cookie(sessionCookieName); err == nil && token != "" {
 			accountStore.mu.Lock()
-			if _, exists := accountStore.db.Sessions[token]; exists {
+			storageKey := sessionStorageKey(token)
+			if _, exists := accountStore.db.Sessions[storageKey]; !exists {
+				storageKey = token
+			}
+			if _, exists := accountStore.db.Sessions[storageKey]; exists {
 				before := accountStore.snapshotLocked()
-				delete(accountStore.db.Sessions, token)
+				delete(accountStore.db.Sessions, storageKey)
 				if err := accountStore.saveLocked(); err != nil {
 					accountStore.restoreLocked(before)
 					accountStore.mu.Unlock()
@@ -905,9 +1007,9 @@ func AuthMe(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"loggedIn": false}})
 		return
 	}
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	user := accountStore.db.Users[username]
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"loggedIn": true, "username": username, "isAdmin": user.IsAdmin}})
 }
 
@@ -916,10 +1018,10 @@ func AdminListAccounts(c *gin.Context) {
 	if !ok {
 		return
 	}
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	users := accountStore.accountSummariesLocked(adminUsername)
 	adminCount := accountStore.adminCountLocked()
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{"users": users, "adminCount": adminCount}})
 }
 
@@ -1271,11 +1373,11 @@ func GetScriptBookmarks(c *gin.Context) {
 	if !ok {
 		return
 	}
-	accountStore.mu.Lock()
+	accountStore.mu.RLock()
 	scripts := accountStore.db.Scripts[username]
 	scripts.Items = append([]ScriptBookmark(nil), scripts.Items...)
 	scripts.Categories = append([]ScriptCategory(nil), scripts.Categories...)
-	accountStore.mu.Unlock()
+	accountStore.mu.RUnlock()
 	scripts.Categories = sanitizeScriptCategories(scripts.Categories)
 	scripts.Items = sanitizeScriptCategoryReferences(sanitizeScriptBookmarks(scripts.Items), scripts.Categories)
 	scripts.UpdatedAt = sanitizeScriptUpdatedAt(scripts.UpdatedAt, time.Now().UnixMilli())
@@ -1338,7 +1440,6 @@ func SyncScriptBookmarks(c *gin.Context) {
 	baseRevision := sanitizeScriptRevision(req.BaseRevision)
 
 	accountStore.mu.Lock()
-	defer accountStore.mu.Unlock()
 
 	serverNow := time.Now().UnixMilli()
 	cloud := accountStore.db.Scripts[username]
@@ -1357,6 +1458,11 @@ func SyncScriptBookmarks(c *gin.Context) {
 		cloud.Categories = []ScriptCategory{}
 	}
 	writeResult := func(status int, ok bool, code, msg, resultMode string, result StoredScripts) {
+		// Never hold the global account lock while encoding/writing a potentially
+		// multi-megabyte response to a slow client. Copy the slices first so the
+		// response remains race-free after unlocking.
+		result = cloneStoredScripts(result)
+		accountStore.mu.Unlock()
 		c.JSON(status, gin.H{
 			"ok":   ok,
 			"code": code,
@@ -1413,6 +1519,7 @@ func SyncScriptBookmarks(c *gin.Context) {
 	accountStore.db.Scripts[username] = result
 	if err := accountStore.saveLocked(); err != nil {
 		accountStore.restoreLocked(before)
+		accountStore.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": "云端书签保存失败"})
 		return
 	}
@@ -1838,11 +1945,64 @@ func readVersionInfo() (gin.H, error) {
 	return info, nil
 }
 
+func cloneVersionInfo(info gin.H) gin.H {
+	if info == nil {
+		return nil
+	}
+	cloned := make(gin.H, len(info))
+	for key, value := range info {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func invalidateVersionInfoCache() {
+	versionInfoCache.Lock()
+	versionInfoCache.generation++
+	versionInfoCache.info = nil
+	versionInfoCache.err = nil
+	versionInfoCache.expires = time.Time{}
+	versionInfoCache.Unlock()
+}
+
+func readVersionInfoCached() (gin.H, error) {
+	for {
+		now := time.Now()
+		versionInfoCache.Lock()
+		if versionInfoCache.inFlight == nil && now.Before(versionInfoCache.expires) {
+			info, err := cloneVersionInfo(versionInfoCache.info), versionInfoCache.err
+			versionInfoCache.Unlock()
+			return info, err
+		}
+		if inFlight := versionInfoCache.inFlight; inFlight != nil {
+			versionInfoCache.Unlock()
+			<-inFlight
+			continue
+		}
+		generation := versionInfoCache.generation
+		inFlight := make(chan struct{})
+		versionInfoCache.inFlight = inFlight
+		versionInfoCache.Unlock()
+
+		info, err := readVersionInfo()
+		versionInfoCache.Lock()
+		if versionInfoCache.generation == generation {
+			versionInfoCache.info = cloneVersionInfo(info)
+			versionInfoCache.err = err
+			versionInfoCache.expires = time.Now().Add(45 * time.Second)
+		}
+		versionInfoCache.inFlight = nil
+		close(inFlight)
+		versionInfoCache.Unlock()
+		return cloneVersionInfo(info), err
+	}
+}
+
 func AdminVersion(c *gin.Context) {
 	if _, ok := requireAdmin(c); !ok {
 		return
 	}
-	info, err := readVersionInfo()
+	info, err := readVersionInfoCached()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": err.Error()})
 		return
@@ -1861,6 +2021,7 @@ func AdminUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "msg": "请求格式不正确"})
 		return
 	}
+	invalidateVersionInfoCache()
 	info, err := readVersionInfo()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "msg": err.Error()})

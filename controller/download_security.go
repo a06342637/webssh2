@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const defaultRemoteDownloadMaxBytes = int64(1 << 30)
+const (
+	defaultRemoteDownloadMaxBytes = int64(1 << 30)
+	hardRemoteDownloadMaxBytes    = int64(8 << 30)
+)
 
 var blockedRemoteCIDRs = mustParseRemoteCIDRs(
 	"100.64.0.0/10", // carrier-grade NAT and shared address space
@@ -55,7 +58,7 @@ func remoteDownloadMaxBytes() int64 {
 		return defaultRemoteDownloadMaxBytes
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || value < 1<<20 {
+	if err != nil || value < 1<<20 || value > hardRemoteDownloadMaxBytes {
 		return defaultRemoteDownloadMaxBytes
 	}
 	return value

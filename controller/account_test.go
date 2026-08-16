@@ -687,6 +687,48 @@ func TestSessionLimitEvictsOldestSession(t *testing.T) {
 	}
 }
 
+func TestLoginSessionsAreStoredByHash(t *testing.T) {
+	installTestAccountStore(t)
+	accountStore.db.Sessions = map[string]StoredSession{}
+	accountStore.mu.Lock()
+	token, _, err := createLoginSession("member1")
+	accountStore.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := accountStore.db.Sessions[token]; exists {
+		t.Fatal("raw login token was persisted as the session map key")
+	}
+	if _, exists := accountStore.db.Sessions[sessionStorageKey(token)]; !exists {
+		t.Fatal("hashed login token was not persisted")
+	}
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	if username, ok := currentAccount(context); !ok || username != "member1" {
+		t.Fatalf("hashed session did not authenticate: username=%q ok=%v", username, ok)
+	}
+}
+
+func TestSessionMigrationRemovesPlaintextKeys(t *testing.T) {
+	store := &AccountStore{db: accountDB{
+		Users: map[string]StoredUser{"member1": {Username: "member1"}},
+		Sessions: map[string]StoredSession{
+			"legacy-token": {Username: "member1", ExpiresAt: time.Now().Add(time.Hour).Unix()},
+		},
+		Scripts: map[string]StoredScripts{},
+	}}
+	store.migrateSessionKeysLocked()
+	if _, exists := store.db.Sessions["legacy-token"]; exists {
+		t.Fatal("legacy plaintext session key remained after migration")
+	}
+	if _, exists := store.db.Sessions[sessionStorageKey("legacy-token")]; !exists {
+		t.Fatal("migrated hashed session key was not created")
+	}
+}
+
 func TestUpdaterContainerNameValidation(t *testing.T) {
 	for _, name := range []string{"webssh-updater-1", "webssh-updater-123456789"} {
 		if !updaterRule.MatchString(name) {

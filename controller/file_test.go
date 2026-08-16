@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,100 @@ func TestFormatRemoteFileSize(t *testing.T) {
 				t.Fatalf("formatRemoteFileSize(%d, %t) = %q, want %q", test.size, test.isDir, got, test.want)
 			}
 		})
+	}
+}
+
+func runUploadMultipartTest(t *testing.T, build func(*multipart.Writer)) *ResponseBody {
+	t.Helper()
+	uploadSlots.Lock()
+	uploadSlots.Total = 0
+	uploadSlots.Clients = make(map[string]int)
+	uploadSlots.Unlock()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	build(writer)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/file/upload", &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	return UploadFile(ctx)
+}
+
+func TestUploadRejectsUnknownAndOversizedMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	response := runUploadMultipartTest(t, func(writer *multipart.Writer) {
+		if err := writer.WriteField("unexpected", "value"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if response.Msg != "unknown upload field" {
+		t.Fatalf("unknown upload field response = %q", response.Msg)
+	}
+
+	response = runUploadMultipartTest(t, func(writer *multipart.Writer) {
+		if err := writer.WriteField("sshInfo", strings.Repeat("x", uploadMetadataMaxBytes+1)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if response.Msg != "upload metadata is too large" {
+		t.Fatalf("oversized upload metadata response = %q", response.Msg)
+	}
+}
+
+func TestUploadRequiresMetadataBeforeFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	response := runUploadMultipartTest(t, func(writer *multipart.Writer) {
+		part, err := writer.CreateFormFile("file", "test.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte("test")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(response.Msg, "metadata must appear before") {
+		t.Fatalf("file-first upload response = %q", response.Msg)
+	}
+}
+
+func TestUploadCheckedValidatesBeforeRemoteCommit(t *testing.T) {
+	client := newEditorTestSFTPClient(t)
+	localDir := t.TempDir()
+	destinationLocal := filepath.Join(localDir, "uploaded.txt")
+	destination := editorTestRemotePath(destinationLocal)
+	sshClient := core.NewSSHClient()
+	sshClient.Sftp = client
+	validationErr := errors.New("multipart has trailing fields")
+	if err := sshClient.UploadChecked(context.Background(), strings.NewReader("not committed"), "", destination, func() error {
+		return validationErr
+	}); !errors.Is(err, validationErr) {
+		t.Fatalf("UploadChecked() error = %v, want validation error", err)
+	}
+	if _, err := os.Stat(destinationLocal); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination exists after failed validation: %v", err)
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".webssh-upload-") {
+			t.Fatalf("temporary upload remained after failed validation: %s", entry.Name())
+		}
+	}
+
+	if err := sshClient.UploadChecked(context.Background(), strings.NewReader("committed"), "", destination, nil); err != nil {
+		t.Fatalf("UploadChecked() success error = %v", err)
+	}
+	content, err := os.ReadFile(destinationLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "committed" {
+		t.Fatalf("uploaded content = %q", content)
 	}
 }
 
@@ -109,6 +204,33 @@ func TestValidateDownloadArchiveIntentRejectsTargetTypeChanges(t *testing.T) {
 	}
 	if err := validateDownloadArchiveIntent(nil, true); err != nil {
 		t.Fatalf("legacy request without an intent should remain compatible: %v", err)
+	}
+}
+
+func TestStreamDownloadResponseStopsAtAuthorizedSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/file/download", nil)
+
+	written, err := streamDownloadResponse(ctx, context.Background(), strings.NewReader("abcdef"), 3)
+	if err != nil {
+		t.Fatalf("streamDownloadResponse() error = %v", err)
+	}
+	if written != 3 || recorder.Body.String() != "abc" {
+		t.Fatalf("streamed %d bytes with body %q, want 3 bytes and %q", written, recorder.Body.String(), "abc")
+	}
+}
+
+func TestValidateRemoteDownloadByteCount(t *testing.T) {
+	if err := validateRemoteDownloadByteCount(-1, 7); err != nil {
+		t.Fatalf("unknown content length was rejected: %v", err)
+	}
+	if err := validateRemoteDownloadByteCount(7, 7); err != nil {
+		t.Fatalf("matching content length was rejected: %v", err)
+	}
+	if err := validateRemoteDownloadByteCount(7, 3); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("short remote download error = %v", err)
 	}
 }
 
@@ -288,7 +410,24 @@ func (f editorTestSymlinkInfo) IsDir() bool        { return false }
 func (f editorTestSymlinkInfo) Sys() any           { return nil }
 
 type editorTestHandler struct {
-	readlinks map[string]string
+	readlinks  map[string]string
+	failWrites bool
+}
+
+type editorTestFailingFile struct {
+	*os.File
+}
+
+func (file *editorTestFailingFile) WriteAt(buffer []byte, offset int64) (int, error) {
+	if len(buffer) == 0 {
+		return 0, errors.New("forced write failure")
+	}
+	count := len(buffer) / 2
+	if count < 1 {
+		count = 1
+	}
+	written, _ := file.File.WriteAt(buffer[:count], offset)
+	return written, errors.New("forced write failure")
 }
 
 func cleanEditorTestPath(name string) string {
@@ -319,7 +458,7 @@ func (h editorTestHandler) Filewrite(request *sftp.Request) (io.WriterAt, error)
 	return h.OpenFile(request)
 }
 
-func (editorTestHandler) OpenFile(request *sftp.Request) (sftp.WriterAtReaderAt, error) {
+func (h editorTestHandler) OpenFile(request *sftp.Request) (sftp.WriterAtReaderAt, error) {
 	flags := request.Pflags()
 	openFlags := 0
 	if flags.Read && flags.Write {
@@ -341,7 +480,14 @@ func (editorTestHandler) OpenFile(request *sftp.Request) (sftp.WriterAtReaderAt,
 	if flags.Append {
 		openFlags |= os.O_APPEND
 	}
-	return os.OpenFile(cleanEditorTestPath(request.Filepath), openFlags, 0o644)
+	file, err := os.OpenFile(cleanEditorTestPath(request.Filepath), openFlags, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if h.failWrites && flags.Write {
+		return &editorTestFailingFile{File: file}, nil
+	}
+	return file, nil
 }
 
 func (editorTestHandler) Filecmd(request *sftp.Request) error {
@@ -506,6 +652,31 @@ func TestRemoteTarArchiveCommandQuotesPathsAndChecksTar(t *testing.T) {
 	}
 	if !strings.Contains(command, "-C "+shellQuote(pathpkg.Dir(sourcePath))+" -- "+shellQuote(pathpkg.Base(sourcePath))) {
 		t.Fatalf("source path is not safely split and quoted: %q", command)
+	}
+}
+
+func TestLegacySFTPArchiveRespectsEntryLimit(t *testing.T) {
+	t.Setenv("WEBSSH_FOLDER_ARCHIVE_MAX_ENTRIES", "2")
+	client := newEditorTestSFTPClient(t)
+	localDir := t.TempDir()
+	sourceLocal := filepath.Join(localDir, "source")
+	if err := os.Mkdir(sourceLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceLocal, "one.txt"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceLocal, "two.txt"), []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath, err := reserveRemoteFolderArchive(client, editorTestRemotePath(localDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeRemoteFolderArchive(client, archivePath)
+	err = writeRemoteDirectoryArchiveViaSFTP(context.Background(), client, editorTestRemotePath(sourceLocal), archivePath)
+	if err == nil || !strings.Contains(err.Error(), "more than 2 entries") {
+		t.Fatalf("legacy archive limit error = %v", err)
 	}
 }
 
@@ -826,6 +997,18 @@ func TestRemoteEditorCreateFileAndRejectExistingTarget(t *testing.T) {
 	}
 	if string(onDisk) != updated {
 		t.Fatalf("duplicate create overwrote file: %q", onDisk)
+	}
+}
+
+func TestRemoteEditorCreateRemovesPartialFileAfterWriteFailure(t *testing.T) {
+	client := newEditorTestSFTPClientWithHandler(t, editorTestHandler{failWrites: true})
+	localPath := filepath.Join(t.TempDir(), "partial.txt")
+	path := editorTestRemotePath(localPath)
+	if _, err := createRemoteTextFile(client, path, []byte("content that must not remain"), defaultRemoteEditorMaxBytes); err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("createRemoteTextFile() error = %v", err)
+	}
+	if _, err := os.Lstat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial file remained after failed create: %v", err)
 	}
 }
 

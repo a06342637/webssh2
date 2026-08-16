@@ -77,6 +77,26 @@ esac
 PROJECT_DIR=$(CDPATH= cd -P "$PROJECT_DIR" 2>/dev/null && pwd) || fail "项目目录不存在：$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
+refresh_ipv6_egress_helper() {
+    helper_path="$PROJECT_DIR/scripts/webssh-ipv6-egress.sh"
+    unit_path="$PROJECT_DIR/scripts/webssh-ipv6-egress.service"
+    [ -f "$helper_path" ] && [ -f "$unit_path" ] || return 0
+    [ "$(id -u)" -eq 0 ] || return 0
+
+    # Page updates run inside a short-lived helper container. Do not install
+    # into that container's private root filesystem; the host copy installed by
+    # setup.sh remains active. Command-line updates on a systemd host refresh
+    # both files so reboot persistence receives future fixes as well.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && command -v install >/dev/null 2>&1; then
+        install -m 700 "$helper_path" /usr/local/sbin/webssh-ipv6-egress
+        install -m 644 "$unit_path" /etc/systemd/system/webssh-ipv6-egress.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable webssh-ipv6-egress.service >/dev/null 2>&1 || true
+    elif [ -x /usr/local/sbin/webssh-ipv6-egress ] && command -v install >/dev/null 2>&1; then
+        install -m 700 "$helper_path" /usr/local/sbin/webssh-ipv6-egress
+    fi
+}
+
 [ -d .git ] || fail "$PROJECT_DIR 不是 Git 仓库"
 command -v git >/dev/null 2>&1 || fail "未安装 git"
 command -v docker >/dev/null 2>&1 || fail "未安装 docker"
@@ -223,6 +243,8 @@ else
     git pull --ff-only origin "$BRANCH"
 fi
 
+refresh_ipv6_egress_helper
+
 NEW_COMMIT=$(git rev-parse HEAD)
 EXPECTED_VERSION=$(sed -n '1{s/[[:space:]]//g;p;}' VERSION 2>/dev/null || true)
 log "source is now $(git rev-parse --short HEAD), expected version ${EXPECTED_VERSION:-unknown}"
@@ -246,6 +268,17 @@ else
         rollback_service "docker compose failed to start the new container" || true
         remove_rollback_tag
         fail "update activation failed (backup: $BACKUP_DIR)"
+    fi
+fi
+
+# Compose may recreate the bridge with a new name. Reapply the host-side IPv6
+# NAT rule after every update so IPv6-only SSH targets keep working.
+if [ -x /usr/local/sbin/webssh-ipv6-egress ]; then
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/webssh-ipv6-egress.service ]; then
+        systemctl restart webssh-ipv6-egress.service >/dev/null 2>&1 || \
+            /usr/local/sbin/webssh-ipv6-egress --quiet || true
+    else
+        /usr/local/sbin/webssh-ipv6-egress --quiet || true
     fi
 fi
 

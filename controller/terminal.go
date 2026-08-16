@@ -128,6 +128,15 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	unregisterCloser, registered := registerRuntimeCloser(func() {
+		_ = wsConn.Close()
+		sshClient.Close()
+	})
+	if !registered {
+		responseBody.Msg = errRuntimeShuttingDown.Error()
+		return &responseBody
+	}
+	defer unregisterCloser()
 
 	if sshClient.InitTerminal(wsConn, row, col) == nil {
 		wsConn.WriteMessage(1, []byte("\033[31mTerminal initialization failed\033[0m"))

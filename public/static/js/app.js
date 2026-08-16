@@ -5831,6 +5831,9 @@ function sftpDownloadWriter(download, total) {
     if (typeof streamSaver !== 'undefined' && streamSaver && typeof streamSaver.createWriteStream === 'function') {
         return Promise.resolve({ writer: streamSaver.createWriteStream(download.name, total ? { size: total } : undefined).getWriter(), mode: 'stream' });
     }
+    if (total > 256 * 1024 * 1024) {
+        return Promise.reject(new Error('当前浏览器只能把下载暂存在内存；超过 256 MiB 请使用支持“保存文件”接口的 Chrome/Edge，或启用流式保存'));
+    }
     return Promise.resolve({ writer: null, mode: 'memory' });
 }
 
@@ -6020,6 +6023,11 @@ function runSftpDownload(download) {
                     if (result.done) return;
                     download.received += result.value.byteLength;
                     if (writer) return writer.write(result.value).then(function () { renderSftpTransfers(session); return pump(); });
+                    if (download.received > 256 * 1024 * 1024) {
+                        return reader.cancel().catch(function () { }).then(function () {
+                            throw new Error('下载已超过兼容模式 256 MiB 内存上限，请改用支持流式保存的浏览器');
+                        });
+                    }
                     download.chunks.push(result.value);
                     renderSftpTransfers(session);
                     return pump();
@@ -6060,13 +6068,15 @@ function runSftpDownload(download) {
     }).finally(function () {
         if (download.controller === controller) download.controller = null;
         download.writer = null;
+        download.chunks = null;
         download.resumeRead = null;
+        if (download.pauseTimer) { clearTimeout(download.pauseTimer); download.pauseTimer = null; }
         if (download.isDirectory && download.archiveJobId === preparedJobId) download.archiveJobId = null;
     });
 }
 
 function startSftpDownload(session, path, size, name, fileHandle, isDirectory) {
-    var download = { id: 'download_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: name, isDirectory: !!isDirectory, expectedSize: size || 0, total: size || 0, received: 0, status: 'queued', startedAt: 0, pausedDuration: 0, pausedAt: 0, controller: null, writer: null, writerCommitted: false, fileHandle: fileHandle || null, storageMode: '', chunks: null, resumeRead: null, pollTimer: null, pollResolve: null, archiveAttempt: 0, archiveJobId: null, archiveStage: '', archivePercent: 0, archiveReady: false, archiveTotalBytes: 0, archiveProcessedBytes: 0, archiveTotalEntries: 0, archiveProcessedEntries: 0, archiveCurrentPath: '' };
+    var download = { id: 'download_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8), sessionId: session.id, path: path, name: name, isDirectory: !!isDirectory, expectedSize: size || 0, total: size || 0, received: 0, status: 'queued', startedAt: 0, pausedDuration: 0, pausedAt: 0, pauseTimer: null, controller: null, writer: null, writerCommitted: false, fileHandle: fileHandle || null, storageMode: '', chunks: null, resumeRead: null, pollTimer: null, pollResolve: null, archiveAttempt: 0, archiveJobId: null, archiveStage: '', archivePercent: 0, archiveReady: false, archiveTotalBytes: 0, archiveProcessedBytes: 0, archiveTotalEntries: 0, archiveProcessedEntries: 0, archiveCurrentPath: '' };
     (session._sftpDownloads || (session._sftpDownloads = [])).unshift(download);
     renderSftpTransfers(session);
     if (download.isDirectory) runSftpArchivePreparation(download);
@@ -6076,12 +6086,21 @@ function startSftpDownload(session, path, size, name, fileHandle, isDirectory) {
 function pauseSftpDownload(id) {
     var download = findSftpDownload(id);
     if (!download || download.status !== 'running') return;
-    download.status = 'paused'; download.pausedAt = Date.now(); renderSftpTransfers(getSessionById(download.sessionId));
+    download.status = 'paused'; download.pausedAt = Date.now();
+    if (download.pauseTimer) clearTimeout(download.pauseTimer);
+    download.pauseTimer = setTimeout(function () {
+        download.pauseTimer = null;
+        if (download.status !== 'paused') return;
+        cancelSftpDownload(download);
+        showToast('下载暂停超过 90 秒，已自动取消；可重新下载', 'warning');
+    }, 90000);
+    renderSftpTransfers(getSessionById(download.sessionId));
 }
 
 function resumeSftpDownload(id) {
     var download = findSftpDownload(id);
     if (!download || download.status !== 'paused') return;
+    if (download.pauseTimer) { clearTimeout(download.pauseTimer); download.pauseTimer = null; }
     download.pausedDuration += Math.max(0, Date.now() - download.pausedAt); download.pausedAt = 0; download.status = 'running';
     var resume = download.resumeRead; renderSftpTransfers(getSessionById(download.sessionId)); if (resume) resume();
 }
@@ -6092,6 +6111,7 @@ function cancelSftpDownload(download) {
     var archiveJobId = download.archiveJobId;
     download.archiveAttempt = (download.archiveAttempt || 0) + 1;
     download.status = 'cancelled';
+    if (download.pauseTimer) { clearTimeout(download.pauseTimer); download.pauseTimer = null; }
     if (download.controller) { try { download.controller.abort(); } catch (e) { } }
     requestSftpArchiveCancel(archiveJobId);
     abortSftpDownloadWriter(download, 'cancelled');
@@ -7224,6 +7244,26 @@ function remotePreviewKindForName(name) {
     return '';
 }
 
+function revokeRemotePreviewToken(token) {
+    token = String(token || '').trim();
+    if (!token) return;
+    fetch('/file/preview/revoke', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token }),
+        keepalive: true
+    }).catch(function () { });
+}
+
+function releaseRemotePreviewAuthorization(editor) {
+    if (!editor) return;
+    var token = editor.previewToken;
+    editor.previewToken = '';
+    editor.previewUrl = '';
+    revokeRemotePreviewToken(token);
+}
+
 function loadRemotePreview(editor) {
     var session = remoteEditorSession(editor);
     if (!session || !session._connected) {
@@ -7233,35 +7273,30 @@ function loadRemotePreview(editor) {
         return;
     }
     editor.retryInitialLoad = false;
+    releaseRemotePreviewAuthorization(editor);
     var controller = new AbortController();
     editor.controller = controller;
     (session._remoteEditorControllers || (session._remoteEditorControllers = [])).push(controller);
-    fetch('/file/preview', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sshInfo: session.sshInfo, path: editor.path }),
-        signal: controller.signal
-    }).then(function (response) {
-        if (!response.ok) {
-            return response.text().then(function (text) {
-                var data = {};
-                try { data = text ? JSON.parse(text) : {}; } catch (e) { }
-                throw { msg: data.Msg || '预览读取失败', status: response.status };
-            });
+    remoteEditorRequest('/file/preview/authorize', { sshInfo: session.sshInfo, path: editor.path }, controller.signal).then(function (data) {
+        var previewToken = String(data.token || '').trim();
+        if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) {
+            revokeRemotePreviewToken(previewToken);
+            return;
         }
-        var responseKind = response.headers.get('X-WebSSH-Preview-Kind') || editor.viewMode;
-        if (responseKind !== editor.viewMode) throw { msg: '服务器返回的媒体类型与请求不一致' };
-        editor.sizeBytes = Math.max(0, parseInt(response.headers.get('X-WebSSH-File-Size') || response.headers.get('Content-Length'), 10) || 0);
-        editor.previewMime = response.headers.get('Content-Type') || editor.previewMime || '';
+        if (!previewToken) throw { msg: '服务器没有返回预览授权' };
+        if (data.kind && data.kind !== editor.viewMode) {
+            revokeRemotePreviewToken(previewToken);
+            throw { msg: '服务器返回的媒体类型与请求不一致' };
+        }
+        editor.previewUrl = String(data.url || '');
+        if (!editor.previewUrl) {
+            revokeRemotePreviewToken(previewToken);
+            throw { msg: '服务器没有返回预览地址' };
+        }
+        editor.previewToken = previewToken;
+        editor.sizeBytes = Math.max(0, parseInt(data.size, 10) || 0);
+        editor.previewMime = data.mime || editor.previewMime || '';
         remoteEditorSetStatus(editor, '正在载入 ' + fmtB(editor.sizeBytes) + '…', 'info');
-        return response.blob();
-    }).then(function (blob) {
-        if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return;
-        if (editor.objectUrl) {
-            try { URL.revokeObjectURL(editor.objectUrl); } catch (e) { }
-        }
-        editor.objectUrl = URL.createObjectURL(blob);
         editor.mediaStage.innerHTML = '';
         var media;
         if (editor.viewMode === 'video') {
@@ -7296,10 +7331,13 @@ function loadRemotePreview(editor) {
         editor.loaded = true;
         editor.retryInitialLoad = false;
         editor.el.classList.remove('is-loading');
-        media.src = editor.objectUrl;
+        // The short-lived same-origin URL is a streaming endpoint. Videos can
+        // issue HTTP Range requests and no longer need a full Blob in memory.
+        media.src = editor.previewUrl;
         remoteEditorUpdateMetrics(editor);
     }).catch(function (err) {
         if (remoteEditors.indexOf(editor) < 0 || editor.controller !== controller) return;
+        if (!editor.loaded) releaseRemotePreviewAuthorization(editor);
         if (editor.el) editor.el.classList.remove('is-loading');
         var aborted = requestWasAborted(err);
         editor.retryInitialLoad = aborted;
@@ -7464,6 +7502,7 @@ function destroyRemoteEditor(editor) {
         try { editor.mediaElement.pause(); } catch (e) { }
         try { editor.mediaElement.removeAttribute('src'); editor.mediaElement.load(); } catch (e) { }
     }
+    releaseRemotePreviewAuthorization(editor);
     if (editor.objectUrl) {
         try { URL.revokeObjectURL(editor.objectUrl); } catch (e) { }
         editor.objectUrl = '';

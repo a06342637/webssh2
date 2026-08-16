@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	folderArchiveJobMaxCount  = 1024
-	folderArchiveJobMaxRun    = 2 * time.Hour
+	folderArchiveJobMaxCount  = 128
+	folderArchiveJobMaxRun    = 30 * time.Minute
+	folderArchiveLeaseTimeout = 90 * time.Second
 	folderArchiveJobReadyTTL  = 10 * time.Minute
 	folderArchiveJobResultTTL = 2 * time.Minute
 	folderArchiveCancelTTL    = 2 * time.Minute
@@ -73,6 +74,7 @@ type folderArchiveJob struct {
 	processedEntries int64
 	createdAt        time.Time
 	updatedAt        time.Time
+	lastHeartbeat    time.Time
 
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -98,10 +100,31 @@ const (
 	folderArchiveStoreFull
 	folderArchiveStoreConflict
 	folderArchiveStoreCancelled
+	folderArchiveStoreShuttingDown
 )
 
 func folderArchiveMaxEntries() int {
-	return envPositiveInt("WEBSSH_FOLDER_ARCHIVE_MAX_ENTRIES", 500000)
+	value := envPositiveInt("WEBSSH_FOLDER_ARCHIVE_MAX_ENTRIES", 50000)
+	if value > 200000 {
+		return 200000
+	}
+	return value
+}
+
+func folderArchiveMaxBytes() int64 {
+	const (
+		defaultLimit = int64(20 << 30)
+		hardLimit    = int64(1 << 40)
+	)
+	raw := strings.TrimSpace(os.Getenv("WEBSSH_FOLDER_ARCHIVE_MAX_BYTES"))
+	if raw == "" {
+		return defaultLimit
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 1<<20 || value > hardLimit {
+		return defaultLimit
+	}
+	return value
 }
 
 func newFolderArchiveJobID() (string, error) {
@@ -140,6 +163,9 @@ func pruneFolderArchiveCancellationsLocked(now time.Time) {
 func storeFolderArchiveJob(job *folderArchiveJob) folderArchiveStoreResult {
 	folderArchiveJobs.Lock()
 	defer folderArchiveJobs.Unlock()
+	if runtimeShuttingDown.Load() {
+		return folderArchiveStoreShuttingDown
+	}
 	now := time.Now()
 	pruneFolderArchiveCancellationsLocked(now)
 	cancellationKey := folderArchiveCancellationKey(job.owner, job.id)
@@ -225,6 +251,37 @@ func (job *folderArchiveJob) setStatus(status, currentPath string) {
 	job.mu.Unlock()
 }
 
+func (job *folderArchiveJob) touch() {
+	job.mu.Lock()
+	job.lastHeartbeat = time.Now()
+	job.mu.Unlock()
+}
+
+func monitorFolderArchiveLease(job *folderArchiveJob) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-job.ctx.Done():
+			return
+		case <-job.workDone:
+			return
+		case <-ticker.C:
+			job.mu.Lock()
+			lastHeartbeat := job.lastHeartbeat
+			status := job.status
+			job.mu.Unlock()
+			if status == "ready" || status == "downloading" || status == "completed" || status == "error" || status == "cancelled" {
+				return
+			}
+			if !lastHeartbeat.IsZero() && time.Since(lastHeartbeat) > folderArchiveLeaseTimeout {
+				cancelFolderArchiveJob(job)
+				return
+			}
+		}
+	}
+}
+
 func (job *folderArchiveJob) updateScan(entries, bytes int64, currentPath string) {
 	job.mu.Lock()
 	job.status = "scanning"
@@ -308,6 +365,7 @@ func (job *folderArchiveJob) cleanupResources() {
 		client := job.client
 		archivePath := job.archivePath
 		release := job.release
+		cancel := job.cancel
 		stopIOCancel := job.stopIOCancel
 		job.client = nil
 		job.release = nil
@@ -322,6 +380,9 @@ func (job *folderArchiveJob) cleanupResources() {
 		}
 		job.mu.Unlock()
 
+		if cancel != nil {
+			cancel()
+		}
 		if stopIOCancel != nil {
 			stopIOCancel()
 		}
@@ -381,6 +442,7 @@ func (job *folderArchiveJob) snapshot() gin.H {
 func scanRemoteArchiveManifest(ctx context.Context, client *sftp.Client, sourcePath, archiveRootName string, progress func(entries, bytes int64, currentPath string)) (remoteArchiveManifest, error) {
 	manifest := remoteArchiveManifest{Entries: make([]remoteArchiveManifestEntry, 0, 128)}
 	maxEntries := folderArchiveMaxEntries()
+	maxBytes := folderArchiveMaxBytes()
 	var visit func(remotePath, archiveName string, info os.FileInfo, depth int) error
 	visit = func(remotePath, archiveName string, info os.FileInfo, depth int) error {
 		if err := ctx.Err(); err != nil {
@@ -402,8 +464,8 @@ func scanRemoteArchiveManifest(ctx context.Context, client *sftp.Client, sourceP
 		}
 		manifest.Entries = append(manifest.Entries, entry)
 		if info.Mode().IsRegular() && info.Size() > 0 {
-			if manifest.TotalBytes > int64(^uint64(0)>>1)-info.Size() {
-				return fmt.Errorf("folder is too large to measure safely")
+			if info.Size() > maxBytes-manifest.TotalBytes {
+				return fmt.Errorf("folder contains more than %d bytes", maxBytes)
 			}
 			manifest.TotalBytes += info.Size()
 		}
@@ -640,6 +702,7 @@ func runFolderArchiveJob(job *folderArchiveJob) {
 		finishFolderArchiveWorker(job, fmt.Errorf("the remote root directory cannot be archived"))
 		return
 	}
+	cleanupStaleRemoteFolderArchives(job.client.Sftp, "/tmp", pathpkg.Dir(resolvedPath))
 	archiveRootName := pathpkg.Base(pathpkg.Clean(job.requestedPath))
 	if archiveRootName == "." || archiveRootName == "/" || archiveRootName == "" {
 		archiveRootName = "folder"
@@ -664,7 +727,12 @@ func cancelFolderArchiveJob(job *folderArchiveJob) {
 	if job == nil {
 		return
 	}
-	job.cancel()
+	job.mu.Lock()
+	cancel := job.cancel
+	job.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	job.mu.Lock()
 	terminal := job.status == "completed" || job.status == "error" || job.status == "cancelled"
 	if !terminal {
@@ -713,9 +781,18 @@ func PrepareDirectoryArchive(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, ResponseBody{Msg: "the remote root directory cannot be archived"})
 		return
 	}
-	release, ok := acquireSSHSlot(c)
+	releaseArchive, ok := acquireFolderArchiveSlot(c)
 	if !ok {
 		return
+	}
+	releaseSSH, ok := acquireSSHSlot(c)
+	if !ok {
+		releaseArchive()
+		return
+	}
+	release := func() {
+		releaseSSH()
+		releaseArchive()
 	}
 	client, err := decodeSSHClient(c, request.SSHInfo)
 	if err != nil {
@@ -744,15 +821,17 @@ func PrepareDirectoryArchive(c *gin.Context) {
 			return
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), folderArchiveJobMaxRun)
+	now := time.Now()
 	job := &folderArchiveJob{
 		id:            jobID,
 		owner:         owner,
 		requestedPath: request.Path,
 		downloadName:  remoteFolderArchiveDownloadName(request.Path),
 		status:        "connecting",
-		createdAt:     time.Now(),
-		updatedAt:     time.Now(),
+		createdAt:     now,
+		updatedAt:     now,
+		lastHeartbeat: now,
 		ctx:           ctx,
 		cancel:        cancel,
 		client:        &client,
@@ -764,7 +843,6 @@ func PrepareDirectoryArchive(c *gin.Context) {
 	// SFTP request that is already blocked inside the transport; closing the
 	// connection makes cancellation and the runtime timeout deterministic.
 	job.stopIOCancel = closeSSHOnContextDone(ctx, job.client)
-	job.runtimeTimer = time.AfterFunc(folderArchiveJobMaxRun, func() { cancelFolderArchiveJob(job) })
 	storeResult := storeFolderArchiveJob(job)
 	if storeResult != folderArchiveStoreOK {
 		job.cancel()
@@ -774,11 +852,14 @@ func PrepareDirectoryArchive(c *gin.Context) {
 			c.JSON(http.StatusGone, ResponseBody{Msg: "folder archive job was cancelled"})
 		case folderArchiveStoreConflict:
 			c.JSON(http.StatusConflict, ResponseBody{Msg: "folder archive job id is already in use"})
+		case folderArchiveStoreShuttingDown:
+			c.JSON(http.StatusServiceUnavailable, ResponseBody{Msg: errRuntimeShuttingDown.Error()})
 		default:
 			c.JSON(http.StatusServiceUnavailable, ResponseBody{Msg: "too many folder archive jobs"})
 		}
 		return
 	}
+	go monitorFolderArchiveLease(job)
 	go runFolderArchiveJob(job)
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusAccepted, ResponseBody{Msg: "success", Data: gin.H{"jobId": jobID, "name": job.downloadName}})
@@ -800,6 +881,7 @@ func DirectoryArchiveStatus(c *gin.Context) {
 		c.JSON(http.StatusNotFound, ResponseBody{Msg: "folder archive job was not found"})
 		return
 	}
+	job.touch()
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, ResponseBody{Msg: "success", Data: job.snapshot()})
 }
@@ -848,6 +930,11 @@ func DownloadPreparedDirectoryArchive(c *gin.Context) {
 		c.JSON(http.StatusNotFound, ResponseBody{Msg: "folder archive job was not found"})
 		return
 	}
+	releaseDownload, ok := acquireDownloadSlot(c)
+	if !ok {
+		return
+	}
+	defer releaseDownload()
 	client, archivePath, archiveSize, filename, err := claimFolderArchiveDownload(job)
 	if err != nil {
 		status := http.StatusConflict
@@ -883,10 +970,7 @@ func DownloadPreparedDirectoryArchive(c *gin.Context) {
 	c.Header("X-WebSSH-Download-Kind", "directory-archive")
 	c.Header("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-WebSSH-File-Size, X-WebSSH-Download-Kind")
 	c.Status(http.StatusOK)
-	copied, copyErr := io.Copy(c.Writer, requestContextReader{ctx: streamCtx, r: archiveFile})
-	if copyErr == nil && copied != archiveSize {
-		copyErr = fmt.Errorf("download size changed while streaming: copied %d bytes, expected %d", copied, archiveSize)
-	}
+	_, copyErr := streamDownloadResponse(c, streamCtx, archiveFile, archiveSize)
 	if copyErr != nil {
 		if streamCtx.Err() != nil || job.ctx.Err() != nil {
 			job.markTerminal("cancelled", nil)

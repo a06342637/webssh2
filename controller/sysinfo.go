@@ -18,8 +18,11 @@ import (
 )
 
 const (
-	sysInfoCommandTimeout = 12 * time.Second
-	sysInfoOutputLimit    = 1 << 20
+	sysInfoCommandTimeout  = 12 * time.Second
+	sysInfoOutputLimit     = 1 << 20
+	sysInfoNetIdleTimeout  = 90 * time.Second
+	sysInfoNetMaxLifetime  = 2 * time.Hour
+	sysInfoNetWriteTimeout = 10 * time.Second
 )
 
 var errSysInfoOutputLimit = errors.New("system information output exceeded limit")
@@ -211,6 +214,7 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer wsConn.Close()
+	var wsWriteMu sync.Mutex
 
 	wsConn.SetReadLimit(websocketInitLimit)
 	_ = wsConn.SetReadDeadline(time.Now().Add(websocketInitTimeout))
@@ -219,25 +223,37 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	_ = wsConn.SetReadDeadline(time.Time{})
+	_ = wsConn.SetReadDeadline(time.Now().Add(sysInfoNetIdleTimeout))
+	wsConn.SetPongHandler(func(string) error {
+		return wsConn.SetReadDeadline(time.Now().Add(sysInfoNetIdleTimeout))
+	})
 	sshInfo := string(initMsg)
 
 	sshClient, err := decodeSSHClient(c, sshInfo)
 	if err != nil {
-		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	if err := sshClient.GenerateClient(); err != nil {
-		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	defer sshClient.Close()
+	unregisterCloser, registered := registerRuntimeCloser(func() {
+		_ = wsConn.Close()
+		sshClient.Close()
+	})
+	if !registered {
+		responseBody.Msg = errRuntimeShuttingDown.Error()
+		return &responseBody
+	}
+	defer unregisterCloser()
 
 	session, err := sshClient.Client.NewSession()
 	if err != nil {
-		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -245,7 +261,7 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -253,6 +269,8 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	done := make(chan struct{})
 	streamFinished := make(chan struct{})
 	defer close(streamFinished)
+	lifetimeDone := make(chan struct{})
+	defer close(lifetimeDone)
 	go func() {
 		defer close(done)
 		for {
@@ -261,11 +279,39 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 			}
 		}
 	}()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		lifetime := time.NewTimer(sysInfoNetMaxLifetime)
+		defer lifetime.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				wsWriteMu.Lock()
+				err := wsConn.WriteControl(websocket.PingMessage, []byte("webssh"), time.Now().Add(sysInfoNetWriteTimeout))
+				wsWriteMu.Unlock()
+				if err != nil {
+					_ = wsConn.Close()
+					return
+				}
+			case <-lifetime.C:
+				wsWriteMu.Lock()
+				_ = wsConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "monitor lifetime reached"), time.Now().Add(sysInfoNetWriteTimeout))
+				wsWriteMu.Unlock()
+				_ = wsConn.Close()
+				return
+			case <-done:
+				return
+			case <-lifetimeDone:
+				return
+			}
+		}
+	}()
 
 	cmd := `while :; do echo "===NET_MAIN==="; ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || echo ""; echo "===NET==="; cat /proc/net/dev 2>/dev/null | awk 'NR>2 {gsub(/:$/,"",$1); print $1" "$2" "$10}'; sleep 1; done`
 
 	if err := session.Start(cmd); err != nil {
-		writeSysInfoNetMessage(wsConn, &ResponseBody{Msg: err.Error()})
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -292,7 +338,7 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		prev = &prevCopy
 		snap = nil
 		body := &ResponseBody{Msg: "success", Data: data}
-		return writeSysInfoNetMessage(wsConn, body) == nil
+		return writeSysInfoNetMessage(wsConn, &wsWriteMu, body) == nil
 	}
 
 	for scanner.Scan() {
@@ -473,12 +519,19 @@ func parseSysInfo(raw string) map[string]interface{} {
 	return info
 }
 
-func writeSysInfoNetMessage(ws *websocket.Conn, body *ResponseBody) error {
+func writeSysInfoNetMessage(ws *websocket.Conn, writeMu *sync.Mutex, body *ResponseBody) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	return ws.WriteMessage(websocket.TextMessage, data)
+	if writeMu != nil {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+	}
+	_ = ws.SetWriteDeadline(time.Now().Add(sysInfoNetWriteTimeout))
+	err = ws.WriteMessage(websocket.TextMessage, data)
+	_ = ws.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func addNetSnapshotLine(snap *netSnapshot, line string) {

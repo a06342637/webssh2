@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
@@ -9,11 +10,14 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"webssh/controller"
 
@@ -265,7 +269,7 @@ func main() {
 		responseBody.Data = map[string]interface{}{
 			"savePass": savePass,
 		}
-		c.JSON(200, responseBody)
+		c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 	})
 	server.POST("/sysinfo", controller.SameOriginOnly(), func(c *gin.Context) {
 		if !gatewayAuth(c) {
@@ -273,7 +277,7 @@ func main() {
 		}
 		responseBody := controller.SysInfo(c)
 		if !c.IsAborted() {
-			c.JSON(200, responseBody)
+			c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 		}
 	})
 	server.GET("/sysinfo/net", func(c *gin.Context) {
@@ -291,7 +295,7 @@ func main() {
 			}
 			responseBody := controller.FileList(c)
 			if !c.IsAborted() {
-				c.JSON(200, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/session/close", func(c *gin.Context) {
@@ -300,7 +304,7 @@ func main() {
 			}
 			responseBody := controller.CloseSFTPSession(c)
 			if !c.IsAborted() {
-				c.JSON(http.StatusOK, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/download", func(c *gin.Context) {
@@ -314,6 +318,30 @@ func main() {
 				return
 			}
 			controller.PreviewFile(c)
+		})
+		file.POST("/preview/authorize", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.AuthorizeFilePreview(c)
+			if !c.IsAborted() {
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+			}
+		})
+		file.POST("/preview/revoke", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.RevokeFilePreview(c)
+			if !c.IsAborted() {
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+			}
+		})
+		file.GET("/preview/stream", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			controller.PreviewFileStream(c)
 		})
 		file.POST("/archive/prepare", func(c *gin.Context) {
 			if !gatewayAuth(c) {
@@ -346,7 +374,7 @@ func main() {
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.OpenFileForEdit(c)
 			if !c.IsAborted() {
-				c.JSON(http.StatusOK, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/edit/save", func(c *gin.Context) {
@@ -356,7 +384,7 @@ func main() {
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.SaveEditedFile(c)
 			if !c.IsAborted() {
-				c.JSON(http.StatusOK, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/delete", func(c *gin.Context) {
@@ -366,7 +394,7 @@ func main() {
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.DeleteFile(c)
 			if !c.IsAborted() {
-				c.JSON(http.StatusOK, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/rename", func(c *gin.Context) {
@@ -376,7 +404,7 @@ func main() {
 			c.Header("Cache-Control", "no-store")
 			responseBody := controller.RenameFile(c)
 			if !c.IsAborted() {
-				c.JSON(http.StatusOK, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/upload", func(c *gin.Context) {
@@ -385,7 +413,7 @@ func main() {
 			}
 			responseBody := controller.UploadFile(c)
 			if !c.IsAborted() {
-				c.JSON(200, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.POST("/remote", func(c *gin.Context) {
@@ -394,7 +422,7 @@ func main() {
 			}
 			responseBody := controller.RemoteDownloadFile(c)
 			if !c.IsAborted() {
-				c.JSON(200, responseBody)
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
 		file.GET("/progress", func(c *gin.Context) {
@@ -422,16 +450,50 @@ func main() {
 
 	fmt.Printf("🚀 WebSSH server starting on port %d\n", *port)
 	fmt.Printf("🌐 Open http://localhost:%d in your browser\n", *port)
+	runtimeCtx, cancelRuntime := context.WithCancel(context.Background())
+	defer cancelRuntime()
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *port),
 		Handler:           server,
+		BaseContext:       func(net.Listener) context.Context { return runtimeCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fmt.Println("WebSSH server stopped:", err)
-		os.Exit(1)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.ListenAndServe() }()
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Println("WebSSH server stopped:", err)
+			os.Exit(1)
+		}
+		return
+	case <-signalCtx.Done():
+		fmt.Println("WebSSH server is shutting down...")
+	}
+
+	controller.BeginRuntimeShutdown()
+	// Shutdown does not cancel active request contexts by itself. Cancel the
+	// server base context first so blocked SFTP/HTTP operations close their SSH
+	// transports and release pooled-session locks before the grace period ends.
+	cancelRuntime()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelShutdown()
+	backgroundDone := make(chan struct{})
+	go func() {
+		controller.ShutdownBackgroundTasks(shutdownCtx)
+		close(backgroundDone)
+	}()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		fmt.Println("WebSSH graceful shutdown timed out:", err)
+		_ = httpServer.Close()
+	}
+	select {
+	case <-backgroundDone:
+	case <-shutdownCtx.Done():
 	}
 }
 
@@ -441,7 +503,7 @@ func compressionMiddleware() gin.HandlerFunc {
 	// extra streaming layer, which can turn interrupted downloads into empty or
 	// corrupt files. Keep normal pages/API responses compressed, but pass the
 	// attachment response through unchanged.
-	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download", "/file/archive/download", "/file/preview"}))
+	return gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{"/file/download", "/file/archive/download", "/file/preview", "/file/preview/stream"}))
 }
 
 func securityHeaders() gin.HandlerFunc {
