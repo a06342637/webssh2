@@ -6645,12 +6645,59 @@ function syncRemoteEditorCodeScroll(editor) {
     }
 }
 
+function remoteEditorMinimapGeometry(editor, rect) {
+    if (!editor || !editor.textarea || !editor.minimapWrap) return null;
+    rect = rect || editor.minimapWrap.getBoundingClientRect();
+    var trackHeight = Math.max(1, rect.height - 4);
+    var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
+    var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
+    var cachedMapHeight = Number(editor._minimapMapHeight);
+    var mapHeight = isFinite(cachedMapHeight) && cachedMapHeight > 0
+        ? Math.min(trackHeight, cachedMapHeight)
+        : trackHeight;
+    // Keep a small amount of travel available for the handle when content only
+    // barely overflows the editor. The normal drawing path produces a taller map.
+    if (maxScroll > 0 && mapHeight <= 20 && trackHeight > 20) mapHeight = Math.min(trackHeight, 21);
+    var viewportHeight = maxScroll > 0
+        ? Math.max(Math.min(20, mapHeight), mapHeight * editor.textarea.clientHeight / scrollHeight)
+        : mapHeight;
+    viewportHeight = Math.min(mapHeight, viewportHeight);
+    return {
+        maxScroll: maxScroll,
+        trackHeight: trackHeight,
+        mapHeight: mapHeight,
+        viewportHeight: viewportHeight,
+        viewportTravel: Math.max(0, mapHeight - viewportHeight)
+    };
+}
+
+function syncRemoteEditorMinimapViewport(editor, rect) {
+    if (!editor || !editor.minimapWrap || !editor.textarea) return;
+    var geometry = remoteEditorMinimapGeometry(editor, rect);
+    if (!geometry) return;
+    var scrollRatio = geometry.maxScroll > 0
+        ? Math.max(0, Math.min(1, editor.textarea.scrollTop / geometry.maxScroll))
+        : 0;
+    var viewportTop = 2 + geometry.viewportTravel * scrollRatio;
+    var wrap = editor.minimapWrap;
+    wrap.classList.toggle('is-scrollable', geometry.maxScroll > 0);
+    wrap.classList.toggle('is-static', geometry.maxScroll <= 0);
+    wrap.title = geometry.maxScroll > 0 ? '拖动滑块快速滚动，点击缩略图可跳转' : '当前文件已完整显示，无需滚动';
+    wrap.setAttribute('aria-valuenow', geometry.maxScroll > 0 ? String(Math.round(scrollRatio * 100)) : '0');
+    wrap.setAttribute('aria-disabled', geometry.maxScroll > 0 ? 'false' : 'true');
+    if (editor.minimapViewport) {
+        editor.minimapViewport.style.top = viewportTop + 'px';
+        editor.minimapViewport.style.height = geometry.viewportHeight + 'px';
+    }
+}
+
 function drawRemoteEditorMinimap(editor, redrawContent) {
     if (!editor || !editor.minimap || !editor.minimapWrap || !editor.textarea || !editor.el || !editor.el.classList.contains('is-active')) return;
     var canvas = editor.minimap;
     var wrap = editor.minimapWrap;
     var rect = wrap.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) return;
+    var trackHeight = Math.max(1, rect.height - 4);
     var ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     var width = Math.max(1, Math.round(rect.width * ratio));
     var height = Math.max(1, Math.round(rect.height * ratio));
@@ -6672,6 +6719,7 @@ function drawRemoteEditorMinimap(editor, redrawContent) {
         // Short files stay grouped at the top instead of being stretched over the
         // entire minimap. Long files are sampled down to the available height.
         var rowHeight = Math.max(1.2, Math.min(2.35, drawableHeight / sampledRows));
+        editor._minimapMapHeight = Math.min(trackHeight, Math.max(21, sampledRows * rowHeight + 2));
         var languageColor = editor.language && editor.language.id === 'html' ? '#fb923c' :
             (editor.language && editor.language.id === 'python' ? '#60a5fa' :
                 (editor.language && editor.language.id === 'css' ? '#c084fc' : '#67e8f9'));
@@ -6692,39 +6740,20 @@ function drawRemoteEditorMinimap(editor, redrawContent) {
         }
         editor._minimapDrawn = true;
     }
-    var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
-    var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
-    var trackHeight = Math.max(1, rect.height - 4);
-    var viewportHeight = maxScroll > 0 ? Math.max(20, trackHeight * editor.textarea.clientHeight / scrollHeight) : trackHeight;
-    viewportHeight = Math.min(trackHeight, viewportHeight);
-    var viewportTravel = Math.max(0, trackHeight - viewportHeight);
-    var viewportTop = 2 + (maxScroll > 0 ? viewportTravel * editor.textarea.scrollTop / maxScroll : 0);
-    wrap.classList.toggle('is-scrollable', maxScroll > 0);
-    wrap.classList.toggle('is-static', maxScroll <= 0);
-    wrap.title = maxScroll > 0 ? '拖动滑块快速滚动，点击缩略图可跳转' : '当前文件已完整显示，无需滚动';
-    wrap.setAttribute('aria-valuenow', maxScroll > 0 ? String(Math.round(editor.textarea.scrollTop / maxScroll * 100)) : '0');
-    wrap.setAttribute('aria-disabled', maxScroll > 0 ? 'false' : 'true');
-    if (editor.minimapViewport) {
-        editor.minimapViewport.style.top = viewportTop + 'px';
-        editor.minimapViewport.style.height = viewportHeight + 'px';
-    }
+    syncRemoteEditorMinimapViewport(editor, rect);
 }
 
 function scrollRemoteEditorFromMinimap(editor, clientY, dragOffset) {
     if (!editor || !editor.minimapWrap || !editor.textarea) return;
     var rect = editor.minimapWrap.getBoundingClientRect();
-    var maxScroll = Math.max(0, editor.textarea.scrollHeight - editor.textarea.clientHeight);
-    if (maxScroll <= 0) return;
-    var trackHeight = Math.max(1, rect.height - 4);
-    var scrollHeight = Math.max(editor.textarea.clientHeight, editor.textarea.scrollHeight);
-    var viewportHeight = Math.min(trackHeight, Math.max(20, trackHeight * editor.textarea.clientHeight / scrollHeight));
-    var viewportTravel = Math.max(1, trackHeight - viewportHeight);
-    if (!isFinite(dragOffset)) dragOffset = viewportHeight / 2;
+    var geometry = remoteEditorMinimapGeometry(editor, rect);
+    if (!geometry || geometry.maxScroll <= 0) return;
+    if (!isFinite(dragOffset)) dragOffset = geometry.viewportHeight / 2;
     var viewportTop = clientY - rect.top - 2 - dragOffset;
-    var ratio = Math.max(0, Math.min(1, viewportTop / viewportTravel));
-    editor.textarea.scrollTop = ratio * maxScroll;
+    var ratio = Math.max(0, Math.min(1, viewportTop / Math.max(1, geometry.viewportTravel)));
+    editor.textarea.scrollTop = ratio * geometry.maxScroll;
     syncRemoteEditorCodeScroll(editor);
-    drawRemoteEditorMinimap(editor, false);
+    syncRemoteEditorMinimapViewport(editor, rect);
 }
 
 function setupRemoteEditorMinimap(editor) {
@@ -6763,7 +6792,7 @@ function setupRemoteEditorMinimap(editor) {
         if (maxScroll <= 0) return;
         editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, editor.textarea.scrollTop + event.deltaY));
         syncRemoteEditorCodeScroll(editor);
-        drawRemoteEditorMinimap(editor, false);
+        syncRemoteEditorMinimapViewport(editor);
         event.preventDefault();
     }, { passive: false });
     wrap.addEventListener('keydown', function (event) {
@@ -6779,7 +6808,7 @@ function setupRemoteEditorMinimap(editor) {
         else return;
         editor.textarea.scrollTop = Math.max(0, Math.min(maxScroll, next));
         syncRemoteEditorCodeScroll(editor);
-        drawRemoteEditorMinimap(editor, false);
+        syncRemoteEditorMinimapViewport(editor);
         event.preventDefault();
     });
 }
@@ -6937,7 +6966,7 @@ function createRemoteEditorElement(editor) {
         });
         editor.textarea.addEventListener('scroll', function () {
             syncRemoteEditorCodeScroll(editor);
-            drawRemoteEditorMinimap(editor, false);
+            syncRemoteEditorMinimapViewport(editor);
         });
         editor.textarea.addEventListener('keydown', function (event) {
             if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {

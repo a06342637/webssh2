@@ -1330,16 +1330,20 @@ test('remote text workbench detects common languages and escapes highlighted sou
 test('remote text workbench includes a lightweight synchronized minimap', () => {
     const createSource = extractFunction('createRemoteEditorElement');
     const drawSource = extractFunction('drawRemoteEditorMinimap');
+    const geometrySource = extractFunction('remoteEditorMinimapGeometry');
+    const viewportSource = extractFunction('syncRemoteEditorMinimapViewport');
     const scrollSource = extractFunction('scrollRemoteEditorFromMinimap');
     const setupSource = extractFunction('setupRemoteEditorMinimap');
     const destroySource = extractFunction('destroyRemoteEditor');
     assert.match(createSource, /remote-editor-minimap-wrap/);
     assert.match(createSource, /remote-editor-minimap/);
     assert.match(createSource, /remote-editor-minimap-viewport/);
-    assert.match(drawSource, /textarea\.scrollTop/);
-    assert.match(drawSource, /viewportHeight/);
+    assert.match(viewportSource, /textarea\.scrollTop/);
+    assert.match(drawSource, /_minimapMapHeight/);
     assert.match(drawSource, /rowIndex \* rowHeight/);
-    assert.match(drawSource, /classList\.toggle\('is-scrollable'/);
+    assert.match(geometrySource, /mapHeight/);
+    assert.match(viewportSource, /classList\.toggle\('is-scrollable'/);
+    assert.match(viewportSource, /aria-valuenow/);
     assert.match(scrollSource, /textarea\.scrollTop =/);
     assert.match(setupSource, /setPointerCapture/);
     assert.match(setupSource, /releasePointerCapture/);
@@ -1353,19 +1357,83 @@ test('remote text workbench includes a lightweight synchronized minimap', () => 
 test('remote minimap drag maps its visible handle to the editor scroll range', () => {
     const textarea = { scrollHeight: 1000, clientHeight: 200, scrollTop: 0 };
     const sandbox = loadFunctions(
-        ['scrollRemoteEditorFromMinimap'],
+        ['remoteEditorMinimapGeometry', 'syncRemoteEditorMinimapViewport', 'scrollRemoteEditorFromMinimap'],
         {
             syncRemoteEditorCodeScroll: () => {},
-            drawRemoteEditorMinimap: () => {},
             isFinite,
+            Number,
+            Math,
         },
     );
     const editor = {
         textarea,
-        minimapWrap: { getBoundingClientRect: () => ({ top: 100, height: 200 }) },
+        _minimapMapHeight: 100,
+        minimapWrap: {
+            getBoundingClientRect: () => ({ top: 100, height: 200 }),
+            classList: { toggle() {} },
+            setAttribute() {},
+        },
+        minimapViewport: { style: {} },
     };
-    sandbox.scrollRemoteEditorFromMinimap(editor, 200, 20);
+    sandbox.scrollRemoteEditorFromMinimap(editor, 152, 10);
     assert.ok(textarea.scrollTop > 390 && textarea.scrollTop < 410);
+});
+
+test('remote minimap handle stays inside the height occupied by short-file content', () => {
+    const attributes = {};
+    const textarea = { clientHeight: 200, scrollHeight: 1000, scrollTop: 800 };
+    const sandbox = loadFunctions(
+        ['remoteEditorMinimapGeometry', 'syncRemoteEditorMinimapViewport'],
+        { isFinite, Number, Math },
+    );
+    const editor = {
+        textarea,
+        _minimapMapHeight: 100,
+        minimapWrap: {
+            getBoundingClientRect: () => ({ width: 50, height: 200 }),
+            classList: { toggle() {} },
+            setAttribute: (name, value) => { attributes[name] = value; },
+        },
+        minimapViewport: { style: {} },
+    };
+
+    sandbox.syncRemoteEditorMinimapViewport(editor);
+
+    const top = parseFloat(editor.minimapViewport.style.top);
+    const height = parseFloat(editor.minimapViewport.style.height);
+    assert.equal(attributes['aria-valuenow'], '100');
+    assert.ok(top > 2);
+    assert.ok(Math.abs(top + height - 102) < 0.001);
+});
+
+test('remote minimap records the actual drawn height for a short scrollable file', () => {
+    const lines = Array.from({ length: 20 }, (_, index) => 'line ' + index).join('\n');
+    const context = {
+        setTransform() {}, clearRect() {}, fillRect() {},
+        set globalAlpha(value) { this._globalAlpha = value; },
+        set fillStyle(value) { this._fillStyle = value; },
+    };
+    const sandbox = loadFunctions(
+        ['remoteEditorMinimapGeometry', 'syncRemoteEditorMinimapViewport', 'drawRemoteEditorMinimap'],
+        { window: { devicePixelRatio: 1 }, isFinite, Number, Math },
+    );
+    const editor = {
+        textarea: { value: lines, clientHeight: 100, scrollHeight: 400, scrollTop: 0 },
+        el: { classList: { contains: (name) => name === 'is-active' } },
+        minimap: { width: 0, height: 0, getContext: () => context },
+        minimapWrap: {
+            getBoundingClientRect: () => ({ width: 50, height: 200 }),
+            classList: { toggle() {} },
+            setAttribute() {},
+        },
+        minimapViewport: { style: {} },
+        language: { id: 'text' },
+    };
+
+    sandbox.drawRemoteEditorMinimap(editor, true);
+
+    assert.ok(editor._minimapMapHeight > 20);
+    assert.ok(editor._minimapMapHeight < 196);
 });
 
 test('remote minimap scrolling reuses its cached drawing for large files', () => {
@@ -1376,13 +1444,16 @@ test('remote minimap scrolling reuses its cached drawing for large files', () =>
         scrollTop: 400,
         get value() { throw new Error('scrolling reparsed the complete file'); },
     };
-    const sandbox = loadFunctions(['drawRemoteEditorMinimap'], {
+    const sandbox = loadFunctions(['remoteEditorMinimapGeometry', 'syncRemoteEditorMinimapViewport', 'drawRemoteEditorMinimap'], {
         window: { devicePixelRatio: 1 },
+        isFinite,
+        Number,
         Math,
     });
     const editor = {
         textarea,
         _minimapDrawn: true,
+        _minimapMapHeight: 196,
         el: { classList: { contains: (name) => name === 'is-active' } },
         minimap: { width: 50, height: 200 },
         minimapWrap: {
@@ -1409,7 +1480,7 @@ test('large remote files switch to a native low-overhead editing mode', () => {
     assert.match(inputSource, /editor\._metricsTimer = setTimeout/);
     assert.match(inputSource, /editor\.highlightCode\.textContent = ''/);
     assert.match(decorationSource, /if \(largeFileMode\)[\s\S]*classList\.add\('highlight-disabled'\)[\s\S]*return;/);
-    assert.match(createSource, /drawRemoteEditorMinimap\(editor, false\)/);
+    assert.match(createSource, /syncRemoteEditorMinimapViewport\(editor\)/);
     assert.match(styleSource, /\.remote-editor-document\.is-large-file \.remote-editor-gutter/);
     assert.match(styleSource, /\.remote-editor-document\.is-large-file \.remote-editor-minimap-wrap/);
     assert.match(styleSource, /\.remote-editor-document\.highlight-disabled \.remote-editor-highlight\{display:none\}/);
