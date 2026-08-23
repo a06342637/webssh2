@@ -39,13 +39,13 @@
             if (theme !== 'dark' && theme !== 'light' && theme !== 'auto') theme = 'dark';
             if (theme === 'auto') root.removeAttribute('data-theme');
             else root.setAttribute('data-theme', theme);
-            // Zoom (applied to body – set via CSS variable on html so body inherits)
+            // Zoom applies only to the terminal workspace; login/settings controls stay at normal size
             var zoom = Number(s.zoom);
             if (Number.isFinite(zoom) && zoom >= 50 && zoom <= 200 && zoom !== 100) {
                 var zoomRatio = (zoom / 100).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
                 root.style.setProperty('--init-zoom', zoomRatio);
                 var zoomStyle = document.createElement('style');
-                zoomStyle.textContent = 'body{zoom:' + zoomRatio + '}';
+                zoomStyle.textContent = '#terminalView{zoom:' + zoomRatio + '}';
                 document.head.appendChild(zoomStyle);
             }
             // Background color
@@ -219,6 +219,10 @@
         <div class="login-layout">
             <div class="login-container">
                 <div class="glass-card login-card animate-in">
+                    <button type="button" class="back-to-sessions" id="backToSessionsBtn" onclick="backToSessions()" title="返回已打开的会话">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                        <span>返回会话</span>
+                    </button>
                     <div class="card-header">
                         <div class="logo-container">
                             <div class="logo-ring">
@@ -229,6 +233,16 @@
                         <p class="subtitle">安全的远程终端连接</p>
                     </div>
                     <form id="loginForm" class="form-body" autocomplete="off">
+                        <div class="proto-tabs" id="protoTabs">
+                            <button type="button" class="proto-tab active" data-proto="ssh" onclick="switchProtocol('ssh')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M4 17l6-6-6-6M12 19h8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                <span>SSH 终端</span>
+                            </button>
+                            <button type="button" class="proto-tab" data-proto="rdp" onclick="switchProtocol('rdp')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h4M7 11h7"/></svg>
+                                <span>RDP 远程桌面</span>
+                            </button>
+                        </div>
                         <div class="input-group">
                             <div class="input-row">
                                 <div class="input-field flex-3">
@@ -247,14 +261,14 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="input-field">
+                        <div class="input-field" id="usernameField">
                             <label>用户名</label>
                             <div class="input-wrapper">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                                 <input type="text" id="username" placeholder="root" value="root" required>
                             </div>
                         </div>
-                        <div class="auth-tabs">
+                        <div class="auth-tabs ssh-only">
                             <button type="button" class="auth-tab active" data-tab="password" onclick="switchAuthTab('password')">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>密码
                             </button>
@@ -274,7 +288,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div id="keyAuth" class="auth-panel">
+                        <div id="keyAuth" class="auth-panel ssh-only">
                             <div class="input-field">
                                 <label>私钥内容</label>
                                 <textarea id="privateKey" placeholder="粘贴私钥..." rows="3"></textarea>
@@ -287,12 +301,27 @@
                                 </div>
                             </div>
                         </div>
-                        <label class="checkbox-field" for="enableProxy">
+                        <div class="rdp-only rdp-quick-row" id="rdpQuickRow">
+                            <button type="button" class="rdp-settings-btn" onclick="openRdpSettings()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                                远程桌面设置
+                            </button>
+                            <span class="rdp-quick-summary" id="rdpQuickSummary">适应窗口 · 直连</span>
+                        </div>
+                        <label class="checkbox-field rdp-only rdp-window-row" for="rdpOpenInNewWindow" id="rdpNewWindowRow">
+                            <input type="checkbox" id="rdpOpenInNewWindow" onchange="saveRdpWindowPreference()">
+                            <span class="checkbox-custom"></span>
+                            <span class="rdp-window-label">
+                                在独立窗口中打开
+                                <small id="rdpNewWindowHint">从桌面快捷方式启动时，新窗口不带任何浏览器外壳</small>
+                            </span>
+                        </label>
+                        <label class="checkbox-field ssh-only" for="enableProxy">
                             <input type="checkbox" id="enableProxy" onchange="toggleProxyPanel()">
                             <span class="checkbox-custom"></span>
                             <span>使用 SOCKS5 代理</span>
                         </label>
-                        <div id="proxyPanel" class="proxy-panel">
+                        <div id="proxyPanel" class="proxy-panel ssh-only">
                             <div class="input-row">
                                 <div class="input-field flex-3">
                                     <label>代理地址</label>
@@ -377,11 +406,11 @@
             <div class="topbar-metrics" id="topbarMetrics"></div>
             <div class="topbar-right">
                 <!-- Font size controls -->
-                <button class="tb-btn" onclick="changeFontSize(-1)" title="缩小字体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
-                <span class="font-size-label" id="fontSizeLabel">15</span>
-                <button class="tb-btn" onclick="changeFontSize(1)" title="放大字体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
+                <button class="tb-btn term-only" onclick="changeFontSize(-1)" title="缩小字体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
+                <span class="font-size-label term-only" id="fontSizeLabel">15</span>
+                <button class="tb-btn term-only" onclick="changeFontSize(1)" title="放大字体"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
                 <!-- Color picker -->
-                <div class="color-picker-wrap">
+                <div class="color-picker-wrap term-only">
                     <button class="tb-btn" onclick="toggleColorPicker()" title="终端颜色" id="colorPickerBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="13.5" cy="6.5" r="2.5" fill="#ff006e" stroke="none"/><circle cx="17.5" cy="10.5" r="2.5" fill="#00d4ff" stroke="none"/><circle cx="8.5" cy="10.5" r="2.5" fill="#00ff88" stroke="none"/><circle cx="6.5" cy="6.5" r="2.5" fill="#ffbe0b" stroke="none"/><path d="M12 22c-5.52 0-10-4.48-10-10S6.48 2 12 2s10 4.48 10 10-1.12 4-2.5 4H18c-1.1 0-2 .9-2 2 0 .55.23 1.05.59 1.41.36.36.59.86.59 1.41 0 1.1-.9 1.18-2 1.18z"/></svg></button>
                     <div class="color-panel glass-card" id="colorPanel">
                         <div class="color-section">
@@ -404,16 +433,18 @@
                 </div>
                 <div class="topbar-sep"></div>
                 <!-- Copy / Paste -->
-                <button class="tb-btn" onclick="termCopy()" title="复制选中 (Ctrl+Shift+C)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
-                <button class="tb-btn" onclick="termPaste()" title="粘贴 (Ctrl+Shift+V)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg></button>
+                <button class="tb-btn term-only" onclick="termCopy()" title="复制选中 (Ctrl+Shift+C)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
+                <button class="tb-btn term-only" onclick="termPaste()" title="粘贴 (Ctrl+Shift+V)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg></button>
                 <div class="topbar-sep"></div>
-                <button class="tb-btn" onclick="toggleScriptDrawer()" title="脚本书签"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
-                <button class="tb-btn" onclick="toggleSftp()" title="SFTP"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></button>
-                <button class="tb-btn" onclick="reconnectTab()" title="重连"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg></button>
+                <button class="tb-btn term-only" onclick="toggleScriptDrawer()" title="脚本书签"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
+                <button class="tb-btn term-only" onclick="toggleSftp()" title="SFTP"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg></button>
+                <button class="tb-btn rdp-tb-only" onclick="toggleRdpFullscreen()" title="全屏 (F11)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M8 3H5a2 2 0 00-2 2v3M21 8V5a2 2 0 00-2-2h-3M3 16v3a2 2 0 002 2h3M16 21h3a2 2 0 002-2v-3"/></svg></button><button class="tb-btn rdp-tb-only" onclick="openRdpSettings()" title="远程桌面设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg></button><button class="tb-btn" onclick="reconnectTab()" title="重连"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg></button>
                 <button class="tb-btn danger" onclick="closeActiveTab()" title="断开"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M18.36 6.64a9 9 0 11-12.73 0M12 2v10"/></svg></button>
             </div>
         </div>
         <div class="term-main">
+            <!-- RDP 沉浸模式下顶部栏自动隐藏，这条细提示是它的落点 -->
+            <div class="rdp-bar-hotzone" id="rdpBarHotzone"></div>
             <div class="term-body" id="terminalContainer"></div>
             <!-- Command Input Bar -->
             <div class="cmd-bar">
@@ -652,21 +683,278 @@
     </div>
 
     <!-- Quick Connect Dialog -->
+    <!-- New Connection Dialog（协议由当前会话锁定，不允许在弹窗内切换） -->
     <div class="modal-overlay" id="addTabModal">
-        <div class="glass-card modal-card">
-            <div class="drawer-hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span>新建 SSH 连接</span></div>
-            <div class="modal-body">
+        <div class="glass-card modal-card add-tab-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span id="addTabTitle">新建 SSH 连接</span></span>
+                <button class="settings-close" type="button" onclick="hideAddTab()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body add-tab-body">
                 <div class="input-row">
-                    <div class="input-field flex-3"><input type="text" id="newTabHost" placeholder="IPv4、IPv6 或域名" class="script-input"></div>
-                    <div class="input-field flex-1"><input type="number" id="newTabPort" value="22" class="script-input"></div>
+                    <div class="input-field flex-3">
+                        <label>主机地址</label>
+                        <div class="input-wrapper">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                            <input type="text" id="newTabHost" placeholder="IPv4、IPv6 或域名">
+                        </div>
+                    </div>
+                    <div class="input-field flex-1">
+                        <label>端口</label>
+                        <div class="input-wrapper">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4"/></svg>
+                            <input type="number" id="newTabPort" value="22" min="1" max="65535">
+                        </div>
+                    </div>
                 </div>
-                <div class="input-row">
-                    <div class="input-field flex-1"><input type="text" id="newTabUser" value="root" placeholder="用户名" class="script-input"></div>
-                    <div class="input-field flex-1"><input type="password" id="newTabPass" placeholder="密码" class="script-input"></div>
+                <div class="input-field">
+                    <label>用户名</label>
+                    <div class="input-wrapper">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        <input type="text" id="newTabUser" value="root" placeholder="root">
+                    </div>
                 </div>
+                <div class="auth-tabs add-tab-ssh-only">
+                    <button type="button" class="auth-tab active" data-attab="password" onclick="switchAddTabAuth('password')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>密码
+                    </button>
+                    <button type="button" class="auth-tab" data-attab="key" onclick="switchAddTabAuth('key')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>密钥
+                    </button>
+                </div>
+                <div id="newTabPasswordPane" class="auth-panel active">
+                    <div class="input-field">
+                        <label>密码</label>
+                        <div class="input-wrapper">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                            <input type="password" id="newTabPass" placeholder="输入密码">
+                        </div>
+                    </div>
+                </div>
+                <div id="newTabKeyPane" class="auth-panel add-tab-ssh-only">
+                    <div class="input-field">
+                        <label>私钥内容</label>
+                        <textarea id="newTabKey" placeholder="粘贴私钥..." rows="3"></textarea>
+                    </div>
+                    <div class="input-field">
+                        <label>私钥密码 (可选)</label>
+                        <div class="input-wrapper">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                            <input type="password" id="newTabPassphrase" placeholder="可选">
+                        </div>
+                    </div>
+                </div>
+                <label class="checkbox-field" for="newTabRelayOn">
+                    <input type="checkbox" id="newTabRelayOn" onchange="toggleAddTabRelay()">
+                    <span class="checkbox-custom"></span>
+                    <span id="newTabRelayLabel">使用 SOCKS5 代理</span>
+                </label>
+                <div class="proxy-panel" id="newTabRelayPanel">
+                    <div class="input-row add-tab-rdp-only" id="newTabRelayKindRow">
+                        <div class="input-field flex-1">
+                            <label>中转方式</label>
+                            <select id="newTabRelayKind" class="rdp-select" onchange="onAddTabRelayKindChange()">
+                                <option value="socks5">SOCKS5 代理</option>
+                                <option value="ssh">SSH 跳板</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-field flex-3">
+                            <label>地址</label>
+                            <div class="input-wrapper"><input type="text" id="newTabRelayHost" placeholder="127.0.0.1"></div>
+                        </div>
+                        <div class="input-field flex-1">
+                            <label>端口</label>
+                            <div class="input-wrapper"><input type="number" id="newTabRelayPort" value="1080"></div>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-field flex-1">
+                            <label>用户名 (可选)</label>
+                            <div class="input-wrapper"><input type="text" id="newTabRelayUser" placeholder="可选"></div>
+                        </div>
+                        <div class="input-field flex-1">
+                            <label>密码 (可选)</label>
+                            <div class="input-wrapper"><input type="password" id="newTabRelayPass" placeholder="可选"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="add-tab-rdp-only rdp-quick-row" id="newTabRdpSettingsRow">
+                    <button type="button" class="rdp-settings-btn" onclick="openRdpSettings()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                        远程桌面设置
+                    </button>
+                    <span class="rdp-quick-summary" id="newTabRdpSummary"></span>
+                </div>
+            </div>
+            <div class="modal-body" style="padding-top:0">
                 <div class="input-row" style="gap:6px">
                     <button class="drawer-add" style="flex:1;margin:0" onclick="addNewTab()">连接</button>
                     <button class="drawer-add" style="flex:1;margin:0;border-style:solid" onclick="hideAddTab()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- RDP Settings Dialog -->
+    <div class="modal-overlay" id="rdpSettingsModal">
+        <div class="glass-card modal-card rdp-settings-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>远程桌面设置</span>
+                <button class="settings-close" type="button" onclick="closeRdpSettings()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="rdp-tabs">
+                <button type="button" class="rdp-tab active" data-rtab="display" onclick="switchRdpTab('display')">显示</button>
+                <button type="button" class="rdp-tab" data-rtab="relay" onclick="switchRdpTab('relay')">中转</button>
+                <button type="button" class="rdp-tab" data-rtab="input" onclick="switchRdpTab('input')">输入与剪贴板</button>
+            </div>
+            <div class="modal-body rdp-settings-body">
+
+                <div class="rdp-pane active" data-rpane="display">
+                    <div class="rdp-row">
+                        <label class="rdp-label">分辨率</label>
+                        <select id="rdpResolution" class="rdp-select" onchange="onRdpResolutionChange()">
+                            <option value="fit">适应窗口（推荐）</option>
+                            <option value="1920x1080">1920 × 1080</option>
+                            <option value="1600x900">1600 × 900</option>
+                            <option value="1440x900">1440 × 900</option>
+                            <option value="1366x768">1366 × 768</option>
+                            <option value="1280x800">1280 × 800</option>
+                            <option value="1280x720">1280 × 720</option>
+                            <option value="1024x768">1024 × 768</option>
+                            <option value="custom">自定义…</option>
+                        </select>
+                    </div>
+                    <div class="rdp-row rdp-custom-size" id="rdpCustomSizeRow">
+                        <label class="rdp-label">自定义</label>
+                        <div class="rdp-size-inputs">
+                            <input type="number" id="rdpCustomWidth" class="rdp-input" min="640" max="4096" step="2" value="1280" placeholder="宽">
+                            <span class="rdp-size-x">×</span>
+                            <input type="number" id="rdpCustomHeight" class="rdp-input" min="480" max="2160" step="2" value="720" placeholder="高">
+                        </div>
+                    </div>
+
+                    <label class="checkbox-field" for="rdpStartFullscreen">
+                        <input type="checkbox" id="rdpStartFullscreen">
+                        <span class="checkbox-custom"></span>
+                        <span>全屏启动会话</span>
+                    </label>
+                    <label class="checkbox-field" for="rdpDynamicResize">
+                        <input type="checkbox" id="rdpDynamicResize" checked>
+                        <span class="checkbox-custom"></span>
+                        <span>在调整大小时更新会话分辨率</span>
+                    </label>
+                    <div class="rdp-hint">仅在连接到 Windows 8.1 / Server 2012 R2 及更高版本时可用。关闭后画面会按连接时的分辨率缩放显示。</div>
+
+                    <div class="rdp-row">
+                        <label class="rdp-label">缩放方式</label>
+                        <select id="rdpScaleMode" class="rdp-select">
+                            <option value="fit">等比适应（保持比例）</option>
+                            <option value="stretch">拉伸填满</option>
+                            <option value="none">1:1 原始像素</option>
+                        </select>
+                    </div>
+                    <div class="rdp-hint">「在调整大小时更新会话分辨率」开启时，缩放方式只在重连前的过渡阶段生效。</div>
+
+                    <label class="checkbox-field" for="rdpHiDpi">
+                        <input type="checkbox" id="rdpHiDpi">
+                        <span class="checkbox-custom"></span>
+                        <span>针对高分屏优化（按设备像素比请求分辨率）</span>
+                    </label>
+                    <div class="rdp-hint">会让远端按物理像素输出，画面更锐利，但带宽和解码开销明显增加。</div>
+
+                    <label class="checkbox-field" for="rdpAutoHideToolbar">
+                        <input type="checkbox" id="rdpAutoHideToolbar" checked>
+                        <span class="checkbox-custom"></span>
+                        <span>自动隐藏顶部工具栏</span>
+                    </label>
+                    <div class="rdp-hint">开启后画面独占整个窗口，把鼠标贴到屏幕顶边停一下，工具栏会滑出来。关掉则常驻显示。</div>
+                </div>
+
+                <div class="rdp-pane" data-rpane="relay">
+                    <div class="rdp-row">
+                        <label class="rdp-label">中转方式</label>
+                        <select id="rdpRelayKind" class="rdp-select" onchange="onRdpRelayKindChange()">
+                            <option value="none">直连（不中转）</option>
+                            <option value="socks5">SOCKS5 代理</option>
+                            <option value="ssh">SSH 跳板</option>
+                        </select>
+                    </div>
+                    <div class="rdp-relay-fields" id="rdpRelayFields">
+                        <div class="input-row">
+                            <div class="input-field flex-3">
+                                <label>中转地址</label>
+                                <div class="input-wrapper">
+                                    <input type="text" id="rdpRelayHost" placeholder="127.0.0.1">
+                                </div>
+                            </div>
+                            <div class="input-field flex-1">
+                                <label>端口</label>
+                                <div class="input-wrapper">
+                                    <input type="number" id="rdpRelayPort" value="1080" min="1" max="65535">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-field flex-1">
+                                <label id="rdpRelayUserLabel">用户名 (可选)</label>
+                                <div class="input-wrapper">
+                                    <input type="text" id="rdpRelayUser" placeholder="可选">
+                                </div>
+                            </div>
+                            <div class="input-field flex-1">
+                                <label>密码</label>
+                                <div class="input-wrapper">
+                                    <input type="password" id="rdpRelayPass" placeholder="可选">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="input-field rdp-ssh-only" id="rdpRelayKeyField">
+                            <label>私钥内容 (可选，填写后优先于密码)</label>
+                            <textarea id="rdpRelayKey" placeholder="粘贴私钥..." rows="3"></textarea>
+                        </div>
+                    </div>
+                    <div class="rdp-warn" id="rdpRelayWarn">
+                        <b>中转不等于加速。</b>多一跳只在直连线路本身劣质（高丢包、绕路）时才可能变快。
+                        另外 SSH 跳板会把 RDP 的 TCP 套进另一层 TCP，丢包时两层重传互相叠加，反而可能更卡——
+                        线路质量好的时候优先直连。
+                    </div>
+                    <label class="checkbox-field" for="rdpRememberRelay">
+                        <input type="checkbox" id="rdpRememberRelay">
+                        <span class="checkbox-custom"></span>
+                        <span>记住中转配置（仅保存在本浏览器）</span>
+                    </label>
+                </div>
+
+                <div class="rdp-pane" data-rpane="input">
+                    <label class="checkbox-field" for="rdpClipboard">
+                        <input type="checkbox" id="rdpClipboard" checked>
+                        <span class="checkbox-custom"></span>
+                        <span>启用剪贴板同步</span>
+                    </label>
+                    <div class="rdp-hint">浏览器读取剪贴板需要你在弹出的权限提示里放行，否则只有「远端 → 本地」方向可用。</div>
+
+                    <label class="checkbox-field" for="rdpUnicodeKeyboard">
+                        <input type="checkbox" id="rdpUnicodeKeyboard" checked>
+                        <span class="checkbox-custom"></span>
+                        <span>使用 Unicode 输入（中文输入法友好）</span>
+                    </label>
+                    <div class="rdp-hint">关闭后走扫描码，游戏和快捷键更准；开启后中文/表情等直接输入更方便。</div>
+
+                    <label class="checkbox-field" for="rdpGrabKeys">
+                        <input type="checkbox" id="rdpGrabKeys" checked>
+                        <span class="checkbox-custom"></span>
+                        <span>全屏时接管系统快捷键</span>
+                    </label>
+                    <div class="rdp-hint">依赖浏览器的 Keyboard Lock 能力，可让 Alt+Tab、Win 键等发送到远端。部分浏览器不支持。</div>
+                </div>
+
+            </div>
+            <div class="modal-body" style="padding-top:0">
+                <div class="input-row" style="gap:6px">
+                    <button class="drawer-add" style="flex:1;margin:0" onclick="saveRdpSettings()">保存</button>
+                    <button class="drawer-add" style="flex:1;margin:0;border-style:solid" onclick="closeRdpSettings()">取消</button>
                 </div>
             </div>
         </div>
@@ -1134,5 +1422,6 @@
     <script src="/static/vendor/xterm/xterm-addon-web-links.min.js?v=0.9.0"></script>
     <script>window.__WEBSSH_APP_VERSION__ = "__APP_VERSION__"; window.__WEBSSH_TERMINAL_WS_URL__ = __TERMINAL_WEBSOCKET_URL__;</script>
     <script src="/static/js/app.js?v=__APP_VERSION__"></script>
+    <script src="/static/js/rdp.js?v=__APP_VERSION__"></script>
 </body>
 </html>

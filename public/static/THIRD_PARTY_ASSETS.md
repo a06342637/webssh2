@@ -1,4 +1,4 @@
-﻿# Bundled third-party web assets
+# Bundled third-party web assets
 
 These files are committed under `public/static` and embedded into the WebSSH
 binary at build time. The browser does not need a CDN connection.
@@ -8,6 +8,7 @@ binary at build time. The browser does not need a CDN connection.
 | xterm.js | 5.3.0 | `vendor/xterm/xterm.min.css`, `vendor/xterm/xterm.min.js` | `xterm` |
 | xterm FitAddon | 0.8.0 | `vendor/xterm/xterm-addon-fit.min.js` | `xterm-addon-fit` |
 | xterm WebLinksAddon | 0.9.0 | `vendor/xterm/xterm-addon-web-links.min.js` | `xterm-addon-web-links` |
+| IronRDP WASM | 1.1.0 | `vendor/ironrdp/rdp_client.js`, `vendor/ironrdp/rdp_client_bg.wasm` | `ironrdp-wasm` |
 | JetBrains Mono | 5.2.5 package snapshot | `fonts/jetbrains-mono-{400,700}.woff2` | `@fontsource/jetbrains-mono` |
 | Noto Sans SC | 5.2.8 package snapshot | `fonts/noto-sans-sc-{400,700}.woff2` | `@fontsource/noto-sans-sc` |
 
@@ -21,6 +22,8 @@ fonts under the SIL Open Font License 1.1.
 ```text
 d9f1c41f4bc5e27c3e1d91008d54f131e744044ec69ef7f3f470e414a8bfd241  vendor/xterm/xterm-addon-fit.min.js
 dcf829e4177c5a994ad533824c7440dd28ef47c6482039c7d6896a9b1f115183  vendor/xterm/xterm-addon-web-links.min.js
+3F39FD9B5CFFCBF1D37D7ADB186F4580E41CFFFC4288CECCA7231E95A9F86167  vendor/ironrdp/rdp_client.js
+0E22CF04DF744A34DB2C8A4AEE703C0AB0CAB1B05393B3FBF72AFF3640E608E7  vendor/ironrdp/rdp_client_bg.wasm
 7d3fba9c8eac69c33ee4122ba049498126bdf3dfb4cbdd8095f9e2fa72d0b79c  vendor/xterm/xterm.min.css
 73ddd59a8d7f68fd16d4ff2551c6bf45d5d5e6341481c0a0b76133384355ee54  vendor/xterm/xterm.min.js
 14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb  fonts/jetbrains-mono-400.woff2

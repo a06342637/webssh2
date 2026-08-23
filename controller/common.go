@@ -35,6 +35,9 @@ const (
 	websocketInitLimit          = 128 << 10
 	websocketTerminalInputLimit = 4 << 20
 	websocketInitTimeout        = 15 * time.Second
+	// RDP 帧是 TLS 记录切片后的原始字节，单帧不会很大，
+	// 但要给证书交换和大块位图更新留出余量。
+	websocketRDPFrameLimit = 8 << 20
 )
 
 const trustScopeCookieName = "webssh_trust_scope"
@@ -261,7 +264,7 @@ func ResponseHTTPStatus(body *ResponseBody) int {
 		return http.StatusRequestTimeout
 	case strings.Contains(message, "failed to connect"), strings.Contains(message, "connection refused"), strings.Contains(message, "network is unreachable"), strings.Contains(message, "no route to host"), strings.Contains(message, "handshake failed"), strings.Contains(message, "remote server returned"):
 		return http.StatusBadGateway
-	case strings.Contains(message, "missing"), strings.Contains(message, "invalid"), strings.Contains(message, "unknown"), strings.Contains(message, "duplicate"), strings.Contains(message, "unsupported"), strings.Contains(message, "only "), strings.Contains(message, "cannot "), strings.Contains(message, "must "), strings.Contains(message, "不支持"):
+	case strings.Contains(message, "missing"), strings.Contains(message, "缺少"), strings.Contains(message, "invalid"), strings.Contains(message, "unknown"), strings.Contains(message, "duplicate"), strings.Contains(message, "unsupported"), strings.Contains(message, "only "), strings.Contains(message, "cannot "), strings.Contains(message, "must "), strings.Contains(message, "不支持"):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

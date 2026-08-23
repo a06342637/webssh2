@@ -7,6 +7,7 @@
 - IPv4、域名和 IPv6 SSH 登录；裸 IPv6 与带方括号 IPv6 均可识别
 - 密码、私钥及带口令私钥认证
 - SOCKS5 代理、多标签终端、SFTP 文件管理和系统信息监控
+- RDP 远程桌面：浏览器内 IronRDP WASM 客户端，画面不经服务端转码；支持窗口化全屏、真全屏、自定义分辨率，以及 SOCKS5/SSH 跳板中转
 - SFTP 多标签工作台：文件新建/在线编辑、图片/ICO/视频预览、删除、流式上传，以及带进度的文件/文件夹下载
 - 脚本名称/命令片段即时搜索
 - 彩色 Emoji 分类、分类筛选和分类增删改查
@@ -367,6 +368,76 @@ WEBSSH_ALLOW_PRIVATE_DOWNLOADS=true
 
 该开关会扩大服务端网络访问能力，请仅在受信环境使用。
 
+## RDP 远程桌面
+
+登录页顶部可以在 **SSH 终端 / RDP 远程桌面** 之间切换。切换后端口会在 22 与 3389 之间自动跟随，
+默认用户名在 `root` 与 `Administrator` 之间跟随——只在你没有手动改过时才跟随。
+
+### 架构：画面不经服务端转码
+
+```
+浏览器（IronRDP WASM 客户端） <--ws--> /rdp 网关 <--TCP/TLS--> Windows 主机
+```
+
+RDP 协议本身（含位图解码、CredSSP/NLA）全部在浏览器里完成，后端只做两件事：
+
+1. **RDCleanPath 握手**：代客户端建立 TCP 连接、转发 X.224 协商、完成 TLS 握手，
+   并把服务端证书链回传给浏览器（WASM 侧用它做 CredSSP 通道绑定）。
+2. **透明字节转发**：之后就是一条不做任何解析、不做缓冲合并的管道。
+
+和 Guacamole 那类方案相比，这里少了「服务端把 RDP 位图重新编码成 PNG/JPEG」这一轮，
+因此延迟更低、带宽更省；代价是解码发生在浏览器里，低端设备在高分辨率下会更吃 CPU。
+
+> TLS 版本被刻意限制在 **TLS 1.2**。CredSSP 的通道绑定依赖 TLS 1.2 的握手语义，
+> 协商到 TLS 1.3 时 Windows 会在 CredSSP 阶段回一个 internal error alert 直接掐断连接。
+> FreeRDP 等原生客户端同样这么处理。
+
+### 显示设置
+
+登录表单里的「远程桌面设置 → 显示」提供：
+
+| 选项 | 说明 |
+|---|---|
+| 分辨率 | 适应窗口（默认）/ 若干预设 / 自定义宽高 |
+| 全屏启动会话 | 连上后自动进入浏览器全屏 |
+| 在调整大小时更新会话分辨率 | 窗口变化时用 DVC 通知远端改分辨率，**需要 Windows 8.1 / Server 2012 R2 及以上** |
+| 缩放方式 | 等比适应 / 拉伸填满 / 1:1 原始像素 |
+| 针对高分屏优化 | 按 devicePixelRatio 请求分辨率，画面更锐利但带宽和解码开销明显增加 |
+
+会话工具栏上还有全屏按钮。全屏后可通过 Keyboard Lock 把 Alt+Tab、Win 键等交给远端，
+具体取决于浏览器支持情况。
+
+### 中转（SOCKS5 / SSH 跳板）
+
+「远程桌面设置 → 中转」可以让 RDP 流量先经过一跳：
+
+- **SOCKS5 代理**：填地址、端口和可选的用户名/密码
+- **SSH 跳板**：填跳板机地址和账号，支持密码或私钥；跳板机的主机密钥沿用 SSH 侧的 TOFU 策略
+
+**中转不等于加速。** 多一跳只在直连线路本身劣质（高丢包、绕路）时才可能变快；
+线路质量正常时中转只会增加延迟。另外 SSH 跳板会把 RDP 的 TCP 套进另一层 TCP，
+丢包时两层重传互相叠加，反而可能更卡。真要提速，优先考虑在中转节点上用 UDP 隧道或开 BBR。
+
+### 安全模型
+
+RDP 网关**不接受**从 WebSocket 直接指定目标——那样任何能打开页面的人都能拿它当开放 TCP 代理扫内网。
+实际流程是：
+
+1. 前端先 `POST /rdp/session` 提交目标和中转配置，服务端校验端口白名单后发一张
+   **一次性票据**（TTL 90 秒，用后即焚）。
+2. 票据作为 RDCleanPath 的 `proxy_auth` 字段传给 WASM 客户端。
+3. 网关握手时校验票据，并**只连票据里登记的目标**；WASM 报上来的 destination 仅用于核对。
+
+目标端口默认只放行 3389，需要非标端口时用 `WEBSSH_RDP_ALLOWED_PORTS` 显式配置。
+中转凭据只有在你勾选「记住中转配置」时才写入浏览器本地存储，且从不上传云端。
+
+### 已知限制
+
+- 音频重定向、打印机/驱动器重定向、多显示器尚未接入
+- 「颜色质量」「关闭壁纸/动画」等性能开关未提供：当前 WASM 客户端没有暴露对应的
+  RDP performance flags，做成开关只会是摆设
+- 需要 Windows 侧启用 NLA；仅支持 NTLM，Kerberos 未验证
+
 ## WebSocket 与 HTTP 安全配置
 
 - WebSocket 同时校验 Host 与 http/https scheme；所有状态变更接口（包括登录、注册、SSH 检查、系统信息和文件操作）要求可信 Origin/Referer。无 Origin/Referer 的非浏览器客户端仍允许。
@@ -523,6 +594,10 @@ go run . -a admin:password
 | `AUTH_INFO` / `authInfo` | 空 | 页面 Basic Auth，格式 `user:pass` |
 | `SAVE_PASS` / `savePass` | true | 是否在浏览器保存 SSH/SOCKS5 密码；设为 false 时不再写入并清除旧字段 |
 | `SHOW_FOOTER` / `showFooter` | true | 是否显示页脚 |
+| `WEBSSH_RDP_ALLOWED_PORTS` | 3389 | RDP 网关允许连接的目标端口白名单，逗号分隔。**放宽等于把网关变成 TCP 代理，务必谨慎** |
+| `WEBSSH_MAX_CONCURRENT_RDP` | 16 | 全局并发 RDP 会话上限 |
+| `WEBSSH_MAX_CONCURRENT_RDP_PER_CLIENT` | 4 | 单客户端并发 RDP 会话上限 |
+| `WEBSSH_RDP_DEBUG` | false | 打印 RDP 握手与转发层日志，排障用 |
 | `WEBSSH_ADMIN_USER` | admin | 书签管理员用户名 |
 | `WEBSSH_ADMIN_PASSWORD` | 首次随机 | 书签管理员初始/重置密码；7 个字符起，最多 72 UTF-8 字节 |
 | `WEBSSH_ADMIN_RESET` | false | 与管理员密码一起用于一次性重置 |
@@ -573,7 +648,7 @@ WEBSSH_ENABLE_SELF_UPDATE=false
 ## 技术栈
 
 - 后端：Go、Gin、gorilla/websocket、golang.org/x/crypto/ssh、pkg/sftp
-- 前端：原生 HTML/CSS/JavaScript、xterm.js
+- 前端：原生 HTML/CSS/JavaScript、xterm.js、IronRDP（WebAssembly）
 - 部署：Docker、Docker Compose、Railway、Render
 
 ## 效果图

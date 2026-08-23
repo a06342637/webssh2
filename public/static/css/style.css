@@ -1691,3 +1691,496 @@ html[data-theme="light"]{
 .emoji-picker::-webkit-scrollbar{width:5px}
 .emoji-picker::-webkit-scrollbar-track{background:transparent}
 .emoji-picker::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:999px}
+
+/* ==================== RDP ==================== */
+
+/* 协议切换：登录卡片最上方的 SSH / RDP 两选一 */
+.proto-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 4px;
+    margin-bottom: 4px;
+    background: rgba(255, 255, 255, .04);
+    border: 1px solid var(--brd);
+    border-radius: 10px;
+}
+
+.proto-tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 9px 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--txt-dim);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background .18s, color .18s;
+}
+
+.proto-tab:hover { color: var(--txt); }
+
+.proto-tab.active {
+    color: var(--c1);
+    background: rgba(0, 212, 255, .12);
+    box-shadow: inset 0 0 0 1px rgba(0, 212, 255, .28);
+}
+
+.proto-tab svg { flex: none; }
+
+/* 协议相关字段的显隐由 body 上的 class 统一控制 */
+.rdp-only { display: none !important; }
+body.proto-rdp .rdp-only { display: block !important; }
+body.proto-rdp .ssh-only { display: none !important; }
+body.proto-rdp .rdp-quick-row { display: flex !important; }
+
+.rdp-quick-row {
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.rdp-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    color: var(--txt);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--brd);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color .18s, background .18s;
+}
+
+.rdp-settings-btn:hover {
+    border-color: var(--c1);
+    background: rgba(0, 212, 255, .1);
+}
+
+.rdp-quick-summary {
+    font-size: 11.5px;
+    color: var(--txt-dim);
+    letter-spacing: .2px;
+}
+
+/* 设置对话框 */
+.rdp-settings-card { width: min(520px, 94vw); }
+
+.rdp-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--brd);
+}
+
+.rdp-tab {
+    padding: 9px 12px;
+    font-size: 12.5px;
+    color: var(--txt-dim);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: color .18s, border-color .18s;
+}
+
+.rdp-tab:hover { color: var(--txt); }
+.rdp-tab.active { color: var(--c1); border-bottom-color: var(--c1); }
+
+.rdp-settings-body { max-height: min(60vh, 460px); overflow-y: auto; }
+
+.rdp-pane { display: none; }
+.rdp-pane.active { display: block; }
+
+.rdp-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.rdp-label {
+    flex: none;
+    width: 76px;
+    font-size: 12px;
+    color: var(--txt-dim);
+}
+
+.rdp-select,
+.rdp-input {
+    flex: 1;
+    padding: 8px 10px;
+    font-size: 12.5px;
+    font-family: inherit;
+    color: var(--txt);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--brd);
+    border-radius: 7px;
+    outline: none;
+}
+
+.rdp-select:focus,
+.rdp-input:focus { border-color: var(--c1); }
+
+.rdp-select option { background: #14142a; color: #e8e8f0; }
+
+.rdp-custom-size { display: none; }
+.rdp-custom-size.show { display: flex; }
+
+.rdp-size-inputs { flex: 1; display: flex; align-items: center; gap: 8px; }
+.rdp-size-inputs .rdp-input { width: 0; }
+.rdp-size-x { color: var(--txt-dim); font-size: 12px; }
+
+.rdp-hint {
+    margin: -4px 0 14px 0;
+    padding-left: 26px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--txt-dim);
+    opacity: .82;
+}
+
+.rdp-relay-fields { display: none; }
+.rdp-relay-fields.show { display: block; }
+
+.rdp-ssh-only { display: none; }
+.rdp-ssh-only.show { display: block; }
+
+.rdp-warn {
+    display: none;
+    margin: 4px 0 14px;
+    padding: 10px 12px;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--txt);
+    background: rgba(255, 190, 11, .09);
+    border: 1px solid rgba(255, 190, 11, .3);
+    border-radius: 8px;
+}
+
+.rdp-warn.show { display: block; }
+.rdp-warn b { color: #ffbe0b; }
+
+/* 会话画布 */
+.rdp-instance { background: #0b0b16; }
+
+.rdp-viewport {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: #0b0b16;
+}
+
+.rdp-canvas {
+    display: block;
+    outline: none;
+    image-rendering: auto;
+}
+
+/* 等比适应：画面完整可见，四周留黑边 */
+.rdp-canvas.scale-fit {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+/* 拉伸填满：铺满视口，比例可能失真 */
+.rdp-canvas.scale-stretch {
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+}
+
+/* 1:1：按远端真实像素显示，超出部分可滚动 */
+.rdp-canvas.scale-none { width: auto; height: auto; }
+.rdp-viewport:has(.rdp-canvas.scale-none) { overflow: auto; align-items: flex-start; justify-content: flex-start; }
+
+.rdp-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 10, 26, .82);
+    backdrop-filter: blur(6px);
+    z-index: 5;
+}
+
+.rdp-overlay.show { display: flex; }
+
+.rdp-overlay-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 22px 28px;
+    max-width: 78%;
+    text-align: center;
+    background: rgba(20, 20, 42, .9);
+    border: 1px solid var(--brd);
+    border-radius: 12px;
+}
+
+.rdp-overlay.error .rdp-overlay-box { border-color: rgba(255, 0, 110, .42); }
+
+.rdp-overlay-text {
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--txt);
+}
+
+.rdp-overlay-box .spinner {
+    width: 22px;
+    height: 22px;
+    border-width: 2px;
+}
+
+/* 标签页上的协议标记 */
+.rdp-tab-badge {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 5px;
+    color: var(--txt-dim);
+    opacity: .7;
+}
+
+.rdp-tab-badge.live { color: var(--c1); opacity: 1; }
+
+/* RDP 标签激活时，终端专属的工具按钮没有意义 */
+body.active-rdp .term-only { display: none !important; }
+
+/* 工具栏上的 RDP 专属按钮，仅在 RDP 标签激活时出现 */
+.rdp-tb-only { display: none !important; }
+body.active-rdp .rdp-tb-only { display: inline-flex !important; }
+
+/* 「在独立窗口中打开」——RDP 专属，需要覆盖 .rdp-only 的 display:block */
+.rdp-window-row { align-items: flex-start; }
+body.proto-rdp .rdp-window-row { display: flex !important; }
+
+.rdp-window-row .checkbox-custom { margin-top: 2px; }
+
+.rdp-window-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    line-height: 1.4;
+}
+
+.rdp-window-label small {
+    font-size: 11px;
+    color: var(--txt-dim);
+    opacity: .8;
+}
+
+.rdp-window-label small.is-warn {
+    color: #ffbe0b;
+    opacity: 1;
+}
+
+/* 交接窗口在拿到连接信息之前不要闪一下登录表单 */
+body.rdp-handoff-pending #loginView { visibility: hidden; }
+
+/* ==================== RDP 沉浸模式 ==================== */
+/* RDP 会话里，画面之外的一切都是干扰：命令输入栏是发给终端的、
+   右侧边缘按钮是脚本和 SFTP、顶部标签栏平时也用不上。
+   全部让位给画面，顶部栏改成鼠标贴到屏幕顶边才滑出。 */
+
+body.active-rdp .cmd-bar,
+body.active-rdp #termEdgeBtns,
+body.active-rdp .term-edge-btns { display: none !important; }
+
+body.active-rdp .term-topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 950;
+    transform: translateY(-100%);
+    transition: transform .18s ease;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+
+body.active-rdp.rdp-bar-open .term-topbar { transform: none; }
+
+/* 关掉自动隐藏时，顶部栏回到常驻状态 */
+body.active-rdp.rdp-bar-pinned .term-topbar {
+    position: relative;
+    transform: none;
+    box-shadow: none;
+}
+
+/* 顶部栏改成 fixed 之后脱离文档流，term-main 自然吃满整个视口 */
+/* 顶栏 fixed 时 term-main 要吃满视口；常驻模式下它是普通流内元素，
+   再强制 100% 会把内容顶出窗口底部。 */
+body.active-rdp:not(.rdp-bar-pinned) .term-main { min-height: 100%; }
+body.active-rdp .term-body { background: #000; }
+body.active-rdp .rdp-instance { flex: 1; }
+
+/* 滑出提示条：贴到顶边时给一个可见的落点，不然完全没有线索 */
+body.active-rdp .rdp-bar-hotzone {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 88px;
+    height: 4px;
+    border-radius: 0 0 4px 4px;
+    background: rgba(255, 255, 255, .22);
+    z-index: 949;
+    opacity: 0;
+    transition: opacity .3s ease;
+    pointer-events: none;
+}
+
+body.active-rdp:not(.rdp-bar-open):not(.rdp-bar-pinned) .rdp-bar-hotzone { opacity: 1; }
+
+.rdp-bar-hotzone { display: none; }
+
+/* 画面容器不留任何边距，否则四周会出现细黑边 */
+body.active-rdp .term-body,
+body.active-rdp .rdp-instance,
+body.active-rdp .rdp-viewport {
+    border: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* ==================== 返回会话 ==================== */
+/* 「+」新建标签现在直接回登录页，需要一条路走回已打开的会话 */
+
+.back-to-sessions {
+    display: none;
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 11px;
+    font-size: 12px;
+    color: var(--txt-dim);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--brd);
+    border-radius: 8px;
+    cursor: pointer;
+    z-index: 5;
+    transition: color .18s, border-color .18s, background .18s;
+}
+
+body.has-live-sessions .back-to-sessions { display: inline-flex; }
+
+.back-to-sessions:hover {
+    color: var(--txt);
+    border-color: var(--c1);
+    background: rgba(0, 212, 255, .1);
+}
+
+/* ==================== 弹窗自适应窗口 ==================== */
+/* 原来对话框内容超高时会被视口直接裁掉，头尾都够不着。
+   改成整体不超过视口，超出的部分在内部滚动。 */
+
+.modal-overlay { overflow-y: auto; }
+
+.modal-card {
+    max-height: calc(100dvh - 32px);
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-card > .drawer-hd { flex: none; }
+
+.modal-card > .modal-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.rdp-settings-card { max-height: calc(100dvh - 32px); }
+.rdp-settings-card > .rdp-tabs { flex: none; }
+
+/* 交给 flex 去分配高度，别再写死 60vh */
+.rdp-settings-body {
+    max-height: none;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* 底部按钮区始终留在视线内 */
+.rdp-settings-card > .modal-body:last-child { flex: none; }
+
+/* ==================== 登录卡片自适应 ==================== */
+/* 视口装不下整张卡片时，由 JS 计算一个缩放比写进这个变量，
+   保证「默认整个框都能看到」。用户手动调过缩放就不再自动干预。 */
+
+.login-container { transform-origin: center center; }
+
+@media (max-width: 600px) {
+    /* 手机上再缩就看不清了，保持可滚动 */
+    .login-container { transform: none !important; }
+}
+
+/* ==================== 新建连接弹窗 ==================== */
+/* 协议由当前会话锁定，字段按 SSH / RDP 自动显隐 */
+
+.add-tab-card { width: min(460px, 94vw); }
+
+
+.add-tab-body { gap: 12px; }
+
+.add-tab-body .auth-panel { display: none; }
+.add-tab-body .auth-panel.active { display: block; }
+
+/* RDP 没有密钥登录，也不需要密钥面板 */
+#addTabModal.at-rdp .add-tab-ssh-only { display: none !important; }
+
+/* SSH 只有 SOCKS5 一种代理，不需要选中转方式 */
+.add-tab-rdp-only { display: none; }
+#addTabModal.at-rdp .add-tab-rdp-only { display: flex; }
+#addTabModal.at-rdp .input-row.add-tab-rdp-only { display: flex; }
+
+#newTabRelayPanel { display: none; }
+#newTabRelayPanel.show { display: block; }
+
+#addTabModal .rdp-quick-row {
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, .035);
+    border: 1px solid var(--brd);
+    border-radius: 10px;
+}
+
+/* 书签里的协议标记与「未存密码」提示 */
+.bm-item-proto {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 6px;
+    color: var(--txt-dim);
+    opacity: .75;
+    vertical-align: -1px;
+}
+
+.bm-item-proto.is-rdp { color: var(--c1); opacity: 1; }
+
+.bm-item-nopass {
+    margin-left: 8px;
+    padding: 1px 6px;
+    font-size: 10px;
+    color: #ffbe0b;
+    background: rgba(255, 190, 11, .12);
+    border-radius: 4px;
+}

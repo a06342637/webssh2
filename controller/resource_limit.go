@@ -37,6 +37,12 @@ var uploadProgressSlots = struct {
 	Clients map[string]int
 }{Clients: make(map[string]int)}
 
+var rdpSlots = struct {
+	sync.Mutex
+	Total   int
+	Clients map[string]int
+}{Clients: make(map[string]int)}
+
 func acquireClientSlot(c *gin.Context, slots *struct {
 	sync.Mutex
 	Total   int
@@ -132,4 +138,13 @@ func acquireUploadProgressSlot(c *gin.Context) (func(), bool) {
 		envPositiveInt("WEBSSH_MAX_UPLOAD_PROGRESS_CONNECTIONS", 32),
 		envPositiveInt("WEBSSH_MAX_UPLOAD_PROGRESS_CONNECTIONS_PER_CLIENT", 4),
 		"上传进度连接过多，请稍后重试")
+}
+
+// acquireRDPSlot 限制并发 RDP 会话。每条会话都占着一个到目标机的 TLS
+// 连接和两个转发 goroutine，单客户端默认比 SSH 更紧一些。
+func acquireRDPSlot(c *gin.Context) (func(), bool) {
+	return acquireClientSlot(c, &rdpSlots,
+		envPositiveInt("WEBSSH_MAX_CONCURRENT_RDP", 16),
+		envPositiveInt("WEBSSH_MAX_CONCURRENT_RDP_PER_CLIENT", 4),
+		"RDP 连接任务过多，请稍后重试")
 }

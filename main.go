@@ -258,6 +258,23 @@ func main() {
 		}
 		controller.TermWs(c, time.Duration(timeout)*time.Minute)
 	})
+	// RDP 网关。/rdp/session 发放一次性票据，/rdp 才是 IronRDP WASM
+	// 客户端连过来的 RDCleanPath 通道。
+	server.POST("/rdp/session", controller.SameOriginOnly(), noStoreResponses(), func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
+		responseBody := controller.CreateRDPSession(c)
+		if !c.IsAborted() {
+			c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+		}
+	})
+	server.GET("/rdp", func(c *gin.Context) {
+		if !gatewayAuth(c) {
+			return
+		}
+		controller.RdpWs(c)
+	})
 	server.POST("/check", controller.SameOriginOnly(), func(c *gin.Context) {
 		if !gatewayAuth(c) {
 			return

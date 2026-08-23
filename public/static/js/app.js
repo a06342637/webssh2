@@ -205,7 +205,9 @@ if (btnConnect) {
 document.getElementById('loginForm').addEventListener('submit', function (e) {
     e.preventDefault();
     var h = document.getElementById('hostname').value.trim();
-    var u = document.getElementById('username').value.trim() || 'root';
+    // 两个协议的默认账号不同，兜底值必须跟着当前协议走。
+    var fallbackUser = (typeof currentProtocol !== 'undefined' && currentProtocol === 'rdp') ? 'Administrator' : 'root';
+    var u = document.getElementById('username').value.trim() || fallbackUser;
     if (!h) { showToast('请输入主机', 'error'); return; }
     document.getElementById('username').value = u;
     connectFromLogin();
@@ -241,6 +243,7 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoModal && serverInfoModal.classList.contains('show')) { hideServerInfoModal(); return; }
         var addTabModal = document.getElementById('addTabModal');
         if (addTabModal && addTabModal.classList.contains('show')) { hideAddTab(); return; }
+        if (document.querySelector('#loginView.active') && sessions.length) { backToSessions(); return; }
         var remoteEditorCloseModal = document.getElementById('remoteEditorCloseModal');
         if (remoteEditorCloseModal && remoteEditorCloseModal.classList.contains('show')) { cancelRemoteEditorClose(); return; }
         var sftpDownloadConfirmModal = document.getElementById('sftpDownloadConfirmModal');
@@ -542,6 +545,7 @@ function createSession(hostname, port, username, sshInfo, opts) {
     t.open(termDiv);
 
     var session = {
+        kind: 'ssh',
         id: id, hostname: hostname, port: port, username: username,
         sshInfo: sshInfo, ws: null, term: t, fitAddon: fa, termDiv: termDiv,
         heartbeat: null, sysInfoTimer: null, sysInfoStartTimer: null, resizeObs: null,
@@ -614,7 +618,19 @@ function switchTab(idx, userActivated) {
         else { s.termDiv.classList.remove('active'); stopTopbarMetricsPolling(s); }
     });
     renderTabs();
+    updateBackToSessionsButton();
     var s = sessions[idx];
+    // RDP 标签页没有终端实例，也没有 SSH 通道，跳过所有终端专属的联动。
+    if (s.kind === 'rdp') {
+        document.body.classList.add('active-rdp');
+        setTimeout(function () { try { s.canvas.focus(); } catch (e) { } }, 100);
+        scheduleRdpResize(s);
+        var sftpPanelRdp = document.getElementById('sftpPanel');
+        if (sftpPanelRdp) sftpPanelRdp.classList.remove('open');
+        setTopbarMetricsVisible(false);
+        return;
+    }
+    document.body.classList.remove('active-rdp');
     setTimeout(function () { syncTermSize(s); try { s.term.focus(); } catch (e) { } }, 100);
     updateMetricsForActive();
     if (s._connected && (prevIdx !== idx || (!s.sysInfoTimer && !s.sysInfoStartTimer))) startTopbarMetricsPolling(s);
@@ -634,6 +650,17 @@ function renderTabs() {
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
     bar.innerHTML = sessions.map(function (s, i) {
         var cls = i === activeIdx ? 'ssh-tab active' : 'ssh-tab';
+        if (s.kind === 'rdp') {
+            // RDP 标签用显示器图标区分，并且没有「服务器详情」入口
+            // ——那套指标是通过 SSH 执行命令采集的。
+            var stateCls = s._connected ? 'rdp-tab-badge live' : 'rdp-tab-badge';
+            return '<div class="' + cls + ' is-rdp" onclick="switchTab(' + i + ',true)">' +
+                '<span class="tab-main"><span class="' + stateCls + '" title="远程桌面">' +
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>' +
+                '<span class="tab-ip" ondblclick="event.stopPropagation();copyIP(sessions[' + i + '].hostname)" title="单击切换标签，双击复制 IP">' + esc(formatHostForInput(s.hostname)) + '</span></span>' +
+                '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
+                '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+        }
         return '<div class="' + cls + '" onclick="switchTab(' + i + ',true)">' +
             '<span class="tab-main"><span class="tab-ip" ondblclick="event.stopPropagation();copyIP(sessions[' + i + '].hostname)" title="单击切换标签，双击复制 IP">' + esc(formatHostForInput(s.hostname)) + '</span>' +
             '<button class="tab-info" onclick="event.stopPropagation();openServerInfoModal(' + i + ')" title="服务器详情">' +
@@ -950,6 +977,7 @@ function submitSSHAuthRetry() {
     s._connected = false;
     hideSSHAuthRetryModal(false);
     renderTabs();
+    if (typeof updateBackToSessionsButton === 'function') updateBackToSessionsButton();
     showToast('正在重新连接 ' + host + '...', 'info');
     startSessionConnection(s);
 }
@@ -1189,6 +1217,12 @@ function connectSession(session) {
 
 function connectFromLogin() {
     if (!ensureGatewayAccount()) return;
+    // RDP 走完全独立的一条链路（浏览器内 WASM 客户端 + 后端透明转发），
+    // 和 SSH 只共用标签页与登录表单。
+    if (typeof currentProtocol !== 'undefined' && currentProtocol === 'rdp') {
+        connectRdpFromLogin();
+        return;
+    }
     var btn = document.getElementById('connectBtn');
     btn.classList.add('loading');
     setStatus('connecting', '连接中...');
@@ -1259,6 +1293,34 @@ function maybeShowFirstServerInfoGuide(session) {
 function closeTab(idx) {
     if (idx < 0 || idx >= sessions.length) return;
     var requestedSession = sessions[idx];
+    // RDP 会话没有远端编辑器/SFTP 这些附属状态，直接走自己的清理。
+    if (requestedSession.kind === 'rdp') {
+        var activeRdp = activeIdx >= 0 ? sessions[activeIdx] : null;
+        closeRdpSession(requestedSession);
+        if (requestedSession.termDiv) requestedSession.termDiv.remove();
+        sessions.splice(idx, 1);
+        if (sessions.length === 0) {
+            activeIdx = -1;
+            document.body.classList.remove('active-rdp');
+            document.getElementById('scriptDrawer').classList.remove('open');
+            document.getElementById('sftpPanel').classList.remove('open');
+            showView('loginView');
+            setStatus('', '就绪');
+            showToast('已断开', 'info');
+        } else {
+            if (serverInfoModalIdx > idx) serverInfoModalIdx--;
+            if (activeRdp && activeRdp !== requestedSession) {
+                activeIdx = sessions.indexOf(activeRdp);
+                if (activeIdx < 0) activeIdx = Math.min(idx, sessions.length - 1);
+            } else {
+                activeIdx = Math.min(idx, sessions.length - 1);
+            }
+            switchTab(activeIdx);
+        }
+        renderTabs();
+        updateBackToSessionsButton();
+        return;
+    }
     if (!arguments[1] && requestCloseRemoteEditorsForSession(requestedSession, function () {
         var currentIndex = sessions.indexOf(requestedSession);
         if (currentIndex >= 0) closeTab(currentIndex, true);
@@ -1301,6 +1363,7 @@ function closeTab(idx) {
         switchTab(activeIdx);
     }
     renderTabs();
+    updateBackToSessionsButton();
 }
 
 function closeActiveTab() { if (activeIdx >= 0) closeTab(activeIdx); }
@@ -1308,6 +1371,11 @@ function closeActiveTab() { if (activeIdx >= 0) closeTab(activeIdx); }
 function reconnectTab() {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
     var s = sessions[activeIdx];
+    if (s.kind === 'rdp') {
+        showToast('重新连接 ' + s.hostname + '...', 'info');
+        reconnectRdpTab();
+        return;
+    }
     if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
     if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
     if (s.hostKeyDecision) clearHostKeyDecision(s);
@@ -1321,24 +1389,177 @@ function reconnectTab() {
     startSessionConnection(s);
 }
 
-function showAddTab() { document.getElementById('addTabModal').classList.add('show'); document.getElementById('newTabHost').focus(); }
-function hideAddTab() { document.getElementById('addTabModal').classList.remove('show'); }
+// ==================== 新建连接弹窗 ====================
+// 这个弹窗和登录页的表单功能对齐：SSH 有密码/密钥/SOCKS5 代理，
+// RDP 有密码和 SOCKS5 / SSH 跳板中转，不再是只能填四个框的简化版。
+
+var addTabProtocol = 'ssh';
+var addTabAuth = 'password';
+
+function sessionConnectionProtocol(session) {
+    return session && session.kind === 'rdp' ? 'rdp' : 'ssh';
+}
+
+function showAddTab() {
+    if (!ensureGatewayAccount()) return;
+    var active = activeIdx >= 0 ? sessions[activeIdx] : null;
+    // The + button is locked to the active session protocol; no cross-protocol choice is shown.
+    configureAddTabProtocol(sessionConnectionProtocol(active));
+    document.getElementById('addTabModal').classList.add('show');
+    setTimeout(function () {
+        var host = document.getElementById('newTabHost');
+        if (host) host.focus();
+    }, 60);
+}
+
+function hideAddTab() {
+    document.getElementById('addTabModal').classList.remove('show');
+}
+
+function configureAddTabProtocol(proto) {
+    addTabProtocol = proto === 'rdp' ? 'rdp' : 'ssh';
+    var isRdp = addTabProtocol === 'rdp';
+    var modal = document.getElementById('addTabModal');
+    modal.dataset.protocol = addTabProtocol;
+
+    modal.classList.toggle('at-rdp', isRdp);
+    document.getElementById('addTabTitle').textContent = isRdp ? '新建 RDP 连接' : '新建 SSH 连接';
+
+    var portInput = document.getElementById('newTabPort');
+    var userInput = document.getElementById('newTabUser');
+    if (isRdp) {
+        if (portInput.value === '22' || !portInput.value) portInput.value = '3389';
+        if (userInput.value === 'root') userInput.value = 'Administrator';
+        // RDP 没有密钥登录，强制回到密码
+        switchAddTabAuth('password');
+        document.getElementById('newTabRelayLabel').textContent = '使用中转（SOCKS5 / SSH 跳板）';
+        var summary = document.getElementById('newTabRdpSummary');
+        if (summary && typeof rdpSettings === 'function') {
+            var rs = rdpSettings();
+            summary.textContent = rs.resolution === 'fit' ? '适应窗口'
+                : rs.resolution === 'custom' ? (rs.customWidth + '×' + rs.customHeight)
+                    : rs.resolution.replace('x', '×');
+        }
+    } else {
+        if (portInput.value === '3389' || !portInput.value) portInput.value = '22';
+        if (userInput.value === 'Administrator') userInput.value = 'root';
+        document.getElementById('newTabRelayLabel').textContent = '使用 SOCKS5 代理';
+    }
+    onAddTabRelayKindChange();
+}
+
+function switchAddTabAuth(tab) {
+    addTabAuth = tab === 'key' ? 'key' : 'password';
+    document.querySelectorAll('.add-tab-body .auth-tab').forEach(function (btn) {
+        btn.classList.toggle('active', btn.dataset.attab === addTabAuth);
+    });
+    document.getElementById('newTabPasswordPane').classList.toggle('active', addTabAuth === 'password');
+    document.getElementById('newTabKeyPane').classList.toggle('active', addTabAuth === 'key');
+}
+
+function toggleAddTabRelay() {
+    var on = document.getElementById('newTabRelayOn').checked;
+    document.getElementById('newTabRelayPanel').classList.toggle('show', on);
+}
+
+function onAddTabRelayKindChange() {
+    var kind = addTabProtocol === 'rdp'
+        ? document.getElementById('newTabRelayKind').value
+        : 'socks5';
+    var portInput = document.getElementById('newTabRelayPort');
+    if (kind === 'ssh' && (portInput.value === '1080' || !portInput.value)) portInput.value = '22';
+    if (kind === 'socks5' && (portInput.value === '22' || !portInput.value)) portInput.value = '1080';
+}
+
+function addTabRelayConfig() {
+    if (!document.getElementById('newTabRelayOn').checked) return null;
+    var host = document.getElementById('newTabRelayHost').value.trim();
+    if (!host) return null;
+    return {
+        kind: addTabProtocol === 'rdp' ? document.getElementById('newTabRelayKind').value : 'socks5',
+        host: host,
+        port: parseInt(document.getElementById('newTabRelayPort').value, 10) || 1080,
+        username: document.getElementById('newTabRelayUser').value.trim(),
+        password: document.getElementById('newTabRelayPass').value
+    };
+}
 
 function addNewTab() {
     if (!ensureGatewayAccount()) return;
+    // Re-check on submit so the protocol cannot drift while the dialog is open.
+    var active = activeIdx >= 0 ? sessions[activeIdx] : null;
+    var requiredProtocol = sessionConnectionProtocol(active);
+    if (addTabProtocol !== requiredProtocol) configureAddTabProtocol(requiredProtocol);
     var hp = parseHostPortInput(document.getElementById('newTabHost').value, document.getElementById('newTabPort').value);
     var h = hp.host;
-    var p = hp.port;
-    var u = document.getElementById('newTabUser').value.trim() || 'root';
-    var pw = document.getElementById('newTabPass').value;
     if (!h) { showToast('请输入主机地址', 'error'); return; }
+    var fallbackPort = addTabProtocol === 'rdp' ? 3389 : 22;
+    var p = hp.port || fallbackPort;
+    var u = document.getElementById('newTabUser').value.trim() ||
+        (addTabProtocol === 'rdp' ? 'Administrator' : 'root');
+    var pw = document.getElementById('newTabPass').value;
     document.getElementById('newTabHost').value = formatHostForInput(h);
     document.getElementById('newTabPort').value = p;
-    var sshInfo = buildSSHInfoDirect(h, p, u, pw);
-    var session = createSession(h, p, u, sshInfo, { authType: 'password' });
+
+    var relay = addTabRelayConfig();
+
+    if (addTabProtocol === 'rdp') {
+        var rdpSession = createRdpSession(h, p, u, {
+            password: pw,
+            domain: '',
+            relay: relay ? {
+                kind: relay.kind,
+                host: relay.host,
+                port: relay.port,
+                username: relay.username,
+                password: relay.password,
+                privateKey: ''
+            } : { kind: 'none' }
+        });
+        switchTab(sessions.length - 1);
+        hideAddTab();
+        connectRdpSession(rdpSession);
+        return;
+    }
+
+    // SSH：把弹窗里填的东西拼成和登录页同样的 payload
+    var info = {
+        hostname: h,
+        port: p,
+        username: u,
+        logintype: addTabAuth === 'key' ? 1 : 0
+    };
+    if (addTabAuth === 'key') {
+        info.privateKey = document.getElementById('newTabKey').value;
+        info.passphrase = document.getElementById('newTabPassphrase').value;
+    } else {
+        info.password = pw;
+    }
+    if (relay) {
+        info.proxyHost = relay.host;
+        info.proxyPort = relay.port;
+        info.proxyUser = relay.username;
+        info.proxyPass = relay.password;
+    }
+    var trustScope = getOrCreateTrustScope();
+    if (trustScope) info.trustScope = trustScope;
+    var sshInfo = btoa(unescape(encodeURIComponent(JSON.stringify(info))));
+
+    var session = createSession(h, p, u, sshInfo, { authType: addTabAuth });
     switchTab(sessions.length - 1);
     hideAddTab();
     startSessionConnection(session);
+}
+
+function backToSessions() {
+    if (!sessions.length) return;
+    showView('terminalView');
+    switchTab(activeIdx >= 0 && activeIdx < sessions.length ? activeIdx : sessions.length - 1);
+}
+
+// 「返回会话」只有在真的有会话在跑时才有意义。
+function updateBackToSessionsButton() {
+    if (document.body) document.body.classList.toggle('has-live-sessions', sessions.length > 0);
 }
 
 // ==================== System Info ====================
@@ -4038,44 +4259,91 @@ function runVersionUpdate() {
         });
 }
 
+function bookmarkProtocol(b) {
+    return (b && b.protocol === 'rdp') ? 'rdp' : 'ssh';
+}
+
 function renderConnBookmarks() {
     var l = document.getElementById('connBookmarkList'), bms = loadBM(CBK);
     if (!bms.length) { l.innerHTML = '<div class="bm-empty">暂无书签</div>'; return; }
     l.innerHTML = bms.map(function (b, i) {
-        return '<div class="bm-item" onclick="applyConn(' + i + ')"><div class="bm-item-info"><div class="bm-item-name">' + esc(b.username + '@' + b.hostname) + '</div><div class="bm-item-host">:' + (b.port || 22) + '</div></div><button class="bm-item-del" onclick="event.stopPropagation();delConn(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+        var isRdp = bookmarkProtocol(b) === 'rdp';
+        // 同一台机器可能同时存了 SSH 和 RDP，图标是唯一能一眼区分的线索
+        var icon = isRdp
+            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
+            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M4 17l6-6-6-6M12 19h8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        var noPass = !b.password ? '<span class="bm-item-nopass" title="未保存密码，连接前需要补填">需密码</span>' : '';
+        return '<div class="bm-item" onclick="applyConn(' + i + ')">' +
+            '<div class="bm-item-info">' +
+            '<div class="bm-item-name"><span class="bm-item-proto' + (isRdp ? ' is-rdp' : '') + '">' + icon + '</span>' +
+            esc(b.username + '@' + b.hostname) + '</div>' +
+            '<div class="bm-item-host">:' + (b.port || (isRdp ? 3389 : 22)) + noPass + '</div>' +
+            '</div>' +
+            '<button class="bm-item-del" onclick="event.stopPropagation();delConn(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
     }).join('');
 }
 
 function saveConnBookmark() {
+    var isRdp = typeof currentProtocol !== 'undefined' && currentProtocol === 'rdp';
     var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value);
-    var h = hp.host, p = hp.port, u = document.getElementById('username').value.trim() || 'root';
+    var h = hp.host;
+    var p = hp.port || (isRdp ? 3389 : 22);
+    var u = document.getElementById('username').value.trim() || (isRdp ? 'Administrator' : 'root');
     if (!h) { showToast('请先填写主机', 'error'); return; }
     document.getElementById('hostname').value = formatHostForInput(h);
     document.getElementById('port').value = p;
-    var at = document.querySelector('.auth-tab.active').dataset.tab;
-    var bm = { hostname: h, port: p, username: u, authType: at };
-    if (savePasswords && at === 'password') bm.password = document.getElementById('password').value;
-    var bms = loadBM(CBK), idx = bms.findIndex(function (b) { return b.hostname === h && b.port === p && b.username === u; });
+
+    // RDP 只有密码一种登录方式
+    var at = isRdp ? 'password' : document.querySelector('.auth-tab.active').dataset.tab;
+    var bm = { protocol: isRdp ? 'rdp' : 'ssh', hostname: h, port: p, username: u, authType: at };
+
+    // 密码留空也允许保存：书签本来就可以只记地址和账号，连接前再补。
+    if (savePasswords && at === 'password') {
+        var pwd = document.getElementById('password').value;
+        if (pwd) bm.password = pwd;
+    }
+
+    // 去重要把协议算进去，同一台机器的 SSH 和 RDP 是两条独立书签
+    var bms = loadBM(CBK), idx = bms.findIndex(function (b) {
+        return b.hostname === h && b.port === p && b.username === u && bookmarkProtocol(b) === bm.protocol;
+    });
     if (idx >= 0) bms[idx] = bm; else bms.push(bm);
     if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未保存', 'error'); return; }
-    renderConnBookmarks(); showToast('已保存', 'success');
+    renderConnBookmarks();
+    showToast(bm.password ? '已保存' : '已保存（未含密码，连接前补填即可）', 'success');
 }
 
 function applyConn(i) {
     var b = loadBM(CBK)[i]; if (!b) return;
+    var isRdp = bookmarkProtocol(b) === 'rdp';
+
+    // 书签带着协议，填之前先把表单切到对应的那一套
+    if (typeof switchProtocol === 'function') switchProtocol(isRdp ? 'rdp' : 'ssh');
+    else if (typeof ensureSSHProtocolForFill === 'function') ensureSSHProtocolForFill();
+
     var hp = parseHostPortInput(b.hostname, b.port);
     document.getElementById('hostname').value = formatHostForInput(hp.host);
-    document.getElementById('port').value = hp.port;
-    document.getElementById('username').value = b.username || 'root';
+    document.getElementById('port').value = hp.port || (isRdp ? 3389 : 22);
+    document.getElementById('username').value = b.username || (isRdp ? 'Administrator' : 'root');
     document.getElementById('password').value = '';
-    document.getElementById('privateKey').value = '';
-    document.getElementById('passphrase').value = '';
-    if (b.authType === 'key') switchAuthTab('key');
-    else {
+
+    if (!isRdp) {
+        document.getElementById('privateKey').value = '';
+        document.getElementById('passphrase').value = '';
+        if (b.authType === 'key') { switchAuthTab('key'); showToast('已填入', 'info'); return; }
         switchAuthTab('password');
-        document.getElementById('password').value = savePasswords && b.password ? b.password : '';
     }
-    showToast('已填入', 'info');
+
+    var savedPass = savePasswords && b.password ? b.password : '';
+    document.getElementById('password').value = savedPass;
+    if (savedPass) {
+        showToast('已填入', 'info');
+        return;
+    }
+    // 没存密码的书签：直接把光标送到密码框，省得用户再找
+    var pwdInput = document.getElementById('password');
+    if (pwdInput) { pwdInput.focus(); }
+    showToast('已填入，请补充密码后连接', 'info');
 }
 
 function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未删除', 'error'); return; } renderConnBookmarks(); showToast('已删除', 'info'); }
@@ -8384,6 +8652,7 @@ function getCurrentFontSize() {
 function changeFontSize(delta) {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
     var s = sessions[activeIdx];
+    if (!s.term) return;
     var cur = s.term.options.fontSize || 15;
     var nv = Math.max(8, Math.min(30, cur + delta));
     s.term.options.fontSize = nv;
@@ -8393,7 +8662,7 @@ function changeFontSize(delta) {
 }
 
 function updateFontSizeLabel() {
-    if (activeIdx >= 0 && sessions[activeIdx]) {
+    if (activeIdx >= 0 && sessions[activeIdx] && sessions[activeIdx].term) {
         document.getElementById('fontSizeLabel').textContent = sessions[activeIdx].term.options.fontSize || 15;
     }
 }
@@ -8454,7 +8723,7 @@ function saveColors(fg, bg, cursor) {
 }
 
 function applyFgColor(color) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].term) return;
     sessions[activeIdx].term.options.theme = Object.assign({}, sessions[activeIdx].term.options.theme, { foreground: color });
     var c = getSavedColors(); c.fg = color; saveColors(c.fg, c.bg, c.cursor);
     document.getElementById('fgCustomColor').value = color;
@@ -8462,7 +8731,7 @@ function applyFgColor(color) {
 }
 
 function applyBgColor(color) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].term) return;
     sessions[activeIdx].term.options.theme = Object.assign({}, sessions[activeIdx].term.options.theme, { background: color });
     document.querySelector('.term-body').style.background = color;
     var c = getSavedColors(); c.bg = color; saveColors(c.fg, c.bg, c.cursor);
@@ -8471,7 +8740,7 @@ function applyBgColor(color) {
 }
 
 function applyCursorColor(color) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    if (activeIdx < 0 || !sessions[activeIdx] || !sessions[activeIdx].term) return;
     sessions[activeIdx].term.options.theme = Object.assign({}, sessions[activeIdx].term.options.theme, { cursor: color });
     var c = getSavedColors(); c.cursor = color; saveColors(c.fg, c.bg, c.cursor);
     document.getElementById('cursorCustomColor').value = color;
@@ -8481,7 +8750,7 @@ function applyCursorColor(color) {
 function resetTermColors() {
     safeStorageRemove(COLOR_KEY);
     var defaults = defaultSavedTermColors();
-    if (activeIdx >= 0 && sessions[activeIdx]) {
+    if (activeIdx >= 0 && sessions[activeIdx] && sessions[activeIdx].term) {
         sessions[activeIdx].term.options.theme = buildTerminalTheme(defaults);
         document.querySelector('.term-body').style.background = '';
     }
@@ -8683,14 +8952,34 @@ function toggleSettings() {
     if (show) renderBgSwatches();
 }
 
+function applyPageZoom(val) {
+    var numeric = Number(val);
+    if (!Number.isFinite(numeric)) numeric = 100;
+    numeric = Math.max(50, Math.min(200, numeric));
+    document.body.style.zoom = '';
+    var terminalView = document.getElementById('terminalView');
+    if (terminalView) terminalView.style.zoom = String(numeric / 100);
+
+    // CSS zoom does not reliably emit resize, so fit live SSH/RDP sessions explicitly.
+    requestAnimationFrame(function () {
+        var session = activeIdx >= 0 ? sessions[activeIdx] : null;
+        if (!session) return;
+        if (session.kind === 'rdp') {
+            if (typeof scheduleRdpResize === 'function') scheduleRdpResize(session);
+        } else if (session.term) {
+            syncTermSize(session, true);
+        }
+    });
+}
+
 function changeZoom(delta) {
     var s = loadSettings();
-    var cur = s.zoom || 100;
+    var cur = Number(s.zoom) || 100;
     var nv = Math.max(50, Math.min(200, cur + delta));
     s.zoom = nv;
     saveSettings(s);
     document.getElementById('zoomLabel').textContent = nv + '%';
-    document.body.style.zoom = (nv / 100);
+    applyPageZoom(nv);
 }
 
 function changeCardScale(delta) {
@@ -8705,10 +8994,99 @@ function changeCardScale(delta) {
 
 function applyCardScale(val) {
     var el = document.querySelector('.login-container');
-    if (el) {
-        el.style.transform = val === 100 ? '' : 'scale(' + (val / 100) + ')';
-        el.style.transformOrigin = 'center center';
+    if (!el) return;
+
+    var numeric = Number(val);
+    if (!Number.isFinite(numeric)) numeric = 100;
+    numeric = Math.max(50, Math.min(150, numeric));
+    var scale = numeric / 100;
+
+    // A manual value must be exact. Oversized content scrolls instead of silently
+    // clamping back to auto-fit while only the percentage label keeps changing.
+    el.style.transform = '';
+    el.style.zoom = scale === 1 ? '' : String(scale);
+    el.style.maxHeight = Math.max(1, Math.floor(loginAvailableHeight() / scale)) + 'px';
+}
+
+// 登录卡片真正可用的高度：视口减掉固定在底部的页脚，再留一点余量。
+function loginAvailableHeight() {
+    var footer = document.querySelector('.global-footer');
+    var footerH = (footer && !footer.classList.contains('hidden') && getComputedStyle(footer).display !== 'none')
+        ? footer.offsetHeight : 0;
+    return window.innerHeight - footerH - 16;
+}
+
+// ==================== 登录卡片自适应 ====================
+// 表单在展开密钥面板、代理面板或切到 RDP 时会明显变高，窗口不够高就会
+// 把 logo 和连接按钮裁在视口外。这里按需整体缩一点，保证一眼能看全。
+
+var LOGIN_FIT_MIN_SCALE = 0.55;
+var _loginFitPending = false;
+
+function fitLoginCard() {
+    var container = document.querySelector('.login-container');
+    var card = document.querySelector('.login-card');
+    if (!container || !card) return;
+
+    // Respect every persisted manual value, including an explicit 100%.
+    // Clearing the style before this check made the control appear broken.
+    var settings = {};
+    try { settings = loadSettings() || {}; } catch (e) { settings = {}; }
+    if (Object.prototype.hasOwnProperty.call(settings, 'cardScale')) {
+        applyCardScale(settings.cardScale);
+        return;
     }
+
+    // No manual value: clear the previous auto-fit result before measuring.
+    container.style.zoom = '';
+    container.style.maxHeight = '';
+
+    // 手机上本来就小，再缩不如让它滚动
+    if (window.innerWidth <= 600) return;
+
+    // scrollHeight 含容器内边距，才是真正要塞进视口的高度。
+    // 这里用 zoom 而不是 transform：transform 只改变绘制结果，容器的
+    // 布局高度不变，max-height 仍会按原尺寸裁剪并冒出滚动条。
+    var natural = container.scrollHeight;
+    var avail = loginAvailableHeight();
+    if (!natural || natural <= avail) return;
+
+    var scale = Math.max(LOGIN_FIT_MIN_SCALE, avail / natural);
+    container.style.zoom = scale;
+    // 缩到下限仍然装不下（极矮窗口）时，退回可滚动，别把内容裁死
+    // 缩到下限仍然装不下（极矮窗口）时退回可滚动。上限同样要按缩放前的
+    // 坐标给，否则 100dvh 会在 zoom 坐标系里再缩一次。
+    container.style.maxHeight = (natural * scale > avail + 1)
+        ? Math.ceil(avail / scale) + 'px'
+        : 'none';
+}
+
+function scheduleLoginFit() {
+    if (_loginFitPending) return;
+    _loginFitPending = true;
+    requestAnimationFrame(function () {
+        _loginFitPending = false;
+        fitLoginCard();
+    });
+}
+
+function initLoginCardFit() {
+    var card = document.querySelector('.login-card');
+    if (!card) return;
+    // 密钥面板、代理面板展开收起都会改变卡片高度，用 ResizeObserver 一网打尽
+    if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(scheduleLoginFit).observe(card);
+    }
+    addEventListener('resize', scheduleLoginFit);
+    addEventListener('orientationchange', scheduleLoginFit);
+    document.addEventListener('webssh:viewchange', scheduleLoginFit);
+    scheduleLoginFit();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLoginCardFit);
+} else {
+    setTimeout(initLoginCardFit, 0);
 }
 
 function changeEdgeScale(delta) {
@@ -8823,7 +9201,7 @@ function changeBlur(val) {
 
 function resetAllSettings() {
     safeStorageRemove(SETTINGS_KEY);
-    document.body.style.zoom = '';
+    applyPageZoom(100);
     document.documentElement.style.removeProperty('--bg');
     document.documentElement.style.removeProperty('--blur');
     setBgImage('');
@@ -8833,6 +9211,7 @@ function resetAllSettings() {
     var toggleP = document.getElementById('toggleParticles');
     if (toggleP) toggleP.checked = true;
     applyCardScale(100);
+    scheduleLoginFit();
     applyEdgeScale(100);
     var footer = document.querySelector('.global-footer');
     if (footer) footer.classList.remove('user-hidden');
@@ -8852,9 +9231,7 @@ function resetAllSettings() {
 
 function initSettings() {
     var s = loadSettings();
-    if (s.zoom && s.zoom !== 100) {
-        document.body.style.zoom = (s.zoom / 100);
-    }
+    applyPageZoom(s.zoom || 100);
     if (s.bgImage) {
         setBgImage(s.bgImage);
     }
@@ -8871,7 +9248,7 @@ function initSettings() {
     if (s.blur != null) {
         document.documentElement.style.setProperty('--blur', s.blur + 'px');
     }
-    if (s.cardScale && s.cardScale !== 100) applyCardScale(s.cardScale);
+    if (Object.prototype.hasOwnProperty.call(s, 'cardScale')) applyCardScale(s.cardScale);
     if (s.edgeScale && s.edgeScale !== 100) applyEdgeScale(s.edgeScale);
     if (s.footer === false) {
         var footer = document.querySelector('.global-footer');
@@ -9003,6 +9380,7 @@ function tryAutoLogin() {
     urlAutoLoginHandled = true;
 
     // Fill form
+    if (typeof ensureSSHProtocolForFill === 'function') ensureSSHProtocolForFill();
     document.getElementById('hostname').value = formatHostForInput(info.host);
     document.getElementById('port').value = info.port;
     document.getElementById('username').value = info.user;

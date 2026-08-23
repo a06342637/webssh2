@@ -670,6 +670,27 @@ test('login and new-tab entry points authenticate before creating sessions', () 
     assert.match(addTabSource, /^function addNewTab\(\) \{\s*if \(!ensureGatewayAccount\(\)\) return;/);
 });
 
+test('new-tab protocol is locked to the active SSH or RDP session', () => {
+    const showSource = extractFunction('showAddTab');
+    const submitSource = extractFunction('addNewTab');
+    assert.match(appSource, /kind: 'ssh'/);
+    assert.ok(showSource.includes('configureAddTabProtocol(sessionConnectionProtocol(active))'));
+    assert.ok(submitSource.includes('requiredProtocol = sessionConnectionProtocol(active)'));
+    assert.doesNotMatch(indexSource, /data-atproto|switchAddTabProtocol|add-tab-protos/);
+});
+
+test('page zoom targets the terminal workspace and login scale remains exact', () => {
+    const pageSource = extractFunction('applyPageZoom');
+    const cardSource = extractFunction('applyCardScale');
+    const fitSource = extractFunction('fitLoginCard');
+    assert.ok(indexSource.includes('#terminalView{zoom:'));
+    assert.equal(indexSource.includes('body{zoom:'), false);
+    assert.ok(pageSource.includes("getElementById('terminalView')"));
+    assert.doesNotMatch(pageSource, /scheduleLoginFit/);
+    assert.ok(cardSource.includes("el.style.zoom = scale === 1 ? '' : String(scale)"));
+    assert.ok(fitSource.includes("hasOwnProperty.call(settings, 'cardScale')"));
+});
+
 test('SFTP download asks for confirmation and uses a cancellable streamed response', () => {
     const openSource = extractFunction('sftpDownload');
     const runSource = extractFunction('runSftpDownload');
