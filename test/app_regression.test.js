@@ -670,6 +670,32 @@ test('login and new-tab entry points authenticate before creating sessions', () 
     assert.match(addTabSource, /^function addNewTab\(\) \{\s*if \(!ensureGatewayAccount\(\)\) return;/);
 });
 
+test('host input splits IPv4/domain ports and preserves bare IPv6', () => {
+    const sandbox = loadFunctions(['normalizePortValue', 'parseHostPortInput'], {});
+    assert.deepEqual({ ...sandbox.parseHostPortInput('r2.543216.xyz:24391', '3389', 3389) }, { host: 'r2.543216.xyz', port: 24391, explicitPort: true });
+    assert.deepEqual({ ...sandbox.parseHostPortInput('203.0.113.9:33901', '3389', 3389) }, { host: '203.0.113.9', port: 33901, explicitPort: true });
+    assert.deepEqual({ ...sandbox.parseHostPortInput('rdp.example.com：33903', '3389', 3389) }, { host: 'rdp.example.com', port: 33903, explicitPort: true });
+    assert.deepEqual({ ...sandbox.parseHostPortInput('[2001:db8::8]:33902', '3389', 3389) }, { host: '2001:db8::8', port: 33902, explicitPort: true });
+    assert.deepEqual({ ...sandbox.parseHostPortInput('2001:db8::8', '3389', 3389) }, { host: '2001:db8::8', port: 3389, explicitPort: false });
+});
+
+test('host paste autofill is installed for login and new-tab forms', () => {
+    const source = extractFunction('initHostPortAutofill');
+    assert.ok(source.includes("['hostname', 'port']"));
+    assert.ok(source.includes("['newTabHost', 'newTabPort']"));
+    assert.ok(source.includes("addEventListener('paste'"));
+});
+
+test('RDP uses stateless credential field and never opens the SSH context menu', () => {
+    const requestSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'rdp.js'), 'utf8');
+    const contextSource = appSource.slice(appSource.indexOf("document.getElementById('terminalContainer').addEventListener('contextmenu'"), appSource.indexOf("document.addEventListener('click', function () { hideCtxMenu();") + 1);
+    assert.ok(requestSource.includes('builder.authToken(credentialInfo.credential)'));
+    assert.doesNotMatch(requestSource, /credentialInfo.ticket/);
+    assert.ok(requestSource.includes('function onContextMenu(e) { e.preventDefault(); e.stopPropagation(); }'));
+    assert.ok(contextSource.includes("closest('.rdp-instance')"));
+    assert.ok(contextSource.includes("active.kind === 'rdp'"));
+});
+
 test('new-tab protocol is locked to the active SSH or RDP session', () => {
     const showSource = extractFunction('showAddTab');
     const submitSource = extractFunction('addNewTab');

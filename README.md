@@ -414,6 +414,13 @@ RDP 协议本身（含位图解码、CredSSP/NLA）全部在浏览器里完成�
 - **SOCKS5 代理**：填地址、端口和可选的用户名/密码
 - **SSH 跳板**：填跳板机地址和账号，支持密码或私钥；跳板机的主机密钥沿用 SSH 侧的 TOFU 策略
 
+两者承担相同的“一跳 TCP 中转”角色，但协议不同；当前都由 WebSSH 服务端发起，而不是浏览器直接连接：
+
+```text
+浏览器 <--WebSocket--> WebSSH 服务端 <--SOCKS5 CONNECT--> SOCKS5 代理 <--TCP--> RDP 目标
+浏览器 <--WebSocket--> WebSSH 服务端 <--SSH direct-tcpip--> SSH 跳板 <--TCP--> RDP 目标
+```
+
 **中转不等于加速。** 多一跳只在直连线路本身劣质（高丢包、绕路）时才可能变快；
 线路质量正常时中转只会增加延迟。另外 SSH 跳板会把 RDP 的 TCP 套进另一层 TCP，
 丢包时两层重传互相叠加，反而可能更卡。真要提速，优先考虑在中转节点上用 UDP 隧道或开 BBR。
@@ -423,12 +430,13 @@ RDP 协议本身（含位图解码、CredSSP/NLA）全部在浏览器里完成�
 RDP 网关**不接受**从 WebSocket 直接指定目标——那样任何能打开页面的人都能拿它当开放 TCP 代理扫内网。
 实际流程是：
 
-1. 前端先 `POST /rdp/session` 提交目标和中转配置，服务端校验端口白名单后发一张
-   **一次性票据**（TTL 90 秒，用后即焚）。
-2. 票据作为 RDCleanPath 的 `proxy_auth` 字段传给 WASM 客户端。
-3. 网关握手时校验票据，并**只连票据里登记的目标**；WASM 报上来的 destination 仅用于核对。
+1. 前端先 `POST /rdp/session` 提交目标和中转配置。
+2. 服务端返回一个使用进程内随机密钥 AES-GCM 加密并认证的**短期无状态凭证**（TTL 90 秒）；
+   目标、中转信息、浏览器作用域和来源地址都封装在密文中，服务端不把逐连接票据或中转凭据保存到 Map、数据库、文件或缓存。
+3. 凭证作为 RDCleanPath 的 `proxy_auth` 字段传给 WASM 客户端。
+4. 网关握手时解密并验证凭证，只连接凭证中的目标；WASM 报上来的 destination 仅用于交叉核对。
 
-目标端口默认只放行 3389，需要非标端口时用 `WEBSSH_RDP_ALLOWED_PORTS` 显式配置。
+RDP 支持 1–65535 的全部有效目标端口，不再需要端口白名单环境变量。
 中转凭据只有在你勾选「记住中转配置」时才写入浏览器本地存储，且从不上传云端。
 
 ### 已知限制
@@ -594,7 +602,6 @@ go run . -a admin:password
 | `AUTH_INFO` / `authInfo` | 空 | 页面 Basic Auth，格式 `user:pass` |
 | `SAVE_PASS` / `savePass` | true | 是否在浏览器保存 SSH/SOCKS5 密码；设为 false 时不再写入并清除旧字段 |
 | `SHOW_FOOTER` / `showFooter` | true | 是否显示页脚 |
-| `WEBSSH_RDP_ALLOWED_PORTS` | 3389 | RDP 网关允许连接的目标端口白名单，逗号分隔。**放宽等于把网关变成 TCP 代理，务必谨慎** |
 | `WEBSSH_MAX_CONCURRENT_RDP` | 16 | 全局并发 RDP 会话上限 |
 | `WEBSSH_MAX_CONCURRENT_RDP_PER_CLIENT` | 4 | 单客户端并发 RDP 会话上限 |
 | `WEBSSH_RDP_DEBUG` | false | 打印 RDP 握手与转发层日志，排障用 |

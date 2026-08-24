@@ -629,11 +629,11 @@ function connectRdpSession(session, afterStart) {
 
     loadRdpWasm().then(function (mod) {
         session.rdpModule = mod;
-        setRdpOverlay(session, '正在申请连接票据…');
-        return requestRdpTicket(session);
-    }).then(function (ticketInfo) {
+        setRdpOverlay(session, '正在申请短期连接凭证…');
+        return requestRdpCredential(session);
+    }).then(function (credentialInfo) {
         setRdpOverlay(session, '正在连接 ' + session.hostname + '…');
-        return startRdpConnection(session, ticketInfo);
+        return startRdpConnection(session, credentialInfo);
     }).then(function () {
         finish();
     }).catch(function (err) {
@@ -645,7 +645,7 @@ function connectRdpSession(session, afterStart) {
     });
 }
 
-function requestRdpTicket(session) {
+function requestRdpCredential(session) {
     var relay = session.relay || { kind: 'none' };
     var payload = {
         hostname: session.hostname,
@@ -676,7 +676,7 @@ function requestRdpTicket(session) {
     });
 }
 
-function startRdpConnection(session, ticketInfo) {
+function startRdpConnection(session, credentialInfo) {
     var mod = session.rdpModule;
     var s = session.rdpSettings;
     var size = rdpTargetSize(session);
@@ -688,9 +688,9 @@ function startRdpConnection(session, ticketInfo) {
     builder.username(session.username);
     builder.password(session.password);
     if (session.domain) builder.serverDomain(session.domain);
-    builder.destination(ticketInfo.destination || (session.hostname + ':' + session.port));
+    builder.destination(credentialInfo.destination || (session.hostname + ':' + session.port));
     builder.proxyAddress(proxyAddress);
-    builder.authToken(ticketInfo.ticket);
+    builder.authToken(credentialInfo.credential);
     builder.desktopSize(new mod.DesktopSize(size.width, size.height));
     builder.renderCanvas(session.canvas);
     // NLA/CredSSP 是 Windows 默认要求的，关掉基本连不上现代系统。
@@ -929,7 +929,7 @@ function attachRdpInput(session, mod) {
         send(events);
     }
 
-    function onContextMenu(e) { e.preventDefault(); }
+    function onContextMenu(e) { e.preventDefault(); e.stopPropagation(); }
 
     // 失焦时把按下的键全部松开，否则回来时会出现"Ctrl 粘住"的现象。
     function onBlur() {
@@ -1090,7 +1090,7 @@ function connectRdpFromLogin() {
     btn.classList.add('loading');
     setStatus('connecting', '连接中...');
 
-    var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value);
+    var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value, 3389);
     var host = hp.host;
     var port = hp.port || 3389;
     var username = document.getElementById('username').value.trim();

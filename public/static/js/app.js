@@ -335,24 +335,64 @@ function normalizePortValue(port, fallback) {
     return p;
 }
 
-function parseHostPortInput(host, port) {
-    var out = { host: String(host || '').trim(), port: normalizePortValue(port, 22) };
+function parseHostPortInput(host, port, fallbackPort) {
+    var fallback = normalizePortValue(fallbackPort, 22);
+    var out = { host: String(host || '').trim().replace(/\uFF1A/g, ':'), port: normalizePortValue(port, fallback), explicitPort: false };
     if (!out.host) return out;
+
+    // Accept [IPv6]:port, domain:port and IPv4:port. Bare IPv6 remains intact.
     var bracket = out.host.match(/^\[([^\]]+)\](?::(\d+))?$/);
     if (bracket) {
         out.host = bracket[1];
-        if (bracket[2]) out.port = normalizePortValue(bracket[2], out.port);
+        if (bracket[2]) {
+            var bracketPort = Number(bracket[2]);
+            if (bracketPort >= 1 && bracketPort <= 65535) {
+                out.port = bracketPort;
+                out.explicitPort = true;
+            }
+        }
         return out;
     }
     var idx = out.host.lastIndexOf(':');
     if (idx > 0 && out.host.indexOf(':') === idx) {
         var maybePort = out.host.slice(idx + 1);
-        if (/^\d+$/.test(maybePort)) {
-            out.port = normalizePortValue(maybePort, out.port);
-            out.host = out.host.slice(0, idx);
+        if (/^\d{1,5}$/.test(maybePort)) {
+            var suffixPort = Number(maybePort);
+            if (suffixPort >= 1 && suffixPort <= 65535) {
+                out.port = suffixPort;
+                out.host = out.host.slice(0, idx).trim();
+                out.explicitPort = true;
+            }
         }
     }
     return out;
+}
+
+function currentHostPortFallback() {
+    return typeof currentProtocol !== 'undefined' && currentProtocol === 'rdp' ? 3389 : 22;
+}
+
+// Pasting host:port should immediately split the suffix into the port field.
+// The delayed paste pass handles browsers that update input.value after the event.
+function syncHostPortFields(hostEl, portEl) {
+    if (!hostEl || !portEl) return;
+    var parsed = parseHostPortInput(hostEl.value, portEl.value, currentHostPortFallback());
+    if (!parsed.explicitPort) return;
+    hostEl.value = formatHostForInput(parsed.host);
+    portEl.value = String(parsed.port);
+}
+
+function initHostPortAutofill() {
+    [['hostname', 'port'], ['newTabHost', 'newTabPort']].forEach(function (ids) {
+        var hostEl = document.getElementById(ids[0]);
+        var portEl = document.getElementById(ids[1]);
+        if (!hostEl || !portEl) return;
+        hostEl.addEventListener('change', function () { syncHostPortFields(hostEl, portEl); });
+        hostEl.addEventListener('blur', function () { syncHostPortFields(hostEl, portEl); });
+        hostEl.addEventListener('paste', function () {
+            setTimeout(function () { syncHostPortFields(hostEl, portEl); }, 0);
+        });
+    });
 }
 
 function isIPv6Host(host) {
@@ -1490,10 +1530,10 @@ function addNewTab() {
     var active = activeIdx >= 0 ? sessions[activeIdx] : null;
     var requiredProtocol = sessionConnectionProtocol(active);
     if (addTabProtocol !== requiredProtocol) configureAddTabProtocol(requiredProtocol);
-    var hp = parseHostPortInput(document.getElementById('newTabHost').value, document.getElementById('newTabPort').value);
+    var fallbackPort = addTabProtocol === 'rdp' ? 3389 : 22;
+    var hp = parseHostPortInput(document.getElementById('newTabHost').value, document.getElementById('newTabPort').value, fallbackPort);
     var h = hp.host;
     if (!h) { showToast('请输入主机地址', 'error'); return; }
-    var fallbackPort = addTabProtocol === 'rdp' ? 3389 : 22;
     var p = hp.port || fallbackPort;
     var u = document.getElementById('newTabUser').value.trim() ||
         (addTabProtocol === 'rdp' ? 'Administrator' : 'root');
@@ -8396,8 +8436,9 @@ addEventListener('beforeunload', function (event) {
 
 // ==================== Copy / Paste / Context Menu ====================
 function termCopy() {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
-    var sel = sessions[activeIdx].term.getSelection();
+    var session = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (!session || session.kind === 'rdp' || !session.term) return;
+    var sel = session.term.getSelection();
     if (!sel) { showToast('没有选中内容', 'info'); return; }
     navigator.clipboard.writeText(sel).then(function () {
         showCopyToast();
@@ -8408,7 +8449,8 @@ function termCopy() {
 }
 
 function termPaste() {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    var active = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (!active || active.kind === 'rdp' || !active.term) return;
     navigator.clipboard.readText().then(function (text) {
         var s = activeIdx >= 0 ? sessions[activeIdx] : null;
         if (!text || !s || !s.ws || s.ws.readyState !== 1) return;
@@ -8423,14 +8465,16 @@ function termPaste() {
 }
 
 function termSelectAll() {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
-    sessions[activeIdx].term.selectAll();
+    var session = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (!session || session.kind === 'rdp' || !session.term) return;
+    session.term.selectAll();
     hideCtxMenu();
 }
 
 function termClear() {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
-    sessions[activeIdx].term.clear();
+    var session = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (!session || session.kind === 'rdp' || !session.term) return;
+    session.term.clear();
     hideCtxMenu();
 }
 
@@ -8469,6 +8513,10 @@ function setupAutoCopy(session) {
 
 // Right-click context menu
 document.getElementById('terminalContainer').addEventListener('contextmenu', function (e) {
+    // RDP owns the canvas right button; never show the SSH terminal menu there.
+    if (e.target && e.target.closest && e.target.closest('.rdp-instance')) return;
+    var active = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (active && active.kind === 'rdp') return;
     e.preventDefault();
     var menu = document.getElementById('ctxMenu');
     menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + 'px';
@@ -8485,7 +8533,7 @@ function hideCtxMenu() {
 
 // Ctrl+Shift+C / Ctrl+Shift+V shortcuts
 document.addEventListener('keydown', function (e) {
-    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    if (activeIdx < 0 || !sessions[activeIdx] || sessions[activeIdx].kind === 'rdp') return;
     if (e.ctrlKey && e.shiftKey && e.key === 'C') { e.preventDefault(); termCopy(); }
     if (e.ctrlKey && e.shiftKey && e.key === 'V') { e.preventDefault(); termPaste(); }
 });
@@ -9575,6 +9623,7 @@ function initPreviewMode() {
 
 // ==================== Init ====================
 warmTerminalEndpoint();
+initHostPortAutofill();
 initTheme();
 initSettings();
 loadVersionCache();

@@ -1,10 +1,14 @@
 package controller
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -23,70 +27,129 @@ import (
 // 网关不参与，也就不需要服务端转码。
 //
 // 目标地址不是从 WebSocket 请求里直接取的：那样任何人都能拿这个端点当成
-// 开放的 TCP 代理去扫内网。前端必须先用 /rdp/session 换一张一次性票据，
-// 票据里锁定了目标地址和中转配置，握手时只认票据登记的目标。
+// 开放的 TCP 代理去扫内网。前端先用 /rdp/session 换取一个短期加密凭证；
+// 凭证封装目标地址和中转配置，服务端不保存任何逐连接票据或中转凭据。
 
 const (
-	rdpTicketTTL      = 90 * time.Second
-	rdpTicketMaxCount = 512
+	rdpCredentialTTL        = 90 * time.Second
+	rdpCredentialMaxEncoded = 56 << 10
+	rdpCredentialVersion    = 1
 )
 
-type rdpTicket struct {
-	id         string
-	host       string
-	port       int
-	relay      core.RDPRelay
-	trustScope string
-	clientIP   string
-	expiresAt  time.Time
-	used       bool
+var rdpCredentialSecret = struct {
+	sync.Once
+	key [32]byte
+	err error
+}{}
+
+var rdpCredentialAAD = []byte("webssh-rdp-credential-v1")
+
+type rdpCredential struct {
+	Version    int           `json:"version"`
+	Host       string        `json:"host"`
+	Port       int           `json:"port"`
+	Relay      core.RDPRelay `json:"relay"`
+	TrustScope string        `json:"trustScope"`
+	ClientIP   string        `json:"clientIP"`
+	ExpiresAt  int64         `json:"expiresAt"`
 }
 
-var rdpTickets = struct {
-	sync.Mutex
-	byID map[string]*rdpTicket
-}{byID: make(map[string]*rdpTicket)}
-
-func pruneRDPTicketsLocked(now time.Time) {
-	for id, ticket := range rdpTickets.byID {
-		if now.After(ticket.expiresAt) || ticket.used {
-			delete(rdpTickets.byID, id)
-		}
+func currentRDPCredentialKey() ([]byte, error) {
+	rdpCredentialSecret.Do(func() {
+		_, rdpCredentialSecret.err = rand.Read(rdpCredentialSecret.key[:])
+	})
+	if rdpCredentialSecret.err != nil {
+		return nil, rdpCredentialSecret.err
 	}
+	return rdpCredentialSecret.key[:], nil
 }
 
-func newRDPTicketID() (string, error) {
-	raw := make([]byte, 24)
-	if _, err := rand.Read(raw); err != nil {
+// sealRDPCredential creates an encrypted, authenticated, short-lived credential.
+// The server stores no per-connection ticket or relay secret: every field needed
+// for the handshake travels inside this credential and is recovered only after
+// AES-GCM authentication succeeds.
+func sealRDPCredential(payload rdpCredential) (string, error) {
+	key, err := currentRDPCredentialKey()
+	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(raw), nil
+	plaintext, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	aead, err := cipherNewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := aead.Seal(nonce, nonce, plaintext, rdpCredentialAAD)
+	encoded := base64.RawURLEncoding.EncodeToString(sealed)
+	if len(encoded) > rdpCredentialMaxEncoded {
+		return "", fmt.Errorf("RDP 中转配置过大")
+	}
+	return encoded, nil
 }
 
-// takeRDPTicket 按常数时间比对取出票据，取出即作废。
-func takeRDPTicket(id string) (*rdpTicket, bool) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, false
-	}
-	now := time.Now()
-	rdpTickets.Lock()
-	defer rdpTickets.Unlock()
-	pruneRDPTicketsLocked(now)
+// cipherNewGCM is a variable only to keep credential cryptography easy to
+// exercise in focused tests without retaining any issued credential state.
+var cipherNewGCM = func(block cipher.Block) (cipher.AEAD, error) {
+	return cipher.NewGCM(block)
+}
 
-	var found *rdpTicket
-	for candidate, ticket := range rdpTickets.byID {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(id)) == 1 {
-			found = ticket
-			break
-		}
+func openRDPCredential(encoded string, clientIP string, trustScope string, now time.Time) (*rdpCredential, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" || len(encoded) > rdpCredentialMaxEncoded {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
 	}
-	if found == nil || found.used || now.After(found.expiresAt) {
-		return nil, false
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
 	}
-	found.used = true
-	delete(rdpTickets.byID, found.id)
-	return found, true
+	key, err := currentRDPCredentialKey()
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipherNewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < aead.NonceSize() {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
+	}
+	nonce, ciphertext := raw[:aead.NonceSize()], raw[aead.NonceSize():]
+	plaintext, err := aead.Open(nil, nonce, ciphertext, rdpCredentialAAD)
+	if err != nil {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
+	}
+	var credential rdpCredential
+	if err := json.Unmarshal(plaintext, &credential); err != nil {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
+	}
+	if credential.Version != rdpCredentialVersion || credential.Host == "" || credential.Port < 1 || credential.Port > 65535 {
+		return nil, fmt.Errorf("RDP 连接凭证无效")
+	}
+	if credential.ExpiresAt <= now.Unix() {
+		return nil, fmt.Errorf("RDP 连接凭证已过期")
+	}
+	if credential.ClientIP == "" || credential.ClientIP != clientIP {
+		return nil, fmt.Errorf("RDP 连接凭证来源不匹配")
+	}
+	if credential.TrustScope == "" || subtle.ConstantTimeCompare([]byte(credential.TrustScope), []byte(trustScope)) != 1 {
+		return nil, fmt.Errorf("RDP 连接凭证浏览器不匹配")
+	}
+	credential.Relay.Normalize()
+	return &credential, nil
 }
 
 type rdpSessionRequest struct {
@@ -104,40 +167,8 @@ type rdpSessionRequest struct {
 	} `json:"relay"`
 }
 
-// rdpAllowedPorts 限制网关能连的端口。默认只放行 RDP 端口，
-// 需要非标端口时用 WEBSSH_RDP_ALLOWED_PORTS 显式配置。
-func rdpAllowedPorts() []int {
-	raw := strings.TrimSpace(os.Getenv("WEBSSH_RDP_ALLOWED_PORTS"))
-	if raw == "" {
-		return []int{3389}
-	}
-	ports := make([]int, 0, 8)
-	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		if port, err := strconv.Atoi(item); err == nil && port > 0 && port <= 65535 {
-			ports = append(ports, port)
-		}
-	}
-	if len(ports) == 0 {
-		return []int{3389}
-	}
-	return ports
-}
-
-func rdpPortAllowed(port int) bool {
-	for _, allowed := range rdpAllowedPorts() {
-		if allowed == port {
-			return true
-		}
-	}
-	return false
-}
-
-// CreateRDPSession 发放一次性票据。前端拿到后作为 RDCleanPath 的
-// proxy_auth 字段传给 WASM 客户端。
+// CreateRDPSession returns an encrypted stateless connection credential. No
+// ticket is inserted into a map, database, file, cache, or other server store.
 func CreateRDPSession(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
@@ -154,11 +185,11 @@ func CreateRDPSession(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	port := request.Port
-	if port <= 0 || port > 65535 {
+	if port == 0 {
 		port = 3389
 	}
-	if !rdpPortAllowed(port) {
-		responseBody.Msg = fmt.Sprintf("不支持连接端口 %d，请在 WEBSSH_RDP_ALLOWED_PORTS 中放行", port)
+	if port < 1 || port > 65535 {
+		responseBody.Msg = fmt.Sprintf("invalid RDP port %d", port)
 		return &responseBody
 	}
 
@@ -183,36 +214,26 @@ func CreateRDPSession(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	id, err := newRDPTicketID()
-	if err != nil {
-		responseBody.Msg = "生成票据失败: " + err.Error()
-		return &responseBody
-	}
-
 	now := time.Now()
-	rdpTickets.Lock()
-	pruneRDPTicketsLocked(now)
-	if len(rdpTickets.byID) >= rdpTicketMaxCount {
-		rdpTickets.Unlock()
-		responseBody.Msg = "RDP 连接任务过多，请稍后重试"
+	credential, err := sealRDPCredential(rdpCredential{
+		Version:    rdpCredentialVersion,
+		Host:       host,
+		Port:       port,
+		Relay:      relay,
+		TrustScope: trustScope,
+		ClientIP:   requestIP(c),
+		ExpiresAt:  now.Add(rdpCredentialTTL).Unix(),
+	})
+	if err != nil {
+		responseBody.Msg = "生成 RDP 连接凭证失败: " + err.Error()
 		return &responseBody
 	}
-	rdpTickets.byID[id] = &rdpTicket{
-		id:         id,
-		host:       host,
-		port:       port,
-		relay:      relay,
-		trustScope: trustScope,
-		clientIP:   requestIP(c),
-		expiresAt:  now.Add(rdpTicketTTL),
-	}
-	rdpTickets.Unlock()
 
 	responseBody.Data = map[string]interface{}{
-		"ticket":      id,
+		"credential":  credential,
 		"destination": net.JoinHostPort(host, strconv.Itoa(port)),
 		"relay":       relay.Describe(),
-		"expiresIn":   int(rdpTicketTTL / time.Second),
+		"expiresIn":   int(rdpCredentialTTL / time.Second),
 	}
 	return &responseBody
 }
@@ -253,25 +274,31 @@ func RdpWs(c *gin.Context) {
 		return
 	}
 
-	ticket, ok := takeRDPTicket(request.ProxyAuth)
-	if !ok {
-		fmt.Println("rdp rejected: invalid or expired ticket")
+	trustScope, err := requestTrustScope(c)
+	if err != nil {
+		fmt.Println("rdp rejected: unavailable browser scope")
+		writeRDPError(wsConn, core.RDCleanPathErrorGeneral, 403)
+		return
+	}
+	credential, err := openRDPCredential(request.ProxyAuth, requestIP(c), trustScope, time.Now())
+	if err != nil {
+		fmt.Println("rdp rejected:", err)
 		writeRDPError(wsConn, core.RDCleanPathErrorGeneral, 403)
 		return
 	}
 
-	// 票据锁定了目标。WASM 报上来的 destination 只用于核对，不作为连接依据，
-	// 这样即使有人改了前端也没法把网关指向别的主机。
+	// The encrypted credential locks the target. The WASM destination is only
+	// cross-checked and is never used as an authority for server-side dialing.
 	host, port, err := core.ParseRDPDestination(request.Destination)
-	if err != nil || !strings.EqualFold(host, ticket.host) || port != ticket.port {
-		fmt.Printf("rdp rejected: destination mismatch (want %s:%d)\n", ticket.host, ticket.port)
+	if err != nil || !strings.EqualFold(host, credential.Host) || port != credential.Port {
+		fmt.Printf("rdp rejected: destination mismatch (want %s:%d)\n", credential.Host, credential.Port)
 		writeRDPError(wsConn, core.RDCleanPathErrorGeneral, 403)
 		return
 	}
 
 	ctx := c.Request.Context()
-	dialer := &core.RDPDialer{Relay: &ticket.relay, TrustScope: ticket.trustScope}
-	handshake, err := core.PerformRDPHandshake(ctx, dialer, ticket.host, ticket.port, request.X224ConnectionPDU)
+	dialer := &core.RDPDialer{Relay: &credential.Relay, TrustScope: credential.TrustScope}
+	handshake, err := core.PerformRDPHandshake(ctx, dialer, credential.Host, credential.Port, request.X224ConnectionPDU)
 	if err != nil {
 		fmt.Println("rdp handshake error:", err)
 		writeRDPError(wsConn, core.RDCleanPathErrorNegotiation, 502)
@@ -313,6 +340,22 @@ func writeRDPError(wsConn *websocket.Conn, errorCode int, httpStatus int) {
 	_ = wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = wsConn.WriteMessage(websocket.BinaryMessage, payload)
 	_ = wsConn.SetWriteDeadline(time.Time{})
+}
+
+func writeRDPAll(w io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if n > 0 {
+			payload = payload[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 // relayRDPTraffic 在 WebSocket 与 TLS 连接之间做双向透明转发。
@@ -370,7 +413,7 @@ func relayRDPTraffic(wsConn *websocket.Conn, handshake *core.RDPHandshake) {
 			if messageType != websocket.BinaryMessage || len(payload) == 0 {
 				continue
 			}
-			if _, err := handshake.Conn.Write(payload); err != nil {
+			if err := writeRDPAll(handshake.Conn, payload); err != nil {
 				rdpDebugf("relay: tls write failed: %v", err)
 				return
 			}

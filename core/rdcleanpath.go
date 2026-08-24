@@ -14,7 +14,7 @@ import (
 //	SEQUENCE {
 //	  [0] version            INTEGER            -- 固定 3390
 //	  [2] destination        UTF8String         -- "host:port"
-//	  [3] proxy_auth         UTF8String         -- 我们用它承载一次性票据
+//	  [3] proxy_auth         UTF8String         -- 我们用它承载短期加密凭证
 //	  [5] preconnection_blob UTF8String OPTIONAL
 //	  [6] x224_connection_pdu OCTET STRING
 //	}

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -206,6 +207,31 @@ func ParseRDPDestination(destination string) (string, int, error) {
 	return host, port, nil
 }
 
+const rdpX224MaxPacket = 64 << 10
+
+func readRDPX224Response(conn io.Reader) ([]byte, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("RDP 服务端在返回 X.224 响应前关闭了连接（通常是目标端口不是 RDP 服务）")
+		}
+		return nil, fmt.Errorf("读取 X.224 响应头失败: %w", err)
+	}
+	if header[0] != 3 || header[1] != 0 {
+		return nil, fmt.Errorf("RDP 服务端返回了无效的 TPKT 响应头")
+	}
+	packetLength := int(binary.BigEndian.Uint16(header[2:4]))
+	if packetLength < len(header) || packetLength > rdpX224MaxPacket {
+		return nil, fmt.Errorf("RDP X.224 响应长度无效: %d", packetLength)
+	}
+	packet := make([]byte, packetLength)
+	copy(packet, header)
+	if _, err := io.ReadFull(conn, packet[len(header):]); err != nil {
+		return nil, fmt.Errorf("读取完整 X.224 响应失败: %w", err)
+	}
+	return packet, nil
+}
+
 // RDPHandshake 是 RDCleanPath 网关握手的结果。
 type RDPHandshake struct {
 	X224Response []byte
@@ -243,22 +269,14 @@ func PerformRDPHandshake(ctx context.Context, dialer *RDPDialer, host string, po
 		return nil, fmt.Errorf("发送 X.224 连接请求失败: %w", err)
 	}
 
-	// X.224 Connection Confirm 很短，一次读取即可拿全。
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
+	// TCP is a byte stream: one Read is not guaranteed to contain the full
+	// X.224/TPKT response. Read the fixed TPKT header first, validate its
+	// declared length, then read the remainder exactly.
+	x224Response, err := readRDPX224Response(conn)
 	if err != nil {
 		cleanup()
-		if err == io.EOF {
-			return nil, fmt.Errorf("RDP 服务端在返回 X.224 响应前关闭了连接（通常是目标端口不是 RDP 服务）")
-		}
-		return nil, fmt.Errorf("读取 X.224 响应失败: %w", err)
+		return nil, err
 	}
-	if n == 0 {
-		cleanup()
-		return nil, fmt.Errorf("RDP 服务端返回了空的 X.224 响应")
-	}
-	x224Response := make([]byte, n)
-	copy(x224Response, buf[:n])
 
 	// RDP 服务端基本都用自签名证书，这里不做校验；证书链会原样交给
 	// 浏览器，由 WASM 侧做 CredSSP 的通道绑定。
