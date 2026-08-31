@@ -237,6 +237,9 @@ func main() {
 		api.GET("/admin/bookmarks/backup", controller.AdminExportScriptBookmarks)
 		api.GET("/admin/version", controller.AdminVersion)
 		api.GET("/admin/update/status", controller.AdminUpdateStatus)
+		// 分享链接的接收方通常没有本站账号，所以读取刻意不要求登录。
+		// 拿到的只是密文，解密密钥在链接的 # 之后，从不到达服务端。
+		api.GET("/share/:token", controller.GetShare)
 
 		accountWrites := api.Group("")
 		accountWrites.Use(controller.SameOriginOnly())
@@ -245,6 +248,7 @@ func main() {
 		accountWrites.POST("/auth/change-password", controller.AuthChangePassword)
 		accountWrites.POST("/auth/logout", controller.AuthLogout)
 		accountWrites.POST("/scripts/sync", controller.SyncScriptBookmarks)
+		accountWrites.POST("/share", controller.CreateShare)
 		accountWrites.POST("/admin/accounts", controller.AdminCreateAccount)
 		accountWrites.PUT("/admin/accounts", controller.AdminUpdateAccount)
 		accountWrites.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)

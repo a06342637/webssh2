@@ -644,6 +644,21 @@ function createSession(hostname, port, username, sshInfo, opts) {
     return session;
 }
 
+// 复制/粘贴按钮 SSH 和 RDP 都要用，只是含义不同：SSH 是终端选区，
+// RDP 是把远端剪贴板取回本地 / 把本地剪贴板推给远端。这里只同步提示文案与待取角标。
+function updateClipboardControls(session) {
+    var isRdp = !!(session && session.kind === 'rdp');
+    var copyBtn = document.getElementById('termCopyBtn');
+    var pasteBtn = document.getElementById('termPasteBtn');
+    if (copyBtn && copyBtn.classList) {
+        copyBtn.title = isRdp ? '取回远程桌面复制的内容' : '复制选中 (Ctrl+Shift+C)';
+        copyBtn.classList.toggle('clipboard-pending', !!(isRdp && session._remoteClipboardPending));
+    }
+    if (pasteBtn) {
+        pasteBtn.title = isRdp ? '把本地剪贴板粘贴到远程桌面' : '粘贴 (Ctrl+Shift+V)';
+    }
+}
+
 function switchTab(idx, userActivated) {
     if (idx < 0 || idx >= sessions.length) return;
     var prevIdx = activeIdx;
@@ -660,6 +675,7 @@ function switchTab(idx, userActivated) {
     renderTabs();
     updateBackToSessionsButton();
     var s = sessions[idx];
+    updateClipboardControls(s);
     // RDP 标签页没有终端实例，也没有 SSH 通道，跳过所有终端专属的联动。
     if (s.kind === 'rdp') {
         document.body.classList.add('active-rdp');
@@ -8437,7 +8453,16 @@ addEventListener('beforeunload', function (event) {
 // ==================== Copy / Paste / Context Menu ====================
 function termCopy() {
     var session = activeIdx >= 0 ? sessions[activeIdx] : null;
-    if (!session || session.kind === 'rdp' || !session.term) return;
+    if (!session) return;
+    // RDP 没有终端选区。远端复制的内容是异步推过来的，那一刻没有用户手势、
+    // 写系统剪贴板必被拒，所以先缓存下来，等用户点这个按钮（有手势）再落盘。
+    if (session.kind === 'rdp') {
+        if (typeof rdpCopy === 'function') rdpCopy(session);
+        else showToast('远程桌面剪贴板尚未就绪', 'error');
+        hideCtxMenu();
+        return;
+    }
+    if (!session.term) return;
     var sel = session.term.getSelection();
     if (!sel) { showToast('没有选中内容', 'info'); return; }
     navigator.clipboard.writeText(sel).then(function () {
@@ -8448,20 +8473,198 @@ function termCopy() {
     hideCtxMenu();
 }
 
-function termPaste() {
-    var active = activeIdx >= 0 ? sessions[activeIdx] : null;
-    if (!active || active.kind === 'rdp' || !active.term) return;
-    navigator.clipboard.readText().then(function (text) {
-        var s = activeIdx >= 0 ? sessions[activeIdx] : null;
-        if (!text || !s || !s.ws || s.ws.readyState !== 1) return;
-        // 交给 xterm 处理：它会按远端的 bracketed paste 状态正确包裹多行内容，
-        // 最终仍走 onData → sendTerminalInput，不会被误当成控制指令。
-        s.term.paste(text);
-        s.term.focus();
-    }).catch(function () {
-        showToast('无法读取剪贴板，请使用 Ctrl+Shift+V', 'info');
+var sshClipboardPasteFallbackCleanup = null;
+
+function sshClipboardReadAvailable() {
+    if (typeof window !== 'undefined' && window.isSecureContext === false) return false;
+    return typeof navigator !== 'undefined' && navigator.clipboard &&
+        typeof navigator.clipboard.readText === 'function';
+}
+
+function sshSessionCanPaste(session) {
+    return !!(session && session.kind !== 'rdp' && session.term &&
+        sessions.indexOf(session) !== -1 && session.ws && session.ws.readyState === 1);
+}
+
+function pasteTextToSshSession(session, text) {
+    if (typeof text !== 'string') {
+        showToast('剪贴板没有可粘贴的文本', 'error');
+        return false;
+    }
+    if (!text.length) {
+        showToast('剪贴板中没有文本内容', 'info');
+        return false;
+    }
+    if (!sshSessionCanPaste(session)) {
+        showToast('发起粘贴的 SSH 连接已关闭，内容未发送', 'error');
+        return false;
+    }
+    try {
+        // Only xterm performs the paste. Its onData callback is already bound to
+        // this exact session, so multiline/bracketed-paste handling stays intact.
+        session.term.paste(text);
+        if (sessions[activeIdx] === session) session.term.focus();
+        return true;
+    } catch (e) {
+        showToast('粘贴到 SSH 终端失败，请重试', 'error');
+        return false;
+    }
+}
+
+// 手动粘贴兜底框。浏览器只在「用户手势」里放行 clipboard.readText()，
+// 而权限被拒 / 非 HTTPS 时连手势也救不了，这时只能让用户在一个真实输入框里
+// 按 Ctrl+V —— paste 事件自带 clipboardData，不受权限限制，也不像 prompt()
+// 那样会把多行内容压成一行。SSH 和 RDP 共用这个框，只是回调不同。
+function openClipboardPasteFallback(handlers) {
+    handlers = handlers || {};
+    var canPaste = typeof handlers.canPaste === 'function' ? handlers.canPaste : function () { return true; };
+    var onText = typeof handlers.onText === 'function' ? handlers.onText : function () { };
+    var targetLabel = handlers.label || 'SSH 终端';
+    var closedMessage = handlers.closedMessage || '发起粘贴的连接已关闭，内容未发送';
+
+    if (!canPaste()) {
+        showToast(closedMessage, 'error');
+        return false;
+    }
+    if (!document.body || typeof document.createElement !== 'function') {
+        showToast('浏览器无法打开手动粘贴框', 'error');
+        return false;
+    }
+    if (sshClipboardPasteFallbackCleanup) sshClipboardPasteFallbackCleanup(false);
+
+    var previousFocus = document.activeElement;
+    var overlay = document.createElement('div');
+    overlay.setAttribute('data-webssh-clipboard-paste', handlers.kind || 'ssh');
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);padding:20px;';
+
+    var panel = document.createElement('div');
+    panel.style.cssText = 'width:min(560px,100%);padding:18px;border:1px solid rgba(120,190,255,.45);border-radius:12px;background:#101525;color:#eef6ff;box-shadow:0 18px 60px rgba(0,0,0,.45);font:14px/1.5 system-ui,sans-serif;';
+    var title = document.createElement('strong');
+    title.textContent = '浏览器无法直接读取剪贴板';
+    title.style.cssText = 'display:block;margin-bottom:6px;font-size:15px;';
+    var hint = document.createElement('div');
+    hint.textContent = '请在下方输入框按 Ctrl+V 粘贴；按 Escape 可取消。';
+    hint.style.cssText = 'margin-bottom:10px;color:#b9c7da;';
+    var textarea = document.createElement('textarea');
+    textarea.setAttribute('aria-label', '手动粘贴到' + targetLabel);
+    textarea.setAttribute('autocomplete', 'off');
+    textarea.setAttribute('spellcheck', 'false');
+    textarea.placeholder = '在这里按 Ctrl+V（支持多行命令和私钥）';
+    textarea.style.cssText = 'box-sizing:border-box;width:100%;min-height:120px;resize:vertical;padding:10px;border:1px solid #4a607d;border-radius:8px;background:#080c16;color:#fff;font:13px/1.5 ui-monospace,Consolas,monospace;outline:none;';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'display:block;margin:12px 0 0 auto;padding:7px 16px;border:1px solid #53657d;border-radius:7px;background:#1b2638;color:#eef6ff;cursor:pointer;';
+
+    panel.appendChild(title);
+    panel.appendChild(hint);
+    panel.appendChild(textarea);
+    panel.appendChild(cancel);
+    overlay.appendChild(panel);
+
+    var finished = false;
+    function cleanup(restoreFocus) {
+        if (finished) return;
+        finished = true;
+        if (sshClipboardPasteFallbackCleanup === cleanup) sshClipboardPasteFallbackCleanup = null;
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        if (restoreFocus && previousFocus && typeof previousFocus.focus === 'function') {
+            try { previousFocus.focus(); } catch (e) { }
+        }
+    }
+
+    textarea.addEventListener('paste', function (event) {
+        event.stopPropagation();
+        var clipboardData = event.clipboardData;
+        if (!clipboardData || typeof clipboardData.getData !== 'function') {
+            showToast('浏览器没有提供粘贴内容，请重试', 'error');
+            return;
+        }
+        event.preventDefault();
+        var text = clipboardData.getData('text/plain');
+        if (!text) text = clipboardData.getData('text');
+        if (!text) {
+            showToast('剪贴板中没有文本内容', 'info');
+            return;
+        }
+        cleanup(false);
+        onText(text);
     });
+    textarea.addEventListener('keydown', function (event) {
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            cleanup(true);
+        }
+    });
+    cancel.addEventListener('click', function () { cleanup(true); });
+    overlay.addEventListener('mousedown', function (event) {
+        if (event.target === overlay) cleanup(true);
+    });
+
+    sshClipboardPasteFallbackCleanup = cleanup;
+    document.body.appendChild(overlay);
+    try { textarea.focus(); } catch (e) { }
+    return true;
+}
+
+function openSshClipboardPasteFallback(session) {
+    return openClipboardPasteFallback({
+        kind: 'ssh',
+        label: ' SSH 终端',
+        closedMessage: '发起粘贴的 SSH 连接已关闭，内容未发送',
+        canPaste: function () { return sshSessionCanPaste(session); },
+        onText: function (text) { pasteTextToSshSession(session, text); }
+    });
+}
+
+function termPaste() {
+    var targetSession = activeIdx >= 0 ? sessions[activeIdx] : null;
     hideCtxMenu();
+    if (!targetSession) {
+        showToast('没有可粘贴的活动连接', 'error');
+        return;
+    }
+    if (targetSession.kind === 'rdp') {
+        if (typeof rdpPaste === 'function') rdpPaste(targetSession);
+        else showToast('远程桌面剪贴板尚未就绪', 'error');
+        return;
+    }
+    if (!sshSessionCanPaste(targetSession)) {
+        showToast('SSH 连接尚未就绪，无法粘贴', 'error');
+        return;
+    }
+
+    function useManualPaste() {
+        if (sshSessionCanPaste(targetSession)) openSshClipboardPasteFallback(targetSession);
+        else showToast('发起粘贴的 SSH 连接已关闭，内容未发送', 'error');
+    }
+
+    if (!sshClipboardReadAvailable()) {
+        useManualPaste();
+        return;
+    }
+
+    var readResult;
+    try {
+        readResult = navigator.clipboard.readText();
+    } catch (e) {
+        useManualPaste();
+        return;
+    }
+    Promise.resolve(readResult).then(function (text) {
+        if (typeof text !== 'string') {
+            useManualPaste();
+            return;
+        }
+        pasteTextToSshSession(targetSession, text);
+    }).catch(function () {
+        // Permission denial and insecure-context failures both use the same
+        // gesture-based path; no prompt(), so multiline text remains intact.
+        useManualPaste();
+    });
 }
 
 function termSelectAll() {
@@ -8533,9 +8736,13 @@ function hideCtxMenu() {
 
 // Ctrl+Shift+C / Ctrl+Shift+V shortcuts
 document.addEventListener('keydown', function (e) {
-    if (activeIdx < 0 || !sessions[activeIdx] || sessions[activeIdx].kind === 'rdp') return;
-    if (e.ctrlKey && e.shiftKey && e.key === 'C') { e.preventDefault(); termCopy(); }
-    if (e.ctrlKey && e.shiftKey && e.key === 'V') { e.preventDefault(); termPaste(); }
+    if (activeIdx < 0 || !sessions[activeIdx]) return;
+    var key = String(e.key || '').toUpperCase();
+    if (!e.ctrlKey || !e.shiftKey) return;
+    // 两个快捷键对 SSH 和 RDP 都生效：RDP 下它们分别是「取回远端剪贴板」
+    // 和「把本地剪贴板推给远端」，是这两个动作唯一带用户手势的入口。
+    if (key === 'V') { e.preventDefault(); termPaste(); return; }
+    if (key === 'C') { e.preventDefault(); termCopy(); }
 });
 
 // ==================== Command Input Bar ====================
@@ -8720,8 +8927,14 @@ var FG_COLORS = ['#1a1a2e','#0f172a','#e8e8f0','#ffffff','#00ff88','#00d4ff','#f
 var BG_COLORS = ['#e8eaf0','#f8fafc','#ffffff','#0a0a1a','#000000','#1a1a2e','#0d1117','#1e1e2e','#282a36','#002b36','#2e3440','#1a1b26','#161616','#0c0c1d','#121212','#0f172a','#18181b','#27272a','#1c1917'];
 var CURSOR_COLORS = ['#0088cc','#00d4ff','#ffffff','#00ff88','#ffbe0b','#ff006e','#7b2ff7','#ff4488','#f97316','#e879f9','#a3e635'];
 
+// 配色面板已内联进顶栏的「设置」下拉，不再是独立弹层（见 share.js 的
+// toggleConnectionSettingsMenu）。这个函数留给旧入口兜底，面板不存在时静默跳过。
 function toggleColorPicker() {
     var p = document.getElementById('colorPanel');
+    if (!p) {
+        if (typeof toggleConnectionSettingsMenu === 'function') toggleConnectionSettingsMenu();
+        return;
+    }
     if (p.classList.contains('show')) {
         p.classList.remove('show');
     } else {
@@ -8809,11 +9022,11 @@ function resetTermColors() {
     showToast('已重置默认颜色', 'info');
 }
 
-// Close color picker on outside click
+// Close color picker on outside click（配色已内联进设置下拉，这里只对旧结构生效）
 document.addEventListener('click', function (e) {
     var panel = document.getElementById('colorPanel');
     var btn = document.getElementById('colorPickerBtn');
-    if (panel && panel.classList.contains('show') && !panel.contains(e.target) && !btn.contains(e.target)) {
+    if (panel && panel.classList.contains('show') && !panel.contains(e.target) && !(btn && btn.contains(e.target))) {
         panel.classList.remove('show');
     }
 });

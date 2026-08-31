@@ -32,6 +32,7 @@ func installTestAccountStore(t *testing.T) string {
 				adminToken: {Username: "admin", ExpiresAt: time.Now().Add(time.Hour).Unix()},
 			},
 			Scripts: map[string]StoredScripts{},
+			Shares:  map[string]StoredShare{},
 		},
 	}
 	accountStore = store

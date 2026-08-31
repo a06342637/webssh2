@@ -2132,36 +2132,195 @@ body.has-live-sessions .back-to-sessions { display: inline-flex; }
     .login-container { transform: none !important; }
 }
 
-/* ==================== 新建连接弹窗 ==================== */
-/* 协议由当前会话锁定，字段按 SSH / RDP 自动显隐 */
+/* ==================== ADD CONNECTION MODAL ==================== */
+/* Reduce the desktop card from 460px to about 330px while retaining fluid viewport bounds. */
 
-.add-tab-card { width: min(460px, 94vw); }
+#addTabModal {
+    align-items: center;
+    padding: 12px;
+    overflow-x: hidden;
+}
 
+/* 「添加连接」卡片整体比通用 .modal-card（360px）收窄约三成：
+   宽度 360→300，内边距与控件高度同步下调，避免只缩宽度导致比例失衡。 */
+.add-tab-card {
+    width: min(300px, 94vw);
+    max-width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+    border-radius: 11px;
+}
 
-.add-tab-body { gap: 12px; }
+.add-tab-card > .drawer-hd {
+    min-height: 36px;
+    gap: 5px;
+    padding: 7px 10px;
+    font-size: 12px;
+}
 
+.add-tab-card > .drawer-hd > span {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 5px;
+}
+
+.add-tab-card > .drawer-hd svg { width: 12px; height: 12px; }
+.add-tab-card > .drawer-hd .settings-close { width: 23px; height: 23px; }
+
+.add-tab-card > .add-tab-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 6px;
+    padding: 8px 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+
+.add-tab-card > .modal-body:last-child {
+    flex: 0 0 auto;
+    padding: 0 10px 9px;
+    overflow: visible;
+}
+
+.add-tab-body .input-row { min-width: 0; flex-direction: row; gap: 6px; }
+.add-tab-body .input-field { min-width: 0; gap: 2px; }
+.add-tab-body .input-field label {
+    font-size: 10px;
+    line-height: 1.3;
+    letter-spacing: .5px;
+}
+
+.add-tab-body .input-wrapper { min-width: 0; }
+.add-tab-body .input-wrapper input {
+    min-width: 0;
+    height: 28px;
+    padding: 4px 7px 4px 27px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 18px;
+}
+
+.add-tab-body .input-icon {
+    left: 8px;
+    width: 12px;
+    height: 12px;
+}
+
+.add-tab-body .auth-tabs {
+    gap: 3px;
+    padding: 2px;
+    border-radius: 6px;
+}
+
+.add-tab-body .auth-tab {
+    min-height: 26px;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    font-size: 11px;
+}
+
+.add-tab-body .auth-tab svg { width: 12px; height: 12px; }
 .add-tab-body .auth-panel { display: none; }
-.add-tab-body .auth-panel.active { display: block; }
+.add-tab-body .auth-panel.active {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
 
-/* RDP 没有密钥登录，也不需要密钥面板 */
+/* Keep long private keys scrollable and vertically resizable inside the compact card. */
+.add-tab-body #newTabKey {
+    min-height: 72px;
+    max-height: min(200px, 32dvh);
+    padding: 7px 8px;
+    overflow: auto;
+    resize: vertical;
+    font-size: 11px;
+    line-height: 1.45;
+    scrollbar-gutter: stable;
+}
+
+.add-tab-body > .checkbox-field {
+    min-height: 18px;
+    gap: 6px;
+    padding: 1px 0;
+    font-size: 11px;
+}
+
+.add-tab-body > .checkbox-field .checkbox-custom { width: 14px; height: 14px; }
+
+/* RDP has no private-key authentication panel. */
 #addTabModal.at-rdp .add-tab-ssh-only { display: none !important; }
 
-/* SSH 只有 SOCKS5 一种代理，不需要选中转方式 */
+/* SSH uses SOCKS5 only, so it does not need a relay-type selector. */
 .add-tab-rdp-only { display: none; }
 #addTabModal.at-rdp .add-tab-rdp-only { display: flex; }
 #addTabModal.at-rdp .input-row.add-tab-rdp-only { display: flex; }
 
 #newTabRelayPanel { display: none; }
-#newTabRelayPanel.show { display: block; }
+#newTabRelayPanel.show { display: flex; }
+
+.add-tab-body .proxy-panel {
+    gap: 6px;
+    padding: 7px;
+    border-radius: 7px;
+}
+
+#newTabRelayPanel .input-row { gap: 6px; }
+#newTabRelayPanel .input-wrapper input { height: 27px; padding: 4px 6px; font-size: 11px; }
+#newTabRelayPanel .rdp-select {
+    min-height: 27px;
+    padding: 4px 6px;
+    color: var(--t1);
+    background: var(--inp);
+    border-color: var(--brd);
+    font-size: 11px;
+}
 
 #addTabModal .rdp-quick-row {
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
-    padding: 10px 12px;
+    gap: 6px;
+    padding: 6px 7px;
     background: rgba(255, 255, 255, .035);
     border: 1px solid var(--brd);
-    border-radius: 10px;
+    border-radius: 7px;
+}
+
+#addTabModal .rdp-settings-btn {
+    gap: 4px;
+    padding: 5px 7px;
+    color: var(--t1);
+    background: var(--inp);
+    font-size: 11px;
+}
+#addTabModal .rdp-quick-summary { min-width: 0; color: var(--t2); font-size: 10px; overflow-wrap: anywhere; }
+
+.add-tab-card > .modal-body:last-child .input-row { flex-direction: row; gap: 6px !important; }
+.add-tab-card > .modal-body:last-child .drawer-add {
+    min-height: 30px;
+    padding: 6px 8px;
+    font-size: 11.5px;
+}
+
+html[data-theme="light"] #newTabRelayPanel {
+    background: rgba(99, 32, 192, .04);
+    border-color: rgba(99, 32, 192, .16);
+}
+
+@media (max-width: 420px) {
+    #addTabModal { padding: 8px; }
+    .add-tab-card { max-width: 100%; max-height: calc(100dvh - 16px); }
+    .add-tab-card > .add-tab-body { padding-inline: 10px; }
+    .add-tab-card > .modal-body:last-child { padding-right: 10px; padding-bottom: 9px; padding-left: 10px; }
+    .add-tab-body .input-row { gap: 6px; }
+    #newTabRelayPanel .input-row { gap: 6px; }
+}
+
+@media (max-height: 560px) {
+    #addTabModal { align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
+    .add-tab-card { max-height: calc(100dvh - 16px); }
 }
 
 /* 书签里的协议标记与「未存密码」提示 */
@@ -2183,4 +2342,644 @@ body.has-live-sessions .back-to-sessions { display: inline-flex; }
     color: #ffbe0b;
     background: rgba(255, 190, 11, .12);
     border-radius: 4px;
+}
+
+/* ==================== CONNECTION SETTINGS / SHARE ==================== */
+/* These component tokens keep the forthcoming toolbar menu and share dialog
+   opaque enough over both terminal text and a live RDP canvas. */
+:root,
+html[data-theme="dark"] {
+    --connection-popover-bg: #000;
+    --connection-surface-bg: #050505;
+    --connection-surface-hover: rgba(255, 255, 255, .075);
+    --connection-component-border: rgba(255, 255, 255, .18);
+    --connection-component-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+
+html[data-theme="light"] {
+    --connection-popover-bg: rgba(255, 255, 255, .98);
+    --connection-surface-bg: rgba(17, 24, 39, .035);
+    --connection-surface-hover: rgba(0, 136, 204, .075);
+    --connection-component-border: rgba(17, 24, 39, .14);
+    --connection-component-shadow: 0 18px 48px rgba(30, 41, 59, .18);
+}
+
+@media (prefers-color-scheme: light) {
+    html:not([data-theme]) {
+        --connection-popover-bg: rgba(255, 255, 255, .98);
+        --connection-surface-bg: rgba(17, 24, 39, .035);
+        --connection-surface-hover: rgba(0, 136, 204, .075);
+        --connection-component-border: rgba(17, 24, 39, .14);
+        --connection-component-shadow: 0 18px 48px rgba(30, 41, 59, .18);
+    }
+}
+
+/* Toolbar connection-settings dropdown. */
+.connection-settings-wrap {
+    position: relative;
+    z-index: 4;
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    overflow: visible;
+}
+
+#connectionSettingsMenu.connection-settings-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 1350;
+    display: none;
+    flex-direction: column;
+    width: min(310px, calc(100vw - 24px));
+    max-height: min(70dvh, 480px);
+    padding: 6px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    color: var(--t1);
+    background: var(--connection-popover-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 11px;
+    box-shadow: var(--connection-component-shadow);
+    backdrop-filter: blur(20px) saturate(1.25);
+    -webkit-backdrop-filter: blur(20px) saturate(1.25);
+    transform-origin: top right;
+}
+
+#connectionSettingsMenu.connection-settings-menu.show {
+    display: flex;
+    animation: connectionMenuIn .16s cubic-bezier(.2, .8, .2, 1);
+}
+
+@keyframes connectionMenuIn {
+    from { opacity: 0; transform: translateY(-5px) scale(.98); }
+    to { opacity: 1; transform: none; }
+}
+
+#connectionSettingsMenu .connection-settings-head,
+#connectionSettingsMenu .connection-settings-menu-head,
+#connectionSettingsMenu .head {
+    position: sticky;
+    top: -6px;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 34px;
+    gap: 10px;
+    padding: 8px;
+    color: var(--t1);
+    background: var(--connection-popover-bg);
+    border-bottom: 1px solid var(--connection-component-border);
+    font-size: 12.5px;
+    font-weight: 700;
+}
+
+#connectionSettingsMenu .connection-settings-row,
+#connectionSettingsMenu .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-width: 0;
+    gap: 12px;
+    padding: 9px 8px;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--brd);
+    font: inherit;
+    text-align: left;
+}
+
+#connectionSettingsMenu .connection-settings-row:last-child,
+#connectionSettingsMenu .row:last-child { border-bottom: 0; }
+
+#connectionSettingsMenu button.connection-settings-row { cursor: pointer; }
+#connectionSettingsMenu button.connection-settings-row:hover { background: var(--connection-surface-hover); }
+
+#connectionSettingsMenu .connection-settings-section {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 4px;
+}
+
+#connectionSettingsMenu .connection-settings-section + .connection-settings-section {
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--connection-component-border);
+}
+
+#connectionSettingsMenu .connection-settings-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 34px;
+    gap: 8px;
+    padding: 7px 8px;
+    color: var(--t2);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+}
+
+#connectionSettingsMenu .connection-settings-item:hover {
+    color: var(--c1);
+    background: var(--connection-surface-hover);
+}
+
+#connectionSettingsMenu .connection-settings-item svg { flex: 0 0 auto; }
+#connectionSettingsMenu .connection-settings-section .font-size-label { color: var(--c1); }
+#connectionSettingsMenu .connection-settings-section > .tb-btn { flex: 0 0 auto; }
+
+#connectionSettingsMenu .connection-settings-label,
+#connectionSettingsMenu .label {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+    color: var(--t1);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+#connectionSettingsMenu .connection-settings-label small,
+#connectionSettingsMenu .label small {
+    color: var(--t2);
+    font-size: 10.5px;
+    font-weight: 400;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+#connectionSettingsMenu .connection-settings-actions,
+#connectionSettingsMenu .actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+#connectionSettingsMenu .connection-settings-actions button,
+#connectionSettingsMenu .actions button {
+    width: auto;
+    min-width: 32px;
+    min-height: 30px;
+    padding: 5px 8px;
+    color: var(--t2);
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+#connectionSettingsMenu .connection-settings-actions button:hover,
+#connectionSettingsMenu .actions button:hover {
+    color: var(--c1);
+    background: rgba(0, 212, 255, .09);
+    border-color: var(--brf);
+}
+
+#connectionSettingsMenu button:focus-visible {
+    outline: 2px solid var(--c1);
+    outline-offset: 2px;
+}
+
+/* 配色区块直接内联在设置下拉里，不再是 .color-panel 那个二级弹层，
+   所以要显式恢复布局（.color-panel 默认是 position:absolute + display:none）。 */
+#connectionSettingsMenu .connection-settings-colors {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 9px;
+    padding: 8px;
+}
+
+#connectionSettingsMenu .connection-settings-colors .color-swatches { gap: 4px; }
+#connectionSettingsMenu .connection-settings-colors .color-swatch { width: 20px; height: 20px; }
+#connectionSettingsMenu .connection-settings-colors .drawer-add {
+    min-height: 30px;
+    padding: 6px 8px;
+    font-size: 11.5px;
+}
+
+/* RDP 远端复制了内容但浏览器拒绝了自动写入本地剪贴板时，
+   给工具栏的复制按钮打一个角标，提示「点我取回」。 */
+.tb-btn.clipboard-pending { position: relative; color: var(--c1); }
+.tb-btn.clipboard-pending::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--c1);
+    box-shadow: 0 0 6px var(--c1g);
+}
+
+/* 隐私分享的有效期 / 阅后即焚选项，仅在选中隐私模式时展开。 */
+#connectionShareModal .connection-share-private-options {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 8px;
+    padding: 10px;
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 8px;
+}
+
+#connectionShareModal .connection-share-private-options[hidden] { display: none; }
+
+#connectionShareModal .connection-share-expiry-row { width: 100%; min-width: 0; }
+
+#connectionShareModal #connectionShareExpiry {
+    width: 100%;
+    min-width: 0;
+    min-height: 32px;
+    padding: 6px 8px;
+    color: var(--t1);
+    background: var(--inp);
+    border: 1px solid var(--brd);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 11.5px;
+}
+
+#connectionShareModal .connection-share-private-options .checkbox-field {
+    min-height: 20px;
+    gap: 7px;
+    color: var(--t2);
+    font-size: 11.5px;
+}
+
+/* Opening below the top toolbar must not be clipped by its mobile overflow rule. */
+.topbar-right:has(#connectionSettingsMenu.connection-settings-menu) {
+    position: relative;
+    z-index: 4;
+    overflow: visible;
+}
+
+.term-topbar:has(#connectionSettingsMenu.connection-settings-menu.show),
+.term-topbar:has(#connectionSettingsMenu.connection-settings-menu.show) .topbar-right {
+    overflow: visible;
+}
+
+.term-topbar:has(#connectionSettingsMenu.connection-settings-menu.show) { z-index: 990; }
+body.active-rdp .term-topbar:has(#connectionSettingsMenu.connection-settings-menu.show) {
+    z-index: 990;
+    transform: none;
+}
+
+body.active-rdp:has(#connectionSettingsMenu.connection-settings-menu.show) .rdp-bar-hotzone { opacity: 0; }
+
+/* Connection-share modal. */
+#connectionShareModal { z-index: 1260; }
+
+#connectionShareModal .connection-share-card {
+    width: min(500px, 94vw);
+    max-width: calc(100vw - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow: hidden;
+    color: var(--t1);
+    background: var(--connection-popover-bg);
+    border-color: var(--connection-component-border);
+    box-shadow: var(--connection-component-shadow);
+}
+
+#connectionShareModal .connection-share-card > .drawer-hd {
+    min-height: 46px;
+    padding: 11px 15px;
+}
+
+#connectionShareModal .connection-share-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 13px;
+    padding: 15px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#connectionShareModal .connection-share-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    min-width: 0;
+    gap: 5px 10px;
+    padding: 9px 11px;
+    color: var(--t2);
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 8px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+#connectionShareModal .connection-share-summary strong,
+#connectionShareModal .connection-share-summary code {
+    color: var(--t1);
+    font-family: 'WebSSH JetBrains Mono', 'JetBrains Mono', monospace;
+}
+
+#connectionShareModal .share-mode-grid,
+#connectionShareModal .connection-share-modes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+    gap: 8px;
+}
+
+#connectionShareModal .share-mode-option,
+#connectionShareModal .connection-share-mode-card {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+    gap: 9px;
+    padding: 10px;
+    color: var(--t2);
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+
+#connectionShareModal .share-mode-option:hover,
+#connectionShareModal .connection-share-mode-card:hover {
+    color: var(--t1);
+    background: var(--connection-surface-hover);
+    border-color: var(--brf);
+}
+
+#connectionShareModal .share-mode-option > input,
+#connectionShareModal .connection-share-mode-card > input {
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
+    margin: 2px 0 0;
+    accent-color: var(--c1);
+}
+
+#connectionShareModal .share-mode-option > span,
+#connectionShareModal .connection-share-mode-card > span {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+    line-height: 1.35;
+}
+
+#connectionShareModal .share-mode-option strong,
+#connectionShareModal .connection-share-mode-card strong { color: var(--t1); font-size: 12px; }
+#connectionShareModal .share-mode-option small,
+#connectionShareModal .connection-share-mode-card small,
+#connectionShareModal .connection-share-mode-copy > span { color: var(--t2); font-size: 10.5px; line-height: 1.4; }
+
+#connectionShareModal .share-mode-option:has(input:checked),
+#connectionShareModal .connection-share-mode-card:has(input:checked) {
+    color: var(--t1);
+    background: rgba(0, 212, 255, .09);
+    border-color: var(--c1);
+    box-shadow: 0 0 0 1px rgba(0, 212, 255, .14) inset, 0 0 18px rgba(0, 212, 255, .08);
+}
+
+#connectionShareModal .share-mode-option:has(input:focus-visible),
+#connectionShareModal .connection-share-mode-card:has(input:focus-visible) {
+    outline: 2px solid var(--c1);
+    outline-offset: 2px;
+}
+
+#connectionShareModal .share-security-note {
+    padding: 9px 11px;
+    color: var(--t2);
+    background: rgba(255, 190, 11, .07);
+    border: 1px solid rgba(255, 190, 11, .24);
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+#connectionShareModal .share-security-note strong { color: var(--warn); }
+
+#connectionShareModal .connection-share-output {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    min-width: 0;
+    gap: 7px;
+    padding: 10px;
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 8px;
+}
+
+#connectionShareModal .connection-share-output > label {
+    flex: 1 0 100%;
+    color: var(--t2);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+#connectionShareModal .connection-share-description { margin: 0; }
+
+#connectionShareModal .connection-share-summary-section {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+#connectionShareModal .connection-share-section-label,
+#connectionShareModal .connection-share-modes > legend {
+    color: var(--t2);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .4px;
+}
+
+#connectionShareModal .connection-share-modes {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+#connectionShareModal .connection-share-modes > legend {
+    margin-bottom: 6px;
+    padding: 0;
+}
+
+#connectionShareModal .connection-share-output-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    min-width: 0;
+    gap: 7px;
+}
+
+#connectionShareModal .connection-share-generate {
+    width: 100%;
+    min-height: 36px;
+    margin: 0;
+    border-style: solid;
+}
+
+#connectionShareUrl {
+    flex: 1 1 280px;
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    padding: 7px 9px;
+    color: var(--t1);
+    background: var(--connection-popover-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 6px;
+    outline: none;
+    font: 11px/1.4 'WebSSH JetBrains Mono', 'JetBrains Mono', monospace;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+
+#connectionShareUrl:focus {
+    border-color: var(--c1);
+    box-shadow: 0 0 0 2px rgba(0, 212, 255, .12);
+}
+
+#connectionShareModal .connection-share-actions {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 1px;
+}
+
+#connectionShareModal .connection-share-actions > button {
+    min-width: 92px;
+    min-height: 34px;
+    margin: 0;
+    padding: 7px 11px;
+    border-style: solid;
+    font-size: 12px;
+}
+
+html[data-theme="dark"] #connectionSettingsMenu.connection-settings-menu,
+html[data-theme="dark"] #connectionShareModal .connection-share-card {
+    background: var(--connection-popover-bg) !important;
+    border-color: var(--connection-component-border) !important;
+}
+
+html[data-theme="light"] #connectionSettingsMenu.connection-settings-menu,
+html[data-theme="light"] #connectionShareModal .connection-share-card {
+    background: var(--connection-popover-bg) !important;
+    border-color: var(--connection-component-border) !important;
+}
+
+body.active-rdp #connectionSettingsMenu .connection-settings-section.rdp-tb-only {
+    display: flex !important;
+}
+
+body.active-rdp #connectionSettingsMenu .connection-settings-item.rdp-tb-only {
+    display: flex !important;
+}
+
+body.active-rdp #connectionSettingsMenu.connection-settings-menu {
+    background: var(--connection-popover-bg);
+    backdrop-filter: blur(24px) saturate(1.15);
+    -webkit-backdrop-filter: blur(24px) saturate(1.15);
+}
+
+body.active-rdp #connectionShareModal {
+    z-index: 1260;
+    background: rgba(0, 0, 0, .66);
+}
+
+body.active-rdp:has(#connectionShareModal.show) .rdp-bar-hotzone { opacity: 0; }
+
+@media (max-width: 520px) {
+    .term-topbar:has(#connectionSettingsMenu.connection-settings-menu.show) {
+        max-height: none;
+        overflow: visible;
+    }
+
+    .connection-settings-wrap { position: static; }
+
+    #connectionSettingsMenu.connection-settings-menu {
+        top: calc(100% + 6px);
+        right: 7px;
+        left: 7px;
+        width: auto;
+        max-height: min(55dvh, 420px);
+        transform-origin: top center;
+    }
+
+    #connectionSettingsMenu .connection-settings-row,
+    #connectionSettingsMenu .row {
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    #connectionSettingsMenu .connection-settings-actions,
+    #connectionSettingsMenu .actions {
+        flex-wrap: wrap;
+    }
+
+    #connectionShareModal {
+        align-items: center;
+        padding: 10px;
+    }
+
+    #connectionShareModal .connection-share-card {
+        width: min(500px, 100%);
+        max-width: 100%;
+        max-height: calc(100dvh - 20px);
+    }
+
+    #connectionShareModal .connection-share-card > .drawer-hd { padding: 10px 12px; }
+    #connectionShareModal .connection-share-body { gap: 11px; padding: 12px; }
+    #connectionShareModal .connection-share-summary { padding: 8px 9px; }
+}
+
+@media (max-width: 420px) {
+    #connectionShareModal .share-mode-grid,
+    #connectionShareModal .connection-share-modes { grid-template-columns: 1fr; }
+    #connectionShareModal .connection-share-output { padding: 9px; }
+    #connectionShareModal .connection-share-output-row { grid-template-columns: 1fr; }
+    #connectionShareUrl { flex-basis: 100%; }
+    #connectionShareModal .connection-share-output > button { flex: 1 1 100%; }
+    #connectionShareModal .connection-share-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #connectionShareModal .connection-share-actions > button { width: 100%; min-width: 0; }
+}
+
+@media (max-width: 340px) {
+    #connectionSettingsMenu .connection-settings-row,
+    #connectionSettingsMenu .row { flex-direction: column; }
+    #connectionSettingsMenu .connection-settings-actions,
+    #connectionSettingsMenu .actions { width: 100%; justify-content: flex-start; }
+    #connectionShareModal .connection-share-actions { grid-template-columns: 1fr; }
+}
+
+@media (max-height: 560px) {
+    #connectionShareModal { align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
+    #connectionShareModal .connection-share-card { max-height: calc(100dvh - 16px); }
+    #connectionSettingsMenu.connection-settings-menu { max-height: calc(100dvh - 64px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #connectionSettingsMenu.connection-settings-menu.show { animation: none; }
 }

@@ -592,7 +592,11 @@ function createRdpSession(hostname, port, username, opts) {
         _closing: false,
         _resizeTimer: null,
         _inputCleanup: null,
-        _keyboardLocked: false
+        _keyboardLocked: false,
+        // 远端最近一次复制的内容，以及「还没写进本地剪贴板」的挂起标记。
+        // 详见 attachRdpClipboard 里对浏览器手势限制的说明。
+        _remoteClipboardText: '',
+        _remoteClipboardPending: false
     };
 
     session.resizeObs = new ResizeObserver(function () { scheduleRdpResize(session); });
@@ -937,6 +941,13 @@ function attachRdpInput(session, mod) {
         try { session.rdpSession.releaseAllInputs(); } catch (e) { }
     }
 
+    // 点回画面时顺手把本地剪贴板同步给远端。点击本身就是用户手势，
+    // readText 在这一拍是被允许的，能省掉大部分「先点粘贴按钮」的动作。
+    function onFocusSyncClipboard() {
+        if (session.rdpSettings && session.rdpSettings.clipboard === false) return;
+        pushLocalClipboardToRdp(session, { silent: true });
+    }
+
     canvas.addEventListener('keydown', onKeyDown);
     canvas.addEventListener('keyup', onKeyUp);
     canvas.addEventListener('beforeinput', onBeforeInput);
@@ -946,6 +957,7 @@ function attachRdpInput(session, mod) {
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('contextmenu', onContextMenu);
     canvas.addEventListener('blur', onBlur);
+    canvas.addEventListener('focus', onFocusSyncClipboard);
 
     return function cleanup() {
         canvas.removeEventListener('keydown', onKeyDown);
@@ -957,34 +969,188 @@ function attachRdpInput(session, mod) {
         canvas.removeEventListener('wheel', onWheel);
         canvas.removeEventListener('contextmenu', onContextMenu);
         canvas.removeEventListener('blur', onBlur);
+        canvas.removeEventListener('focus', onFocusSyncClipboard);
     };
 }
 
 // ==================== 剪贴板 ====================
+//
+// 浏览器只在「用户手势」里放行 navigator.clipboard。而 RDP 的两个剪贴板回调
+// 都是远端触发的、天然没有手势：
+//   remoteClipboardChanged —— 远端复制了东西，想写进本地剪贴板 → writeText 被拒
+//   forceClipboardUpdate   —— 远端想读本地剪贴板             → readText 被拒
+// 原实现两处都是 .catch(function(){}) 静默吞掉，于是双向都不通且毫无提示。
+//
+// 现在的做法：回调里仍然乐观尝试一次（有些浏览器/已授权场景能成功），失败就把
+// 内容挂起，等用户点工具栏的复制/粘贴按钮（有手势）时再真正落盘或推送。
+
+function rdpClipboardApiAvailable(kind) {
+    if (typeof window !== 'undefined' && window.isSecureContext === false) return false;
+    if (!navigator.clipboard) return false;
+    return typeof navigator.clipboard[kind === 'read' ? 'readText' : 'writeText'] === 'function';
+}
+
+function extractRdpClipboardText(data) {
+    try {
+        var items = data.items();
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].mimeType() === 'text/plain') {
+                var text = items[i].value();
+                if (typeof text === 'string') return text;
+            }
+        }
+    } catch (e) { }
+    return null;
+}
+
+function setRdpClipboardPending(session, pending) {
+    if (!session) return;
+    session._remoteClipboardPending = !!pending;
+    if (typeof updateClipboardControls === 'function' &&
+        typeof sessions !== 'undefined' && typeof activeIdx !== 'undefined' &&
+        sessions[activeIdx] === session) {
+        updateClipboardControls(session);
+    }
+}
+
+// 把文本推给远端 RDP 会话。返回是否真的送出去了。
+function sendTextToRdpSession(session, text) {
+    var mod = session && session.rdpModule;
+    if (!session || !session.rdpSession || !mod || typeof text !== 'string') return false;
+    try {
+        var data = new mod.ClipboardData();
+        data.addText('text/plain', text);
+        session.rdpSession.onClipboardPaste(data).catch(function () { });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+function rdpSessionCanUseClipboard(session) {
+    return !!(session && session.kind === 'rdp' && session.rdpSession && session.rdpModule &&
+        typeof sessions !== 'undefined' && sessions.indexOf(session) !== -1);
+}
+
+// 读本地剪贴板并推给远端。silent=true 用于无手势的自动同步：失败就安静放弃。
+function pushLocalClipboardToRdp(session, opts) {
+    opts = opts || {};
+    if (!rdpSessionCanUseClipboard(session)) {
+        if (!opts.silent) showToast('远程桌面连接尚未就绪', 'error');
+        return;
+    }
+    if (!rdpClipboardApiAvailable('read')) {
+        if (!opts.silent) openRdpManualPaste(session);
+        return;
+    }
+    var reading;
+    try {
+        reading = navigator.clipboard.readText();
+    } catch (e) {
+        if (!opts.silent) openRdpManualPaste(session);
+        return;
+    }
+    Promise.resolve(reading).then(function (text) {
+        if (typeof text !== 'string') {
+            if (!opts.silent) openRdpManualPaste(session);
+            return;
+        }
+        if (!text.length) {
+            if (!opts.silent) showToast('剪贴板中没有文本内容', 'info');
+            return;
+        }
+        if (sendTextToRdpSession(session, text)) {
+            if (!opts.silent) showToast('已粘贴到远程桌面', 'success');
+        } else if (!opts.silent) {
+            showToast('推送到远程桌面失败，请重试', 'error');
+        }
+    }).catch(function () {
+        // 权限被拒 / 非 HTTPS：自动同步就算了，手动触发则给兜底输入框。
+        if (!opts.silent) openRdpManualPaste(session);
+    });
+}
+
+function openRdpManualPaste(session) {
+    if (typeof openClipboardPasteFallback !== 'function') {
+        showToast('浏览器禁止读取剪贴板，请在远程桌面内用 Ctrl+V', 'error');
+        return;
+    }
+    openClipboardPasteFallback({
+        kind: 'rdp',
+        label: '远程桌面',
+        closedMessage: '远程桌面连接已关闭，内容未发送',
+        canPaste: function () { return rdpSessionCanUseClipboard(session); },
+        onText: function (text) {
+            if (sendTextToRdpSession(session, text)) {
+                showToast('已粘贴到远程桌面，请在远端按 Ctrl+V', 'success');
+                try { session.canvas.focus(); } catch (e) { }
+            } else {
+                showToast('推送到远程桌面失败，请重试', 'error');
+            }
+        }
+    });
+}
+
+// 工具栏「粘贴」按钮 / Ctrl+Shift+V 在 RDP 标签页下的入口（app.js 会调这个）。
+function rdpPaste(session) {
+    session = session || (typeof activeRdpSession === 'function' ? activeRdpSession() : null);
+    pushLocalClipboardToRdp(session, { silent: false });
+}
+
+// 工具栏「复制」按钮 / Ctrl+Shift+C 在 RDP 标签页下的入口：
+// 把远端最近一次复制的内容写进本地剪贴板。此刻有用户手势，writeText 才会被放行。
+function rdpCopy(session) {
+    session = session || (typeof activeRdpSession === 'function' ? activeRdpSession() : null);
+    if (!session) { showToast('没有活动的远程桌面连接', 'error'); return; }
+    var text = session._remoteClipboardText;
+    if (typeof text !== 'string' || !text.length) {
+        showToast('还没有收到远程桌面复制的内容，请先在远端复制', 'info');
+        return;
+    }
+    if (!rdpClipboardApiAvailable('write')) {
+        if (typeof fallbackCopy === 'function') {
+            fallbackCopy(text);
+            setRdpClipboardPending(session, false);
+        } else {
+            showToast('浏览器禁止写入剪贴板', 'error');
+        }
+        return;
+    }
+    navigator.clipboard.writeText(text).then(function () {
+        setRdpClipboardPending(session, false);
+        showToast('已取回远程桌面复制的内容', 'success');
+    }).catch(function () {
+        if (typeof fallbackCopy === 'function') {
+            fallbackCopy(text);
+            setRdpClipboardPending(session, false);
+        } else {
+            showToast('写入剪贴板失败，请重试', 'error');
+        }
+    });
+}
 
 function attachRdpClipboard(session, builder, mod) {
+    session._remoteClipboardText = '';
+    session._remoteClipboardPending = false;
+
     builder.remoteClipboardChangedCallback(function (data) {
-        try {
-            var items = data.items();
-            for (var i = 0; i < items.length; i++) {
-                if (items[i].mimeType() === 'text/plain') {
-                    var text = items[i].value();
-                    if (typeof text === 'string' && navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(text).catch(function () { });
-                    }
-                    break;
-                }
-            }
-        } catch (e) { }
+        var text = extractRdpClipboardText(data);
+        if (typeof text !== 'string') return;
+        session._remoteClipboardText = text;
+        if (!rdpClipboardApiAvailable('write')) {
+            setRdpClipboardPending(session, true);
+            return;
+        }
+        // 这里没有用户手势，多半会被拒；成功则用户无感，失败就挂起等按钮。
+        navigator.clipboard.writeText(text).then(function () {
+            setRdpClipboardPending(session, false);
+        }).catch(function () {
+            setRdpClipboardPending(session, true);
+        });
     });
+
     builder.forceClipboardUpdateCallback(function () {
-        if (!navigator.clipboard || !navigator.clipboard.readText) return;
-        navigator.clipboard.readText().then(function (text) {
-            if (!session.rdpSession || typeof text !== 'string') return;
-            var data = new mod.ClipboardData();
-            data.addText('text/plain', text);
-            session.rdpSession.onClipboardPaste(data).catch(function () { });
-        }).catch(function () { });
+        pushLocalClipboardToRdp(session, { silent: true });
     });
 }
 

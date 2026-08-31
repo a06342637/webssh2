@@ -107,6 +107,7 @@ type accountDB struct {
 	Users    map[string]StoredUser    `json:"users"`
 	Sessions map[string]StoredSession `json:"sessions"`
 	Scripts  map[string]StoredScripts `json:"scripts"`
+	Shares   map[string]StoredShare   `json:"shares,omitempty"`
 }
 
 type AccountStore struct {
@@ -139,6 +140,7 @@ func InitAccountStore(dataDir string) error {
 	store.mu.Lock()
 	store.migrateSessionKeysLocked()
 	store.cleanupExpiredSessionsLocked(time.Now().Unix())
+	store.cleanupExpiredSharesLocked(time.Now().Unix())
 	store.migrateScriptRevisionsLocked()
 	if err := store.ensureDefaultAdminLocked(); err != nil {
 		store.mu.Unlock()
@@ -180,6 +182,9 @@ func (s *AccountStore) ensureMaps() {
 	}
 	if s.db.Scripts == nil {
 		s.db.Scripts = map[string]StoredScripts{}
+	}
+	if s.db.Shares == nil {
+		s.db.Shares = map[string]StoredShare{}
 	}
 }
 
@@ -226,6 +231,7 @@ func cloneAccountDB(db accountDB) accountDB {
 		Users:    make(map[string]StoredUser, len(db.Users)),
 		Sessions: make(map[string]StoredSession, len(db.Sessions)),
 		Scripts:  make(map[string]StoredScripts, len(db.Scripts)),
+		Shares:   make(map[string]StoredShare, len(db.Shares)),
 	}
 	for username, user := range db.Users {
 		cloned.Users[username] = user
@@ -237,6 +243,10 @@ func cloneAccountDB(db accountDB) accountDB {
 		scripts.Items = append([]ScriptBookmark(nil), scripts.Items...)
 		scripts.Categories = append([]ScriptCategory(nil), scripts.Categories...)
 		cloned.Scripts[username] = scripts
+	}
+	// 漏掉这一段的话，任何走 restoreLocked 的失败回滚都会把分享链接整个清空。
+	for key, share := range db.Shares {
+		cloned.Shares[key] = share
 	}
 	return cloned
 }

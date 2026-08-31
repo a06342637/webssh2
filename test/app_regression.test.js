@@ -5,6 +5,8 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'app.js'), 'utf8');
+const rdpSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'rdp.js'), 'utf8');
+const shareSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', 'share.js'), 'utf8');
 const styleSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'css', 'style.css'), 'utf8');
 const indexSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
@@ -2124,4 +2126,129 @@ test('bookmark manager uses separated sections and a stable statistics grid', ()
     assert.match(styleSource, /\.script-manager-summary\{display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
     assert.match(styleSource, /\.site-backup-actions\{grid-template-columns:repeat\(2,1fr\)\}/);
     assert.match(styleSource, /\.site-bookmark-restore-overlay\{z-index:1180\}/);
+});
+
+// ==================== 顶栏设置收纳 / 连接分享 / 剪贴板 ====================
+
+// 上一版改动曾经把新增的中文写成了 "????"，并引用了一个根本不存在的 share.js，
+// 结果 5 个 onclick 函数全是 ReferenceError。这条测试就是为了让同类事故再也过不了 CI。
+test('index.html carries no mojibake placeholders and every inline handler resolves', () => {
+    assert.equal(indexSource.includes('???'), false, 'index.html 里出现了 ??? 占位符，说明中文被写坏了');
+
+    const referenced = [...indexSource.matchAll(/<script src="\/static\/js\/([^?"]+)/g)].map((m) => m[1]);
+    assert.ok(referenced.includes('share.js'));
+    for (const file of referenced) {
+        assert.ok(
+            fs.existsSync(path.join(__dirname, '..', 'public', 'static', 'js', file)),
+            'index.html 引用了不存在的脚本 ' + file
+        );
+    }
+
+    const scriptSource = [appSource, rdpSource, shareSource].join('\n');
+    const builtin = new Set(['if', 'for', 'while', 'return', 'typeof', 'alert', 'confirm',
+        'Number', 'String', 'parseInt', 'parseFloat', 'JSON', 'Math', 'Boolean', 'Array', 'Object']);
+    const handlers = new Set();
+    for (const attr of indexSource.matchAll(/\bon(?:click|change|input|submit|keydown)\s*=\s*"([^"]+)"/g)) {
+        for (const call of attr[1].matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) handlers.add(call[1]);
+    }
+    assert.ok(handlers.size > 100, '内联事件解析异常，只找到 ' + handlers.size + ' 个调用');
+
+    const missing = [...handlers].filter((name) => {
+        if (builtin.has(name)) return false;
+        return !scriptSource.includes('function ' + name + '(') &&
+            !scriptSource.includes('var ' + name + ' =') &&
+            !scriptSource.includes('const ' + name + ' =') &&
+            !scriptSource.includes('window.' + name + ' =');
+    });
+    assert.deepEqual(missing, [], '这些 HTML 内联函数没有对应定义: ' + missing.join(', '));
+});
+
+test('toolbar collapses display options into a settings dropdown', () => {
+    // 字体与配色控件必须落在下拉菜单内部，不能再散在工具栏上。
+    const menuStart = indexSource.indexOf('id="connectionSettingsMenu"');
+    const menuEnd = indexSource.indexOf('<div class="topbar-sep"></div>', menuStart);
+    assert.ok(menuStart > 0 && menuEnd > menuStart);
+    const menu = indexSource.slice(menuStart, menuEnd);
+    assert.match(menu, /changeFontSize\(-1\)/);
+    assert.match(menu, /changeFontSize\(1\)/);
+    assert.match(menu, /id="fgSwatches"/);
+    assert.match(menu, /id="cursorSwatches"/);
+    assert.match(menu, /openRdpSettings\(\)/);
+    assert.match(menu, /toggleRdpFullscreen\(\)/);
+    assert.match(menu, /resetTermColors\(\)/);
+
+    // 配色不再是嵌套在下拉里的第二层弹层，否则两层 .color-panel 定位会打架。
+    assert.equal(indexSource.includes('id="colorPanel"'), false);
+    assert.match(indexSource, /class="connection-settings-colors" id="connectionSettingsColors"/);
+    assert.match(shareSource, /function toggleConnectionSettingsMenu\(\)/);
+    assert.match(shareSource, /renderSwatches\(\)/);
+
+    // 分享按钮留在工具栏上，和重连、断开并排。
+    assert.match(indexSource, /id="connectionShareButton"[^>]*onclick="openConnectionShareModal\(\)"/);
+});
+
+test('connection sharing reuses the existing #ssh= direct-login format and strips trustScope', () => {
+    assert.match(shareSource, /function buildConnectionSharePayload\(session\)/);
+    // trustScope 是本机的主机密钥信任域，跟着链接外传等于把信任决定强加给接收方。
+    assert.match(shareSource, /delete decoded\.trustScope/);
+    assert.match(shareSource, /payload\.kind === 'rdp' \? 'rdp=' : 'ssh='/);
+    // SSH 侧必须走 app.js 既有的自动登录链路，而不是另造一套解析。
+    assert.match(shareSource, /tryAutoLogin\(\)/);
+    assert.match(appSource, /function parseUrlLoginFragment\(hash\)/);
+});
+
+test('private sharing keeps the key in the fragment and only uploads ciphertext', () => {
+    assert.match(shareSource, /AES-GCM/);
+    assert.match(shareSource, /generateKey/);
+    // 上传体里只能有密文和 IV，绝不能出现明文凭据字段。
+    const upload = shareSource.slice(shareSource.indexOf("fetch('/api/share'"), shareSource.indexOf('function copyConnectionShareLink'));
+    assert.match(upload, /ciphertext: encrypted\.ciphertext/);
+    assert.match(upload, /iv: encrypted\.iv/);
+    assert.equal(/password|privateKey/.test(upload), false, '上传体里不应出现明文凭据字段');
+    // 密钥拼在 # 之后，浏览器不会把 fragment 发给服务器。
+    assert.match(shareSource, /CONNECTION_SHARE_PATH_PREFIX \+ token \+ '#k=' \+ encrypted\.key/);
+    // 非安全上下文下 crypto.subtle 不存在，必须明确禁用而不是假装加密。
+    assert.match(shareSource, /function connectionShareCryptoAvailable\(\)/);
+    assert.match(shareSource, /当前站点不是 HTTPS/);
+});
+
+test('RDP clipboard failures are queued for a user gesture instead of being swallowed', () => {
+    // 旧实现两个回调都是 .catch(function () { }) 静默吞掉，双向都不通且毫无提示。
+    assert.match(rdpSource, /function rdpPaste\(session\)/);
+    assert.match(rdpSource, /function rdpCopy\(session\)/);
+    assert.match(rdpSource, /session\._remoteClipboardText = text/);
+    assert.match(rdpSource, /setRdpClipboardPending\(session, true\)/);
+    assert.match(rdpSource, /canvas\.addEventListener\('focus', onFocusSyncClipboard\)/);
+    assert.match(rdpSource, /canvas\.removeEventListener\('focus', onFocusSyncClipboard\)/);
+    assert.match(rdpSource, /function openRdpManualPaste\(session\)/);
+
+    // app.js 必须真的能找到 rdpPaste / rdpCopy，否则按钮点了就报错。
+    assert.match(appSource, /typeof rdpPaste === 'function'/);
+    assert.match(appSource, /typeof rdpCopy === 'function'/);
+
+    // 手动粘贴兜底框由两种协议共用，不再写死 SSH。
+    assert.match(appSource, /function openClipboardPasteFallback\(handlers\)/);
+    assert.match(appSource, /function openSshClipboardPasteFallback\(session\)/);
+
+    // 复制/粘贴按钮不再是 term-only，RDP 标签页下也要能点。
+    assert.match(indexSource, /id="termCopyBtn"/);
+    assert.match(indexSource, /id="termPasteBtn"/);
+    assert.equal(/id="termPasteBtn"[^>]*term-only/.test(indexSource), false);
+    assert.match(appSource, /function updateClipboardControls\(session\)/);
+});
+
+test('Ctrl+Shift+C and Ctrl+Shift+V both reach RDP tabs', () => {
+    const shortcut = appSource.slice(appSource.indexOf('// Ctrl+Shift+C / Ctrl+Shift+V shortcuts'));
+    const block = shortcut.slice(0, shortcut.indexOf('});') + 3);
+    assert.match(block, /key === 'V'.*termPaste\(\)/s);
+    assert.match(block, /key === 'C'.*termCopy\(\)/s);
+    // 旧代码在 RDP 标签页上直接 return，导致快捷键对远程桌面完全失效。
+    assert.equal(/kind === 'rdp'\) return/.test(block), false);
+});
+
+test('the add-connection card is about 30% smaller than a standard modal', () => {
+    assert.match(styleSource, /\.modal-card\{width:360px/);
+    assert.match(styleSource, /\.add-tab-card \{\s*width: min\(300px, 94vw\)/);
+    assert.match(styleSource, /\.add-tab-body \.input-wrapper input \{[^}]*height: 28px/);
+    assert.match(styleSource, /\.add-tab-card > \.add-tab-body \{[^}]*padding: 8px 10px/);
 });
