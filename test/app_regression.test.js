@@ -2237,13 +2237,17 @@ test('RDP clipboard failures are queued for a user gesture instead of being swal
     assert.match(appSource, /function updateClipboardControls\(session\)/);
 });
 
-test('Ctrl+Shift+C and Ctrl+Shift+V both reach RDP tabs', () => {
-    const shortcut = appSource.slice(appSource.indexOf('// Ctrl+Shift+C / Ctrl+Shift+V shortcuts'));
+test('the copy/paste shortcuts reach RDP tabs', () => {
+    const shortcut = appSource.slice(appSource.indexOf('// 复制/粘贴快捷键'));
     const block = shortcut.slice(0, shortcut.indexOf('});') + 3);
+    assert.ok(block.length > 0, '找不到全局快捷键监听器');
     assert.match(block, /key === 'V'.*termPaste\(\)/s);
     assert.match(block, /key === 'C'.*termCopy\(\)/s);
-    // 旧代码在 RDP 标签页上直接 return，导致快捷键对远程桌面完全失效。
+    // 更早的版本在 RDP 标签页上直接 return，快捷键对远程桌面完全失效。
     assert.equal(/kind === 'rdp'\) return/.test(block), false);
+    // RDP 画面聚焦时事件到不了 document，那条路径由 rdp.js 就地拦截，
+    // 这里只需确认注释交代了分工，避免以后有人误以为这一处就够了。
+    assert.match(block, /stopPropagation/);
 });
 
 test('the add-connection card is about 30% smaller than a standard modal', () => {
@@ -2292,4 +2296,77 @@ test('share links never route credentials through a new history entry', () => {
         .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
     assert.match(apply, /history\.replaceState\(null, '', '\/#ssh='/);
     assert.equal(/location\.hash\s*=[^=]/.test(apply), false);
+});
+
+// ==================== RDP 剪贴板快捷键与修饰键 ====================
+
+test('RDP clipboard shortcuts are intercepted on the canvas, not via document bubbling', () => {
+    // canvas 的 keydown 调用 stopPropagation，document 上的全局快捷键监听器
+    // 永远收不到事件。RDP 使用时 canvas 一直是焦点，所以快捷键必须就地拦截，
+    // 否则 Ctrl+Shift+V 在远程桌面里完全没反应。
+    const input = rdpSource.slice(rdpSource.indexOf('function attachRdpInput'));
+    const body = input.slice(0, input.indexOf('\nfunction '));
+    assert.match(body, /function clipboardHotkeyAction\(e\)/);
+    assert.match(body, /var action = clipboardHotkeyAction\(e\)/);
+    assert.match(body, /if \(action === 'copy'\) rdpCopy\(session\)/);
+    assert.match(body, /else rdpPaste\(session\)/);
+    // 快捷键不能同时被当成普通按键发给远端
+    assert.match(body, /swallowedHotkeys\[e\.code\] = true/);
+    assert.match(body, /if \(swallowedHotkeys\[e\.code\]\)/);
+    // 非英文布局下 e.key 未必是 C/V，必须认 e.code
+    assert.match(body, /code === 'KeyC' \|\| key === 'C'/);
+    assert.match(body, /code === 'KeyV' \|\| key === 'V'/);
+    // 失焦要清掉待配对记录，否则下次同一个键的 keyup 会被误吞
+    assert.match(body, /swallowedHotkeys = \{\};[\s\S]{0,120}releaseAllInputs/);
+});
+
+test('Command is remapped to Ctrl for the remote Windows desktop', () => {
+    // Mac 的 ⌘ 报成 MetaLeft，原样发过去是 Win 键，⌘+C 会弹开始菜单而不是复制。
+    const input = rdpSource.slice(rdpSource.indexOf('function attachRdpInput'));
+    const body = input.slice(0, input.indexOf('\nfunction '));
+    assert.match(body, /function scancodeFor\(e\)/);
+    assert.match(body, /rdpMapsMetaToCtrl\(\)/);
+    assert.match(body, /code === 'MetaLeft'\) code = 'ControlLeft'/);
+    assert.match(body, /code === 'MetaRight'\) code = 'ControlRight'/);
+    // 按下和抬起都要走同一套映射，否则会留下按下未松开的 Ctrl
+    assert.match(body, /keyPressed\(scancode\)/);
+    assert.match(body, /keyReleased\(scancode\)/);
+    assert.equal(/RDP_SCANCODES\[e\.code\]/.test(body), false, '仍有绕过 scancodeFor 的直接查表');
+});
+
+test('the clipboard modifier is configurable and cached per keystroke', () => {
+    assert.match(rdpSource, /clipboardModifier: 'auto'/);
+    assert.match(rdpSource, /function rdpIsApplePlatform\(\)/);
+    assert.match(rdpSource, /function rdpClipboardModifierIsMeta\(\)/);
+    assert.match(rdpSource, /function rdpClipboardModifierLabel\(\)/);
+    // rdpSettings() 每次都要同步读 localStorage 并 JSON.parse，而这个判断
+    // 在每次按键上会被问到两次，不缓存会变成可感知的输入延迟。
+    assert.match(rdpSource, /rdpClipboardModifierCache/);
+    assert.match(rdpSource, /function invalidateRdpClipboardModifierCache\(\)/);
+    assert.match(rdpSource, /safeStorageSet\(RDP_SETTINGS_KEY[\s\S]{0,80}invalidateRdpClipboardModifierCache\(\)/);
+
+    // 设置界面与读写往返
+    assert.match(indexSource, /id="rdpClipboardModifier"/);
+    assert.match(indexSource, /<option value="auto">/);
+    assert.match(indexSource, /<option value="ctrl">/);
+    assert.match(indexSource, /<option value="meta">/);
+    assert.match(rdpSource, /getElementById\('rdpClipboardModifier'\)\.value = s\.clipboardModifier/);
+    assert.match(rdpSource, /clipboardModifier: document\.getElementById\('rdpClipboardModifier'\)\.value/);
+
+    // 全局快捷键监听器也要跟着修饰键设置走，不能写死 ctrlKey
+    const shortcut = appSource.slice(appSource.indexOf('// 复制/粘贴快捷键'));
+    const block = shortcut.slice(0, shortcut.indexOf('});') + 3);
+    assert.match(block, /rdpClipboardModifierIsMeta/);
+    assert.match(block, /wantMeta \? \(e\.metaKey && !e\.ctrlKey\) : \(e\.ctrlKey && !e\.metaKey\)/);
+});
+
+test('auto clipboard sync never echoes remote content back to the remote', () => {
+    // 远端复制 → 我们写进本地剪贴板 → 用户点画面触发同步 → 又推回远端，
+    // 会把远端剪贴板覆盖成同一份，中间还可能盖掉远端更新的复制结果。
+    const push = rdpSource.slice(rdpSource.indexOf('function pushLocalClipboardToRdp'));
+    const body = push.slice(0, push.indexOf('\nfunction '));
+    assert.match(body, /opts\.silent && text === session\._remoteClipboardText/);
+    // 剪贴板通道关掉时要明确说明，而不是静默失败
+    assert.match(body, /session\.rdpSettings\.clipboard === false/);
+    assert.match(body, /剪贴板同步已关闭/);
 });

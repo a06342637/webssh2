@@ -22,8 +22,62 @@ var rdpDefaultSettings = {
     unicodeKeyboard: true,
     grabKeys: true,
     openInNewWindow: false,
-    autoHideToolbar: true
+    autoHideToolbar: true,
+    // 复制/粘贴用哪个修饰键：auto 按平台判断（Mac 用 Command，其余用 Ctrl）。
+    // 详见 rdpClipboardModifierIsMeta 的说明。
+    clipboardModifier: 'auto'
 };
+
+// Mac 的键盘习惯和 RDP 远端（Windows）是冲突的：本地用 Command 复制，
+// 远端只认 Ctrl。而浏览器把 Command 报成 MetaLeft/MetaRight，原样发过去
+// 就是 Windows 键，会弹出开始菜单而不是复制。
+// 这两个函数是所有相关判断的唯一入口，避免各处重复猜平台。
+function rdpIsApplePlatform() {
+    var platform = '';
+    try {
+        platform = (navigator.userAgentData && navigator.userAgentData.platform) ||
+            navigator.platform || navigator.userAgent || '';
+    } catch (e) {
+        platform = '';
+    }
+    return /Mac|iPhone|iPad|iPod/i.test(String(platform));
+}
+
+// WebSSH 自己的剪贴板快捷键该认 Command 还是 Ctrl。
+// 结果做了缓存：这个判断在每次 keydown/keyup 上都会被问到两次，而
+// rdpSettings() 每次都要同步读一遍 localStorage 并 JSON.parse，
+// 打字稍快就会变成可感知的输入延迟。设置保存时用下面的函数失效即可。
+var rdpClipboardModifierCache = null;
+
+function rdpClipboardModifierIsMeta() {
+    if (rdpClipboardModifierCache !== null) return rdpClipboardModifierCache;
+    var mode = 'auto';
+    try {
+        var settings = rdpSettings();
+        if (settings && settings.clipboardModifier) mode = settings.clipboardModifier;
+    } catch (e) { }
+    var result;
+    if (mode === 'meta') result = true;
+    else if (mode === 'ctrl') result = false;
+    else result = rdpIsApplePlatform();
+    rdpClipboardModifierCache = result;
+    return result;
+}
+
+function invalidateRdpClipboardModifierCache() {
+    rdpClipboardModifierCache = null;
+}
+
+// 是否把按下的 Command 键当作 Ctrl 发给远端。只有在「用 Command 当复制键」
+// 时才需要，否则用户是把 Command 当 Windows 键用的，不该改写。
+function rdpMapsMetaToCtrl() {
+    return rdpClipboardModifierIsMeta();
+}
+
+// 快捷键提示文案里显示的修饰键名，供工具栏按钮的 title 使用。
+function rdpClipboardModifierLabel() {
+    return rdpClipboardModifierIsMeta() ? '⌘' : 'Ctrl';
+}
 
 function rdpSettings() {
     var saved = {};
@@ -146,6 +200,7 @@ function openRdpSettings() {
     document.getElementById('rdpHiDpi').checked = !!s.hiDpi;
     document.getElementById('rdpAutoHideToolbar').checked = !!s.autoHideToolbar;
     document.getElementById('rdpClipboard').checked = !!s.clipboard;
+    document.getElementById('rdpClipboardModifier').value = s.clipboardModifier || 'auto';
     document.getElementById('rdpUnicodeKeyboard').checked = !!s.unicodeKeyboard;
     document.getElementById('rdpGrabKeys').checked = !!s.grabKeys;
 
@@ -202,6 +257,7 @@ function saveRdpSettings() {
         hiDpi: document.getElementById('rdpHiDpi').checked,
         autoHideToolbar: document.getElementById('rdpAutoHideToolbar').checked,
         clipboard: document.getElementById('rdpClipboard').checked,
+        clipboardModifier: document.getElementById('rdpClipboardModifier').value || 'auto',
         unicodeKeyboard: document.getElementById('rdpUnicodeKeyboard').checked,
         grabKeys: document.getElementById('rdpGrabKeys').checked,
         // 这一项不在本对话框里，它由登录页那个复选框控制；
@@ -209,6 +265,7 @@ function saveRdpSettings() {
         openInNewWindow: rdpSettings().openInNewWindow
     };
     safeStorageSet(RDP_SETTINGS_KEY, JSON.stringify(settings));
+    invalidateRdpClipboardModifierCache();
 
     var remember = document.getElementById('rdpRememberRelay').checked;
     var relay = {
@@ -236,6 +293,10 @@ function saveRdpSettings() {
         live.rdpSettings = rdpSettings();
         applyRdpCanvasScale(live);
         scheduleRdpResize(live);
+    }
+    // 修饰键可能改了，工具栏按钮的提示文案要跟着变。
+    if (typeof updateClipboardControls === 'function') {
+        updateClipboardControls(live || (activeIdx >= 0 ? sessions[activeIdx] : null));
     }
     closeRdpSettings();
     showToast('远程桌面设置已保存', 'success');
@@ -856,6 +917,8 @@ function attachRdpInput(session, mod) {
     var canvas = session.canvas;
     var DeviceEvent = mod.DeviceEvent;
     var InputTransaction = mod.InputTransaction;
+    // keydown 被当成快捷键吞掉的按键，记在这里等它的 keyup 一起吞。
+    var swallowedHotkeys = {};
 
     function send(events) {
         if (!session.rdpSession || !events.length) return;
@@ -866,11 +929,50 @@ function attachRdpInput(session, mod) {
         } catch (e) { }
     }
 
+    // canvas 的 keydown 会 stopPropagation 把事件吃掉，document 上的全局
+    // 快捷键监听器根本收不到。所以剪贴板快捷键必须在这里就地拦截，否则
+    // RDP 画面一获得焦点（正常使用时它一直是焦点）快捷键就完全失效。
+    function clipboardHotkeyAction(e) {
+        if (!e.shiftKey) return '';
+        var wantMeta = rdpClipboardModifierIsMeta();
+        var modifierDown = wantMeta ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey);
+        if (!modifierDown) return '';
+        // 以 e.code 为准：非英文键盘布局下 e.key 可能不是 C/V。
+        var code = e.code;
+        var key = String(e.key || '').toUpperCase();
+        if (code === 'KeyC' || key === 'C') return 'copy';
+        if (code === 'KeyV' || key === 'V') return 'paste';
+        return '';
+    }
+
+    // Mac 上按 Command 时，远端 Windows 期待的是 Ctrl。不改写的话
+    // Command+C 会变成 Win+C，弹出的是开始菜单而不是复制。
+    function scancodeFor(e) {
+        var code = e.code;
+        if (rdpMapsMetaToCtrl()) {
+            if (code === 'MetaLeft') code = 'ControlLeft';
+            else if (code === 'MetaRight') code = 'ControlRight';
+        }
+        return RDP_SCANCODES[code];
+    }
+
     function onKeyDown(e) {
         if (!session.rdpSession) return;
+        var action = clipboardHotkeyAction(e);
+        if (action) {
+            e.preventDefault();
+            e.stopPropagation();
+            // 记下来，等它的 keyup 一并吞掉。用户可能先松修饰键再松 C/V，
+            // 那时 clipboardHotkeyAction 已经不成立，会漏出一个没有配对
+            // 按下的松开事件给远端。
+            swallowedHotkeys[e.code] = true;
+            if (action === 'copy') rdpCopy(session);
+            else rdpPaste(session);
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();
-        var scancode = RDP_SCANCODES[e.code];
+        var scancode = scancodeFor(e);
         if (scancode === undefined) return;
         send([DeviceEvent.keyPressed(scancode)]);
     }
@@ -879,7 +981,11 @@ function attachRdpInput(session, mod) {
         if (!session.rdpSession) return;
         e.preventDefault();
         e.stopPropagation();
-        var scancode = RDP_SCANCODES[e.code];
+        if (swallowedHotkeys[e.code]) {
+            delete swallowedHotkeys[e.code];
+            return;
+        }
+        var scancode = scancodeFor(e);
         if (scancode === undefined) return;
         send([DeviceEvent.keyReleased(scancode)]);
     }
@@ -937,6 +1043,8 @@ function attachRdpInput(session, mod) {
 
     // 失焦时把按下的键全部松开，否则回来时会出现"Ctrl 粘住"的现象。
     function onBlur() {
+        // 待配对的快捷键记录也要清掉，否则下次按同一个键会被误吞一次 keyup。
+        swallowedHotkeys = {};
         if (!session.rdpSession) return;
         try { session.rdpSession.releaseAllInputs(); } catch (e) { }
     }
@@ -1039,6 +1147,11 @@ function pushLocalClipboardToRdp(session, opts) {
         if (!opts.silent) showToast('远程桌面连接尚未就绪', 'error');
         return;
     }
+    // 剪贴板通道是连接时按设置决定挂不挂的，关掉了就没有通道可推。
+    if (session.rdpSettings && session.rdpSettings.clipboard === false) {
+        if (!opts.silent) showToast('剪贴板同步已关闭，可在「远程桌面设置 → 输入」中开启', 'info');
+        return;
+    }
     if (!rdpClipboardApiAvailable('read')) {
         if (!opts.silent) openRdpManualPaste(session);
         return;
@@ -1059,8 +1172,12 @@ function pushLocalClipboardToRdp(session, opts) {
             if (!opts.silent) showToast('剪贴板中没有文本内容', 'info');
             return;
         }
+        // 自动同步时绝不能把刚从远端收到的内容再推回去：远端复制 → 我们写入
+        // 本地剪贴板 → 用户点画面触发同步 → 又推回远端，会把远端剪贴板
+        // 覆盖成同一份内容，中间还可能覆盖掉远端更新的复制结果。
+        if (opts.silent && text === session._remoteClipboardText) return;
         if (sendTextToRdpSession(session, text)) {
-            if (!opts.silent) showToast('已粘贴到远程桌面', 'success');
+            if (!opts.silent) showToast('已粘贴到远程桌面，请在远端按粘贴键', 'success');
         } else if (!opts.silent) {
             showToast('推送到远程桌面失败，请重试', 'error');
         }

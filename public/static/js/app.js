@@ -650,12 +650,18 @@ function updateClipboardControls(session) {
     var isRdp = !!(session && session.kind === 'rdp');
     var copyBtn = document.getElementById('termCopyBtn');
     var pasteBtn = document.getElementById('termPasteBtn');
+    // 修饰键可能是 Ctrl 也可能是 Command，提示里要显示用户实际要按的那个。
+    var mod = typeof rdpClipboardModifierLabel === 'function' ? rdpClipboardModifierLabel() : 'Ctrl';
     if (copyBtn && copyBtn.classList) {
-        copyBtn.title = isRdp ? '取回远程桌面复制的内容' : '复制选中 (Ctrl+Shift+C)';
+        copyBtn.title = isRdp
+            ? '取回远程桌面复制的内容 (' + mod + '+Shift+C)'
+            : '复制选中 (' + mod + '+Shift+C)';
         copyBtn.classList.toggle('clipboard-pending', !!(isRdp && session._remoteClipboardPending));
     }
     if (pasteBtn) {
-        pasteBtn.title = isRdp ? '把本地剪贴板粘贴到远程桌面' : '粘贴 (Ctrl+Shift+V)';
+        pasteBtn.title = isRdp
+            ? '把本地剪贴板粘贴到远程桌面 (' + mod + '+Shift+V)'
+            : '粘贴 (' + mod + '+Shift+V)';
     }
 }
 
@@ -8734,11 +8740,18 @@ function hideCtxMenu() {
     document.getElementById('ctxMenu').classList.remove('show');
 }
 
-// Ctrl+Shift+C / Ctrl+Shift+V shortcuts
+// 复制/粘贴快捷键。修饰键默认按平台判断（Mac 用 Command，其余用 Ctrl），
+// 可在「远程桌面设置 → 输入」里改成固定值。
+// 注意：RDP 标签页下 canvas 的 keydown 会 stopPropagation，事件根本冒泡不到
+// 这里——那条路径由 rdp.js 的 attachRdpInput 就地拦截。这里覆盖 SSH，
+// 以及 RDP 画面尚未获得焦点时（比如刚点完工具栏）的情况。
 document.addEventListener('keydown', function (e) {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
+    if (!e.shiftKey) return;
+    var wantMeta = typeof rdpClipboardModifierIsMeta === 'function' && rdpClipboardModifierIsMeta();
+    var modifierDown = wantMeta ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey);
+    if (!modifierDown) return;
     var key = String(e.key || '').toUpperCase();
-    if (!e.ctrlKey || !e.shiftKey) return;
     // 两个快捷键对 SSH 和 RDP 都生效：RDP 下它们分别是「取回远端剪贴板」
     // 和「把本地剪贴板推给远端」，是这两个动作唯一带用户手势的入口。
     if (key === 'V') { e.preventDefault(); termPaste(); return; }

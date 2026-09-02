@@ -954,6 +954,16 @@
                     </label>
                     <div class="rdp-hint">浏览器读取剪贴板需要你在弹出的权限提示里放行，否则只有「远端 → 本地」方向可用。</div>
 
+                    <div class="input-field">
+                        <label for="rdpClipboardModifier">复制 / 粘贴修饰键</label>
+                        <select id="rdpClipboardModifier" class="rdp-select">
+                            <option value="auto">自动（Mac 用 ⌘，其它用 Ctrl）</option>
+                            <option value="ctrl">Ctrl</option>
+                            <option value="meta">Command ⌘ / Win</option>
+                        </select>
+                    </div>
+                    <div class="rdp-hint">决定 <b>修饰键+Shift+C / V</b> 用哪个键取回和推送剪贴板。选 <b>Command</b> 时，按下的 ⌘ 还会当作 Ctrl 发给远端——否则 Mac 上的 ⌘+C 到了 Windows 会变成 Win+C，弹出的是开始菜单而不是复制。</div>
+
                     <label class="checkbox-field" for="rdpUnicodeKeyboard">
                         <input type="checkbox" id="rdpUnicodeKeyboard" checked>
                         <span class="checkbox-custom"></span>
