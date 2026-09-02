@@ -2252,3 +2252,44 @@ test('the add-connection card is about 30% smaller than a standard modal', () =>
     assert.match(styleSource, /\.add-tab-body \.input-wrapper input \{[^}]*height: 28px/);
     assert.match(styleSource, /\.add-tab-card > \.add-tab-body \{[^}]*padding: 8px 10px/);
 });
+
+test('the private-share short link is not mistaken for a legacy credential path', () => {
+    const sandbox = {
+        window: {}, location: { pathname: '/', hash: '' },
+        isPrivateKey: (v) => String(v).includes('BEGIN'),
+        safeDecodeURIComponent: (v) => { try { return decodeURIComponent(v); } catch (e) { return v; } },
+        normalizePortValue: (v, fallback) => (/^\d+$/.test(v) ? parseInt(v, 10) : fallback),
+        parseHostPortInput: (raw, fallbackPort) => {
+            const text = String(raw || '');
+            const m = text.match(/^(.*):(\d+)$/);
+            if (m) return { host: m[1], port: parseInt(m[2], 10) };
+            return { host: text, port: fallbackPort };
+        }
+    };
+    loadFunctions(['parseUrlLoginPath'], sandbox);
+
+    // /s/<token> 正好落进旧式的「ip/password」两段格式。误判的后果有两个：
+    // 开了旧路径登录会去连一台叫 "s" 的主机；没开则误报「旧式快速登录已禁用」，
+    // 并把地址栏连同 fragment 里的解密密钥一起清掉，分享链接直接打不开。
+    assert.equal(sandbox.parseUrlLoginPath('/s/rcrumXrY65yF0naKyIBBmMZG'), null);
+    assert.equal(sandbox.parseUrlLoginPath('/s/rcrumXrY65yF0naKyIBBmMZG/'), null);
+
+    // 真正的旧式路径必须仍然被识别，别把守卫做过头。
+    const legacy = sandbox.parseUrlLoginPath('/192.168.1.1/mypassword12345678');
+    assert.equal(legacy.host, '192.168.1.1');
+    assert.equal(legacy.pass, 'mypassword12345678');
+    const threePart = sandbox.parseUrlLoginPath('/192.168.1.1/admin/secret');
+    assert.equal(threePart.user, 'admin');
+});
+
+test('share links never route credentials through a new history entry', () => {
+    // location.hash = 会往浏览器历史里塞一条带明文凭据的记录；必须用 replaceState。
+    const start = shareSource.indexOf('function connectionShareApplyPayload');
+    const end = shareSource.indexOf('function connectionShareParsePlainRdpHash');
+    assert.ok(start > 0 && end > start);
+    // 只看真实代码：注释里提到 location.hash 是在解释为什么不用它。
+    const apply = shareSource.slice(start, end)
+        .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+    assert.match(apply, /history\.replaceState\(null, '', '\/#ssh='/);
+    assert.equal(/location\.hash\s*=[^=]/.test(apply), false);
+});

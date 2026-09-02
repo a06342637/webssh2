@@ -363,7 +363,9 @@ function connectionShareApplyPayload(payload) {
     // SSH 走 app.js 既有的 #ssh= 自动登录链路：写回 hash 再交给 tryAutoLogin，
     // 表单填充、认证方式切换、自动连接全部沿用原逻辑，不另起一套。
     if (typeof tryAutoLogin !== 'function') return false;
-    location.hash = 'ssh=' + shareTextToBase64Url(JSON.stringify(payload.data));
+    // 用 replaceState 而不是 location.hash=，后者会往浏览器历史里塞一条
+    // 带明文凭据的记录。tryAutoLogin 成功后会再 replaceState 成 '/'。
+    history.replaceState(null, '', '/#ssh=' + shareTextToBase64Url(JSON.stringify(payload.data)));
     if (typeof urlAutoLoginHandled !== 'undefined') urlAutoLoginHandled = false;
     tryAutoLogin();
     return true;

@@ -9532,6 +9532,12 @@ function parseUrlLoginPath(pathname) {
     path = path.replace(/^\/+/, '').replace(/\/+$/, '');
     if (!path) return null;
 
+    // /s/<token> 是隐私分享短链（见 share.js），第二段是分享 token 而不是密码。
+    // 不排除的话它正好落进下面的「ip/password」两段格式：开了旧路径登录会去连
+    // 一台叫 "s" 的主机；没开则会误报「旧式快速登录已禁用」，并把地址栏连同
+    // fragment 里的解密密钥一起清掉，分享链接直接打不开。
+    if (/^s\/[A-Za-z0-9_-]{16,128}$/.test(path)) return null;
+
     var parts = path.split('/');
     var host, port, user, pass, authType;
 
