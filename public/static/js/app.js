@@ -219,6 +219,8 @@ document.addEventListener('keydown', function (e) {
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
         if (sshAuthRetryModal && sshAuthRetryModal.classList.contains('show')) { hideSSHAuthRetryModal(true); return; }
+        var rdpAuthRetryModal = document.getElementById('rdpAuthRetryModal');
+        if (rdpAuthRetryModal && rdpAuthRetryModal.classList.contains('show')) { hideRdpAuthRetryModal(true); return; }
         var hostKeyMismatchModal = document.getElementById('hostKeyMismatchModal');
         if (hostKeyMismatchModal && hostKeyMismatchModal.classList.contains('show')) { hideHostKeyMismatchModal(true); return; }
         var runScriptConfirmModal = document.getElementById('runScriptConfirmModal');
@@ -690,9 +692,14 @@ function switchTab(idx, userActivated) {
         var sftpPanelRdp = document.getElementById('sftpPanel');
         if (sftpPanelRdp) sftpPanelRdp.classList.remove('open');
         setTopbarMetricsVisible(false);
+        // SSH 侧的两个对话框跟着 SSH 会话走，切到 RDP 必须收起来。
+        hideSSHAuthRetryModal(false);
+        if ((prevIdx !== idx || userActivated) && s.authRetry) s.authRetry.dismissed = false;
+        if (typeof updateRdpAuthRetryModalForActive === 'function') updateRdpAuthRetryModalForActive();
         return;
     }
     document.body.classList.remove('active-rdp');
+    if (typeof hideRdpAuthRetryModal === 'function') hideRdpAuthRetryModal(false);
     setTimeout(function () { syncTermSize(s); try { s.term.focus(); } catch (e) { } }, 100);
     updateMetricsForActive();
     if (s._connected && (prevIdx !== idx || (!s.sysInfoTimer && !s.sysInfoStartTimer))) startTopbarMetricsPolling(s);

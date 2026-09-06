@@ -1,11 +1,16 @@
 // ==================== 连接设置菜单 & 连接分享 ====================
 // 这个文件承载终端顶栏右侧「设置」下拉，以及「分享连接」对话框的全部逻辑。
-// 分享分两种：
-//   明文分享 —— 凭据 base64 编码后直接挂在 URL 的 # 之后，不经过服务器，
-//               复用 app.js 里既有的 #ssh= 直连格式（parseUrlLoginFragment）。
-//   隐私分享 —— 浏览器本地用 AES-GCM 加密，只把密文 POST 给服务端换一个短 token，
-//               密钥留在 /s/<token>#k=<key> 的 # 之后。浏览器从不把 # 发给服务器，
-//               所以服务端全程只见密文，拿不到密码。
+//
+// 分享只有一种方式：浏览器本地用 AES-GCM 加密，只把密文 POST 给服务端换一个
+// 短 token，密钥留在 /s/<token>#k=<key> 的 # 之后。浏览器从不把 # 发给服务器，
+// 所以服务端全程只见密文，拿不到密码。
+//
+// 早期版本还有一种「明文分享」，凭据直接编码在 # 里、完全不经过服务器。
+// 那种链接既无法撤销也无法过期，已经废弃：现在每条分享都在服务端有记录，
+// 可以随时删除，且最长 24 小时自动失效。
+//
+// 完整链接（含解密密钥）只保存在生成它的这台浏览器里——服务端没有密钥，
+// 也就不可能替用户把链接再拼出来。换设备后仍能看到列表并撤销。
 
 var CONNECTION_SHARE_PATH_PREFIX = '/s/';
 var connectionShareBusy = false;
@@ -141,28 +146,9 @@ function connectionShareSummaryText(session) {
 
 // ==================== 分享对话框 ====================
 
-function connectionShareIsPrivateMode() {
-    var radio = document.getElementById('connectionShareModePrivate');
-    return !!(radio && radio.checked);
-}
-
 function connectionShareCryptoAvailable() {
     return !!(window.crypto && window.crypto.subtle &&
         typeof window.crypto.subtle.generateKey === 'function' && window.isSecureContext !== false);
-}
-
-function onConnectionShareModeChange() {
-    var options = document.getElementById('connectionSharePrivateOptions');
-    var note = document.getElementById('connectionShareSecurityNote');
-    var isPrivate = connectionShareIsPrivateMode();
-    if (options) options.hidden = !isPrivate;
-    if (note) {
-        note.innerHTML = isPrivate
-            ? '<strong>提示：</strong>密钥在链接的 # 之后，服务器只存密文。但拿到完整链接的人依然能连上这台服务器。'
-            : '<strong>注意：</strong>链接包含登录凭据，等同于把这台服务器的账号密码交出去。只发给你信任的人。';
-    }
-    var url = document.getElementById('connectionShareUrl');
-    if (url) url.value = '';
 }
 
 function openConnectionShareModal() {
@@ -185,21 +171,22 @@ function openConnectionShareModal() {
     var url = document.getElementById('connectionShareUrl');
     if (url) url.value = '';
 
-    // 非 HTTPS（且非 localhost）下 crypto.subtle 根本不存在，隐私分享无法加密。
-    // 与其生成一条假装加密的链接，不如直接禁用并说清楚原因。
-    var privateRadio = document.getElementById('connectionShareModePrivate');
-    var plainRadio = document.getElementById('connectionShareModePlain');
-    var hint = document.getElementById('connectionSharePrivateHint');
-    if (privateRadio) {
-        var cryptoOk = connectionShareCryptoAvailable();
-        privateRadio.disabled = !cryptoOk;
-        if (!cryptoOk) {
-            if (privateRadio.checked && plainRadio) plainRadio.checked = true;
-            if (hint) hint.textContent = '当前站点不是 HTTPS，浏览器禁用了加密接口，隐私分享不可用。请改用明文分享，或给站点配置 HTTPS。';
-        }
+    // 分享一律走浏览器端加密，而 crypto.subtle 在非 HTTPS（且非 localhost）
+    // 下根本不存在。与其生成一条假装加密的链接，不如把生成按钮禁掉说清原因。
+    var generate = document.getElementById('connectionShareGenerateButton');
+    var note = document.getElementById('connectionShareSecurityNote');
+    var cryptoOk = connectionShareCryptoAvailable();
+    if (generate) {
+        generate.disabled = !cryptoOk;
+        generate.textContent = cryptoOk ? '生成分享链接' : '当前站点不支持加密分享';
     }
-    onConnectionShareModeChange();
+    if (note) {
+        note.innerHTML = cryptoOk
+            ? '<strong>注意：</strong>凭据在你的浏览器里加密，服务器只存密文；但拿到完整链接的人依然能连上这台服务器。所有链接最长 24 小时后自动失效。'
+            : '<strong>无法分享：</strong>当前站点不是 HTTPS，浏览器禁用了加密接口。请给站点配置 HTTPS 后再使用分享功能。';
+    }
 
+    renderConnectionShareHistory();
     modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
 }
@@ -225,9 +212,58 @@ function connectionShareOrigin() {
     return location.protocol + '//' + location.host;
 }
 
-function buildPlainShareLink(payload) {
-    var encoded = shareTextToBase64Url(JSON.stringify(payload.data));
-    return connectionShareOrigin() + '/#' + (payload.kind === 'rdp' ? 'rdp=' : 'ssh=') + encoded;
+// ==================== 本地分享记录 ====================
+//
+// 服务端只有密文和元信息，解密密钥永远只在链接的 # 之后。所以要能「再次
+// 复制完整链接」，就只能把链接留在生成它的这台浏览器里。
+// 换设备后仍然能通过服务端列表看到并撤销分享，只是复制不出完整链接。
+
+var CONNECTION_SHARE_HISTORY_KEY = 'webssh_share_history';
+var CONNECTION_SHARE_MAX_TTL = 24 * 60 * 60 * 1000;
+var connectionShareHistoryOpen = false;
+
+function readConnectionShareHistory() {
+    var raw = [];
+    try {
+        raw = JSON.parse(safeStorageGet(CONNECTION_SHARE_HISTORY_KEY) || '[]');
+    } catch (e) {
+        raw = [];
+    }
+    if (!Array.isArray(raw)) raw = [];
+    var now = Date.now();
+    // 无论当初选了多久，本地记录也一律不超过 24 小时。
+    return raw.filter(function (item) {
+        return item && typeof item.token === 'string' && item.expiresAt > now &&
+            (now - (item.createdAt || 0)) < CONNECTION_SHARE_MAX_TTL;
+    });
+}
+
+function writeConnectionShareHistory(items) {
+    try {
+        safeStorageSet(CONNECTION_SHARE_HISTORY_KEY, JSON.stringify(items.slice(0, 50)));
+    } catch (e) { }
+}
+
+function rememberConnectionShare(entry) {
+    var items = readConnectionShareHistory();
+    items.unshift(entry);
+    writeConnectionShareHistory(items);
+}
+
+function forgetConnectionShare(token) {
+    writeConnectionShareHistory(readConnectionShareHistory().filter(function (item) {
+        return item.token !== token;
+    }));
+}
+
+function connectionShareRelativeTime(ts) {
+    var diff = ts - Date.now();
+    if (diff <= 0) return '已过期';
+    var minutes = Math.round(diff / 60000);
+    if (minutes < 60) return minutes + ' 分钟后失效';
+    var hours = Math.floor(minutes / 60);
+    var rest = minutes % 60;
+    return hours + ' 小时' + (rest ? rest + ' 分钟' : '') + '后失效';
 }
 
 function encryptConnectionSharePayload(payload) {
@@ -262,24 +298,19 @@ function generateConnectionShareLink() {
         showToast('没有可分享的连接', 'error');
         return;
     }
-    var output = document.getElementById('connectionShareUrl');
-
-    if (!connectionShareIsPrivateMode()) {
-        var link = buildPlainShareLink(payload);
-        if (output) output.value = link;
-        showToast('明文分享链接已生成', 'success');
-        return;
-    }
-
     if (!connectionShareCryptoAvailable()) {
-        showToast('当前站点不是 HTTPS，无法加密，请改用明文分享', 'error');
+        showToast('当前站点不是 HTTPS，浏览器禁用了加密接口，无法分享', 'error');
         return;
     }
-
+    var output = document.getElementById('connectionShareUrl');
     var expirySelect = document.getElementById('connectionShareExpiry');
     var burnBox = document.getElementById('connectionShareBurn');
     var expiresIn = expirySelect ? parseInt(expirySelect.value, 10) : 3600;
     if (!expiresIn || expiresIn < 60) expiresIn = 3600;
+    if (expiresIn > 24 * 60 * 60) expiresIn = 24 * 60 * 60;
+    var burn = !!(burnBox && burnBox.checked);
+    // 说明文字会明文存在服务端，只能放主机和协议，绝不能带密码。
+    var label = connectionShareSummaryText(session);
 
     connectionShareSetBusy(true, '加密中…');
     encryptConnectionSharePayload(payload).then(function (encrypted) {
@@ -291,20 +322,33 @@ function generateConnectionShareLink() {
             body: JSON.stringify({
                 ciphertext: encrypted.ciphertext,
                 iv: encrypted.iv,
+                label: label,
+                kind: payload.kind,
                 expiresIn: expiresIn,
-                burn: !!(burnBox && burnBox.checked)
+                burn: burn
             })
         }).then(function (response) {
             return response.json().catch(function () { return null; }).then(function (body) {
                 if (!response.ok || !body || body.ok !== true || !body.data || !body.data.token) {
                     throw new Error((body && body.msg) || '服务器拒绝了分享请求');
                 }
-                return body.data.token;
+                return body.data;
             });
-        }).then(function (token) {
-            var link = connectionShareOrigin() + CONNECTION_SHARE_PATH_PREFIX + token + '#k=' + encrypted.key;
+        }).then(function (data) {
+            var link = connectionShareOrigin() + CONNECTION_SHARE_PATH_PREFIX + data.token + '#k=' + encrypted.key;
             if (output) output.value = link;
-            showToast('隐私分享链接已生成', 'success');
+            rememberConnectionShare({
+                token: data.token,
+                id: data.id || '',
+                link: link,
+                label: label,
+                kind: payload.kind,
+                burn: burn,
+                createdAt: Date.now(),
+                expiresAt: (data.expiresAt ? data.expiresAt * 1000 : Date.now() + expiresIn * 1000)
+            });
+            renderConnectionShareHistory();
+            showToast('分享链接已生成', 'success');
         });
     }).catch(function (error) {
         showToast((error && error.message) || '生成分享链接失败', 'error');
@@ -343,6 +387,133 @@ function copyConnectionShareLink() {
 
 // ==================== 接收端：打开分享链接后自动连接 ====================
 
+// ==================== 分享历史 ====================
+
+function toggleConnectionShareHistory() {
+    connectionShareHistoryOpen = !connectionShareHistoryOpen;
+    var panel = document.getElementById('connectionShareHistoryPanel');
+    var toggle = document.getElementById('connectionShareHistoryToggle');
+    if (panel) panel.hidden = !connectionShareHistoryOpen;
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', connectionShareHistoryOpen ? 'true' : 'false');
+        toggle.classList.toggle('open', connectionShareHistoryOpen);
+    }
+    if (connectionShareHistoryOpen) renderConnectionShareHistory();
+}
+
+// 列表以服务端为准（它才知道链接到底还在不在），完整链接从本地记录里补。
+// 服务端查不到时退回纯本地渲染，至少让用户还能复制和清理自己的记录。
+function renderConnectionShareHistory() {
+    var list = document.getElementById('connectionShareHistoryList');
+    var count = document.getElementById('connectionShareHistoryCount');
+    var hint = document.getElementById('connectionShareHistoryHint');
+    if (!list) return;
+    var local = readConnectionShareHistory();
+
+    function paint(items, loggedIn, serverAware) {
+        if (count) count.textContent = items.length ? String(items.length) : '';
+        if (hint) {
+            hint.textContent = !serverAware
+                ? '无法连接服务器，下面是本机保存的记录。'
+                : (loggedIn
+                    ? '已登录，分享记录跟着账号走，换设备也能在这里撤销。'
+                    : '未登录，分享记录只存在这台浏览器里。登录后新建的分享会记到账号上。');
+        }
+        if (!items.length) {
+            list.innerHTML = '<div class="connection-share-history-empty">还没有生成过分享链接。</div>';
+            return;
+        }
+        list.innerHTML = items.map(function (item) {
+            var canCopy = !!item.link;
+            return '<div class="connection-share-history-item">' +
+                '<div class="connection-share-history-meta">' +
+                '<span class="connection-share-history-label">' + esc(item.label || '未命名分享') + '</span>' +
+                '<span class="connection-share-history-sub">' + esc(connectionShareRelativeTime(item.expiresAt)) +
+                (item.burn ? ' · 阅后即焚' : '') +
+                (canCopy ? '' : ' · 本机没有链接副本') + '</span>' +
+                '</div>' +
+                '<div class="connection-share-history-actions">' +
+                (canCopy
+                    ? '<button class="tb-btn" type="button" title="复制链接" aria-label="复制链接" data-share-copy="' + escAttr(item.token) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>'
+                    : '') +
+                '<button class="tb-btn danger" type="button" title="删除分享" aria-label="删除分享" data-share-delete="' + escAttr(item.id || item.token) + '" data-share-token="' + escAttr(item.token || '') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6M10 11v6M14 11v6M9 6V4a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></button>' +
+                '</div></div>';
+        }).join('');
+    }
+
+    paint(local, false, false);
+
+    fetch('/api/shares', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (body) {
+            if (!body || body.ok !== true || !body.data) throw new Error('bad response');
+            var merged = (body.data.items || []).map(function (entry) {
+                // 服务端只认存储键；本地记录里存了同一个键，用它反查完整链接。
+                var match = null;
+                for (var i = 0; i < local.length; i++) {
+                    if (local[i].id && local[i].id === entry.id) { match = local[i]; break; }
+                }
+                return {
+                    id: entry.id,
+                    token: match ? match.token : '',
+                    link: match ? match.link : '',
+                    label: entry.label || (match && match.label) || '',
+                    burn: !!entry.burn,
+                    expiresAt: (entry.expiresAt || 0) * 1000
+                };
+            });
+            paint(merged, body.data.loggedIn === true, true);
+        })
+        .catch(function () { /* 服务端不可用时保留本地渲染 */ });
+}
+
+function copyConnectionShareHistoryLink(token) {
+    var item = readConnectionShareHistory().filter(function (x) { return x.token === token; })[0];
+    if (!item || !item.link) {
+        showToast('这台浏览器上没有保存这条链接的副本', 'info');
+        return;
+    }
+    var output = document.getElementById('connectionShareUrl');
+    if (output) output.value = item.link;
+    copyConnectionShareLink();
+}
+
+function deleteConnectionShare(id, token) {
+    if (!id) return;
+    fetch('/api/shares/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' })
+        .then(function (r) {
+            return r.json().catch(function () { return null; }).then(function (body) {
+                // 404 说明服务端本来就没有了，本地记录照样要清掉。
+                if (!r.ok && r.status !== 404) {
+                    throw new Error((body && body.msg) || '删除失败');
+                }
+                return true;
+            });
+        })
+        .then(function () {
+            if (token) forgetConnectionShare(token);
+            renderConnectionShareHistory();
+            showToast('分享链接已删除', 'success');
+        })
+        .catch(function (err) {
+            showToast((err && err.message) || '删除分享失败', 'error');
+        });
+}
+
+document.addEventListener('click', function (event) {
+    var copyBtn = event.target && event.target.closest && event.target.closest('[data-share-copy]');
+    if (copyBtn) {
+        event.preventDefault();
+        copyConnectionShareHistoryLink(copyBtn.getAttribute('data-share-copy'));
+        return;
+    }
+    var delBtn = event.target && event.target.closest && event.target.closest('[data-share-delete]');
+    if (delBtn) {
+        event.preventDefault();
+        deleteConnectionShare(delBtn.getAttribute('data-share-delete'), delBtn.getAttribute('data-share-token'));
+    }
+});
+
 function connectionShareApplyPayload(payload) {
     if (!payload || !payload.data) return false;
     if (payload.kind === 'rdp') {
@@ -369,20 +540,6 @@ function connectionShareApplyPayload(payload) {
     if (typeof urlAutoLoginHandled !== 'undefined') urlAutoLoginHandled = false;
     tryAutoLogin();
     return true;
-}
-
-function connectionShareParsePlainRdpHash(hash) {
-    var raw = String(hash || '').replace(/^#/, '');
-    if (!raw) return null;
-    var encoded = new URLSearchParams(raw).get('rdp');
-    if (!encoded) return null;
-    try {
-        var data = JSON.parse(shareBase64UrlToText(encoded));
-        if (!data || typeof data !== 'object' || !data.hostname) return null;
-        return { kind: 'rdp', data: data };
-    } catch (e) {
-        return null;
-    }
 }
 
 function connectionShareTokenFromPath(pathname) {
@@ -456,11 +613,12 @@ function tryConnectionShareAutoConnect() {
         connectionShareResolveToken(token, key);
         return;
     }
-    var plainRdp = connectionShareParsePlainRdpHash(location.hash);
-    if (plainRdp) {
+    // 早期版本发过一种把凭据直接编码在 # 里的明文分享链接。那种链接无法
+    // 撤销也无法过期，已经废弃；遇到时明确拒绝，而不是安静地不反应。
+    var raw = String(location.hash || '').replace(/^#/, '');
+    if (raw && new URLSearchParams(raw).get('rdp')) {
         history.replaceState(null, '', '/');
-        // RDP 的 WASM 客户端由 rdp.js 异步加载，稍等一拍再发起，避免抢在脚本就绪前。
-        setTimeout(function () { connectionShareApplyPayload(plainRdp); }, 300);
+        showToast('这是旧版明文分享链接，已停用。请让分享者重新生成。', 'error');
     }
 }
 

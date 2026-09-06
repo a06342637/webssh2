@@ -2187,29 +2187,56 @@ test('toolbar collapses display options into a settings dropdown', () => {
     assert.match(indexSource, /id="connectionShareButton"[^>]*onclick="openConnectionShareModal\(\)"/);
 });
 
-test('connection sharing reuses the existing #ssh= direct-login format and strips trustScope', () => {
+test('sharing reuses the existing #ssh= direct-login format and strips trustScope', () => {
     assert.match(shareSource, /function buildConnectionSharePayload\(session\)/);
     // trustScope 是本机的主机密钥信任域，跟着链接外传等于把信任决定强加给接收方。
     assert.match(shareSource, /delete decoded\.trustScope/);
-    assert.match(shareSource, /payload\.kind === 'rdp' \? 'rdp=' : 'ssh='/);
     // SSH 侧必须走 app.js 既有的自动登录链路，而不是另造一套解析。
     assert.match(shareSource, /tryAutoLogin\(\)/);
     assert.match(appSource, /function parseUrlLoginFragment\(hash\)/);
 });
 
-test('private sharing keeps the key in the fragment and only uploads ciphertext', () => {
+test('plaintext sharing is gone: every link is revocable and expires', () => {
+    // 明文链接把凭据直接编码在 # 里，既无法撤销也无法过期，与「24 小时全部
+    // 失效、随时可删」的规则冲突，因此整个模式被移除。
+    assert.equal(/function buildPlainShareLink/.test(shareSource), false);
+    assert.equal(/connectionShareIsPrivateMode/.test(shareSource), false);
+    assert.equal(indexSource.includes('connectionShareModePlain'), false);
+    assert.equal(indexSource.includes('connectionShareModePrivate'), false);
+    // 旧的明文链接要给出明确提示，而不是安静地不反应。
+    assert.match(shareSource, /旧版明文分享链接，已停用/);
+});
+
+test('sharing keeps the key in the fragment and only uploads ciphertext', () => {
     assert.match(shareSource, /AES-GCM/);
     assert.match(shareSource, /generateKey/);
-    // 上传体里只能有密文和 IV，绝不能出现明文凭据字段。
+    // 上传体里只能有密文、IV 和不含密码的说明文字，绝不能出现凭据字段。
     const upload = shareSource.slice(shareSource.indexOf("fetch('/api/share'"), shareSource.indexOf('function copyConnectionShareLink'));
     assert.match(upload, /ciphertext: encrypted\.ciphertext/);
     assert.match(upload, /iv: encrypted\.iv/);
     assert.equal(/password|privateKey/.test(upload), false, '上传体里不应出现明文凭据字段');
     // 密钥拼在 # 之后，浏览器不会把 fragment 发给服务器。
-    assert.match(shareSource, /CONNECTION_SHARE_PATH_PREFIX \+ token \+ '#k=' \+ encrypted\.key/);
+    assert.match(shareSource, /CONNECTION_SHARE_PATH_PREFIX \+ data\.token \+ '#k=' \+ encrypted\.key/);
     // 非安全上下文下 crypto.subtle 不存在，必须明确禁用而不是假装加密。
     assert.match(shareSource, /function connectionShareCryptoAvailable\(\)/);
     assert.match(shareSource, /当前站点不是 HTTPS/);
+});
+
+test('share history is listed locally and revocable server-side', () => {
+    // 完整链接（含解密密钥）只能留在本机：服务端没有密钥，拼不出链接。
+    assert.match(shareSource, /CONNECTION_SHARE_HISTORY_KEY/);
+    assert.match(shareSource, /function rememberConnectionShare\(entry\)/);
+    assert.match(shareSource, /function forgetConnectionShare\(token\)/);
+    assert.match(shareSource, /function renderConnectionShareHistory\(\)/);
+    assert.match(shareSource, /function deleteConnectionShare\(id, token\)/);
+    assert.match(shareSource, /'\/api\/shares'/);
+    assert.match(shareSource, /'\/api\/shares\/' \+ encodeURIComponent\(id\)/);
+    // 本地记录也要受 24 小时上限约束，不能比服务端记录活得久。
+    assert.match(shareSource, /CONNECTION_SHARE_MAX_TTL = 24 \* 60 \* 60 \* 1000/);
+    // 服务端已经没有这条记录时（404），本地也要一并清掉。
+    assert.match(shareSource, /r\.status !== 404/);
+    assert.match(indexSource, /id="connectionShareHistoryList"/);
+    assert.match(indexSource, /onclick="toggleConnectionShareHistory\(\)"/);
 });
 
 test('RDP clipboard failures are queued for a user gesture instead of being swallowed', () => {
@@ -2289,7 +2316,7 @@ test('the private-share short link is not mistaken for a legacy credential path'
 test('share links never route credentials through a new history entry', () => {
     // location.hash = 会往浏览器历史里塞一条带明文凭据的记录；必须用 replaceState。
     const start = shareSource.indexOf('function connectionShareApplyPayload');
-    const end = shareSource.indexOf('function connectionShareParsePlainRdpHash');
+    const end = shareSource.indexOf('function connectionShareTokenFromPath');
     assert.ok(start > 0 && end > start);
     // 只看真实代码：注释里提到 location.hash 是在解释为什么不用它。
     const apply = shareSource.slice(start, end)
@@ -2369,4 +2396,24 @@ test('auto clipboard sync never echoes remote content back to the remote', () =>
     // 剪贴板通道关掉时要明确说明，而不是静默失败
     assert.match(body, /session\.rdpSettings\.clipboard === false/);
     assert.match(body, /剪贴板同步已关闭/);
+});
+
+test('RDP login failures ask for credentials instead of retrying the same password', () => {
+    // 只给「重新连接」是没用的——它会拿着同一份错密码再试一次。
+    assert.match(rdpSource, /function isRdpAuthFailure\(message\)/);
+    assert.match(rdpSource, /function showRdpAuthRetryModal\(session\)/);
+    assert.match(rdpSource, /function submitRdpAuthRetry\(\)/);
+    // 用户名预填省得重打，密码必须清空。
+    assert.match(rdpSource, /getElementById\('rdpRetryUser'\)\.value = session\.username/);
+    assert.match(rdpSource, /getElementById\('rdpRetryPass'\)\.value = ''/);
+    // 认证失败时覆盖层的主按钮换成重填凭据。
+    assert.match(rdpSource, /var authFailed = isRdpAuthFailure\(text\)/);
+    assert.match(rdpSource, /重新输入账号密码/);
+    // 握手阶段和连上后被踢两条路径都要触发。
+    assert.match(rdpSource, /if \(isRdpAuthFailure\(message\)\) handleRdpAuthFailure\(session, message\)/);
+    assert.match(rdpSource, /if \(isRdpAuthFailure\(reason\)\) handleRdpAuthFailure\(session, reason\)/);
+    assert.match(indexSource, /id="rdpAuthRetryModal"/);
+    assert.match(indexSource, /id="rdpRetryDomain"/);
+    // 切走 RDP 标签时两个协议的重试框都不能串台。
+    assert.match(appSource, /hideSSHAuthRetryModal\(false\);[\s\S]{0,200}updateRdpAuthRetryModalForActive\(\)/);
 });

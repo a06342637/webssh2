@@ -2624,6 +2624,129 @@ html[data-theme="light"] {
     font-size: 11.5px;
 }
 
+/* 分享历史：默认收起，点标题展开。 */
+#connectionShareModal .connection-share-history {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 8px;
+    padding-top: 11px;
+    border-top: 1px solid var(--connection-component-border);
+}
+
+#connectionShareModal .connection-share-history-toggle {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 30px;
+    gap: 7px;
+    padding: 4px 2px;
+    color: var(--t1);
+    background: transparent;
+    border: 0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+#connectionShareModal .connection-share-history-toggle:hover { color: var(--c1); }
+#connectionShareModal .connection-share-history-toggle .chev {
+    flex: 0 0 auto;
+    transition: transform .18s ease;
+}
+#connectionShareModal .connection-share-history-toggle.open .chev { transform: rotate(90deg); }
+
+#connectionShareModal .connection-share-history-count {
+    min-width: 18px;
+    padding: 1px 6px;
+    color: var(--c1);
+    background: rgba(0, 212, 255, .12);
+    border-radius: 9px;
+    font-size: 10.5px;
+    text-align: center;
+}
+#connectionShareModal .connection-share-history-count:empty { display: none; }
+
+#connectionShareModal .connection-share-history-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 7px;
+}
+#connectionShareModal .connection-share-history-panel[hidden] { display: none; }
+
+#connectionShareModal .connection-share-history-hint {
+    color: var(--t2);
+    font-size: 10.5px;
+    line-height: 1.5;
+}
+
+#connectionShareModal .connection-share-history-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 208px;
+    min-width: 0;
+    gap: 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#connectionShareModal .connection-share-history-empty {
+    padding: 12px;
+    color: var(--t3);
+    background: var(--connection-surface-bg);
+    border: 1px dashed var(--connection-component-border);
+    border-radius: 8px;
+    font-size: 11px;
+    text-align: center;
+}
+
+#connectionShareModal .connection-share-history-item {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--connection-surface-bg);
+    border: 1px solid var(--connection-component-border);
+    border-radius: 8px;
+}
+
+#connectionShareModal .connection-share-history-meta {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+}
+
+#connectionShareModal .connection-share-history-label {
+    color: var(--t1);
+    font-size: 11.5px;
+    font-family: 'WebSSH JetBrains Mono', 'JetBrains Mono', monospace;
+    overflow-wrap: anywhere;
+}
+
+#connectionShareModal .connection-share-history-sub {
+    color: var(--t2);
+    font-size: 10px;
+    overflow-wrap: anywhere;
+}
+
+#connectionShareModal .connection-share-history-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+}
+
+#connectionShareModal .connection-share-history-actions .tb-btn {
+    width: 28px;
+    height: 28px;
+}
+
 /* Opening below the top toolbar must not be clipped by its mobile overflow rule. */
 .topbar-right:has(#connectionSettingsMenu.connection-settings-menu) {
     position: relative;

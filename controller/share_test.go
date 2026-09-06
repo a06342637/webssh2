@@ -118,16 +118,32 @@ func TestCreateShareStoresOnlyHashedTokenAndCiphertext(t *testing.T) {
 	}
 }
 
-func TestCreateShareRequiresLogin(t *testing.T) {
+func TestCreateShareIsAllowedForGuestsAndScopedByIP(t *testing.T) {
 	installTestShareStore(t)
-	recorder, _ := createTestShare(t, "", map[string]any{
+	// 没有账号也要能分享，否则这个功能对游客完全不可用。
+	// 配额与归属改挂在客户端 IP 上。
+	recorder, token := createTestShare(t, "", map[string]any{
 		"ciphertext": "Y2lwaGVydGV4dA",
 		"iv":         "aXYtdmFsdWU",
+		"label":      "SSH root@192.0.2.10:22",
+		"kind":       "ssh",
 		"expiresIn":  3600,
 		"burn":       false,
 	})
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous share creation was allowed: %d %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("guest share creation was rejected: %d %s", recorder.Code, recorder.Body.String())
+	}
+	accountStore.mu.RLock()
+	defer accountStore.mu.RUnlock()
+	stored := accountStore.db.Shares[shareStorageKey(token)]
+	if !strings.HasPrefix(stored.Owner, "ip:") {
+		t.Fatalf("guest share was not scoped to an IP: %q", stored.Owner)
+	}
+	if stored.Label != "SSH root@192.0.2.10:22" || stored.Kind != "ssh" {
+		t.Fatalf("share metadata was not stored: %#v", stored)
+	}
+	if stored.Version != shareSchemaVersion {
+		t.Fatalf("share was stored with schema version %d", stored.Version)
 	}
 }
 
@@ -197,7 +213,7 @@ func TestCreateShareClampsTTL(t *testing.T) {
 
 func TestCreateShareEnforcesPerUserLimit(t *testing.T) {
 	sessionToken := installTestShareStore(t)
-	for i := 0; i < shareMaxPerUser; i++ {
+	for i := 0; i < shareMaxPerOwner; i++ {
 		recorder, _ := createTestShare(t, sessionToken, map[string]any{
 			"ciphertext": "Y2lwaGVydGV4dA",
 			"iv":         "aXYtdmFsdWU",
@@ -305,8 +321,8 @@ func TestCleanupExpiredSharesLockedDropsOnlyStaleEntries(t *testing.T) {
 	installTestShareStore(t)
 	now := time.Now().Unix()
 	accountStore.mu.Lock()
-	accountStore.db.Shares["fresh"] = StoredShare{Owner: "member1", ExpiresAt: now + 600}
-	accountStore.db.Shares["stale"] = StoredShare{Owner: "member1", ExpiresAt: now - 1}
+	accountStore.db.Shares["fresh"] = StoredShare{Version: shareSchemaVersion, Owner: "member1", ExpiresAt: now + 600}
+	accountStore.db.Shares["stale"] = StoredShare{Version: shareSchemaVersion, Owner: "member1", ExpiresAt: now - 1}
 	accountStore.cleanupExpiredSharesLocked(now)
 	_, freshKept := accountStore.db.Shares["fresh"]
 	_, staleKept := accountStore.db.Shares["stale"]
@@ -334,5 +350,156 @@ func TestNewShareTokenIsUniqueAndURLSafe(t *testing.T) {
 			t.Fatalf("duplicate token generated: %q", token)
 		}
 		seen[token] = true
+	}
+}
+
+func TestListSharesReturnsOnlyOwnMetadata(t *testing.T) {
+	sessionToken := installTestShareStore(t)
+	_, mine := createTestShare(t, sessionToken, map[string]any{
+		"ciphertext": "Y2lwaGVydGV4dA",
+		"iv":         "aXYtdmFsdWU",
+		"label":      "RDP 10.0.0.5:3389",
+		"kind":       "rdp",
+		"expiresIn":  3600,
+		"burn":       true,
+	})
+	// 另一个账号的分享不能出现在列表里。
+	accountStore.mu.Lock()
+	accountStore.db.Shares[shareStorageKey("someone-elses-token-value")] = StoredShare{
+		Version: shareSchemaVersion, Owner: "other", Label: "别人的", ExpiresAt: time.Now().Unix() + 600,
+	}
+	accountStore.mu.Unlock()
+
+	recorder := performShareRequest(t, ListShares, http.MethodGet, "/api/shares", nil, sessionToken, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list shares failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+	data, _ := decodeShareBody(t, recorder)["data"].(map[string]any)
+	items, _ := data["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one own share, got %d", len(items))
+	}
+	entry, _ := items[0].(map[string]any)
+	if entry["label"] != "RDP 10.0.0.5:3389" || entry["kind"] != "rdp" || entry["burn"] != true {
+		t.Fatalf("unexpected list entry: %#v", entry)
+	}
+	if data["loggedIn"] != true {
+		t.Fatal("logged-in flag was not reported")
+	}
+	// 列表绝不能回密文、更不能回一个可以直接打开的 token。
+	body := recorder.Body.String()
+	if strings.Contains(body, "Y2lwaGVydGV4dA") || strings.Contains(body, mine) {
+		t.Fatalf("list leaked ciphertext or a usable token: %s", body)
+	}
+	if entry["id"] != shareStorageKey(mine) {
+		t.Fatalf("list did not identify the share by its storage key: %#v", entry["id"])
+	}
+}
+
+func TestDeleteShareRevokesTheLinkAndRejectsOthers(t *testing.T) {
+	sessionToken := installTestShareStore(t)
+	_, token := createTestShare(t, sessionToken, map[string]any{
+		"ciphertext": "Y2lwaGVydGV4dA",
+		"iv":         "aXYtdmFsdWU",
+		"expiresIn":  3600,
+		"burn":       false,
+	})
+	key := shareStorageKey(token)
+
+	// 别人的记录删不掉。
+	accountStore.mu.Lock()
+	foreign := shareStorageKey("foreign-token-value-here")
+	accountStore.db.Shares[foreign] = StoredShare{
+		Version: shareSchemaVersion, Owner: "other", ExpiresAt: time.Now().Unix() + 600,
+	}
+	accountStore.mu.Unlock()
+	denied := performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+foreign, nil, sessionToken,
+		gin.Params{{Key: "id", Value: foreign}})
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("deleting another owner's share was allowed: %d", denied.Code)
+	}
+
+	// 自己的可以删，删完链接立刻打不开。
+	ok := performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+key, nil, sessionToken,
+		gin.Params{{Key: "id", Value: key}})
+	if ok.Code != http.StatusOK {
+		t.Fatalf("deleting own share failed: %d %s", ok.Code, ok.Body.String())
+	}
+	gone := performShareRequest(t, GetShare, http.MethodGet, "/api/share/"+token, nil, "",
+		gin.Params{{Key: "token", Value: token}})
+	if gone.Code != http.StatusNotFound {
+		t.Fatalf("deleted share is still readable: %d", gone.Code)
+	}
+
+	// 重复删除返回 404 而不是 500。
+	again := performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+key, nil, sessionToken,
+		gin.Params{{Key: "id", Value: key}})
+	if again.Code != http.StatusNotFound {
+		t.Fatalf("second delete returned %d", again.Code)
+	}
+}
+
+func TestDeleteShareAlsoAcceptsTheRawToken(t *testing.T) {
+	sessionToken := installTestShareStore(t)
+	_, token := createTestShare(t, sessionToken, map[string]any{
+		"ciphertext": "Y2lwaGVydGV4dA",
+		"iv":         "aXYtdmFsdWU",
+		"expiresIn":  3600,
+		"burn":       false,
+	})
+	recorder := performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+token, nil, sessionToken,
+		gin.Params{{Key: "id", Value: token}})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("deleting by raw token failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSharesFromAnOlderSchemaAreInvalidated(t *testing.T) {
+	// 分享规则变更后，此前发出的链接必须一次性全部作废。
+	installTestShareStore(t)
+	now := time.Now().Unix()
+	accountStore.mu.Lock()
+	accountStore.db.Shares["legacy"] = StoredShare{Owner: "member1", ExpiresAt: now + 86400} // 无 version，即旧记录
+	accountStore.db.Shares["current"] = StoredShare{Version: shareSchemaVersion, Owner: "member1", ExpiresAt: now + 600}
+	accountStore.cleanupExpiredSharesLocked(now)
+	_, legacyKept := accountStore.db.Shares["legacy"]
+	_, currentKept := accountStore.db.Shares["current"]
+	accountStore.mu.Unlock()
+
+	if legacyKept {
+		t.Fatal("a share created under the old rules survived")
+	}
+	if !currentKept {
+		t.Fatal("a share created under the current rules was dropped")
+	}
+}
+
+func TestShareTTLIsCappedAtTwentyFourHours(t *testing.T) {
+	if shareMaxTTL != 24*60*60 {
+		t.Fatalf("share links must expire within 24h, got %d seconds", shareMaxTTL)
+	}
+}
+
+func TestShareLabelIsSanitized(t *testing.T) {
+	sessionToken := installTestShareStore(t)
+	_, token := createTestShare(t, sessionToken, map[string]any{
+		"ciphertext": "Y2lwaGVydGV4dA",
+		"iv":         "aXYtdmFsdWU",
+		"label":      "  SSH\x00 root@host\n  " + strings.Repeat("x", shareMaxLabelLen),
+		"kind":       "bogus",
+		"expiresIn":  3600,
+		"burn":       false,
+	})
+	accountStore.mu.RLock()
+	defer accountStore.mu.RUnlock()
+	stored := accountStore.db.Shares[shareStorageKey(token)]
+	if len(stored.Label) > shareMaxLabelLen {
+		t.Fatalf("label was not truncated: %d chars", len(stored.Label))
+	}
+	if strings.ContainsAny(stored.Label, "\x00\n") {
+		t.Fatalf("control characters survived sanitising: %q", stored.Label)
+	}
+	if stored.Kind != "" {
+		t.Fatalf("unknown kind should be dropped, got %q", stored.Kind)
 	}
 }

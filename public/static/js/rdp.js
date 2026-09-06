@@ -654,6 +654,8 @@ function createRdpSession(hostname, port, username, opts) {
         _resizeTimer: null,
         _inputCleanup: null,
         _keyboardLocked: false,
+        // 登录被拒时挂在这里，驱动「修正远程桌面登录信息」对话框。
+        authRetry: null,
         // 远端最近一次复制的内容，以及「还没写进本地剪贴板」的挂起标记。
         // 详见 attachRdpClipboard 里对浏览器手势限制的说明。
         _remoteClipboardText: '',
@@ -678,8 +680,13 @@ function setRdpOverlay(session, text, kind) {
     session.overlay.classList.toggle('error', kind === 'error');
     var box = session.overlay.querySelector('.rdp-overlay-box');
     if (kind === 'error') {
-        box.innerHTML = '<div class="rdp-overlay-text">' + esc(text) + '</div>' +
-            '<button class="drawer-add" style="margin-top:10px" onclick="reconnectRdpTab()">重新连接</button>';
+        // 认证失败时「重新连接」会拿同一份错密码再试一次，毫无意义，
+        // 所以这种情况把主按钮换成重填凭据。
+        var authFailed = isRdpAuthFailure(text);
+        var primary = authFailed
+            ? '<button class="drawer-add" style="margin-top:10px" onclick="showRdpAuthRetryModal(activeRdpSession())">重新输入账号密码</button>'
+            : '<button class="drawer-add" style="margin-top:10px" onclick="reconnectRdpTab()">重新连接</button>';
+        box.innerHTML = '<div class="rdp-overlay-text">' + esc(text) + '</div>' + primary;
     } else {
         box.innerHTML = '<span class="spinner"></span><span class="rdp-overlay-text">' + esc(text) + '</span>';
     }
@@ -707,6 +714,8 @@ function connectRdpSession(session, afterStart) {
         setRdpOverlay(session, message, 'error');
         setStatus('error', '连接失败');
         showToast(message, 'error');
+        // 账号密码不对的话直接把重填对话框弹出来，省一次点击。
+        if (isRdpAuthFailure(message)) handleRdpAuthFailure(session, message);
     });
 }
 
@@ -820,6 +829,8 @@ function handleRdpSessionEnd(session, reason) {
     session.rdpSession = null;
     if (session._closing) return;
     setRdpOverlay(session, reason || '远程桌面连接已断开', 'error');
+    // NLA 有时不是在握手阶段拒绝，而是连上后立刻断开并给出登录失败原因。
+    if (isRdpAuthFailure(reason)) handleRdpAuthFailure(session, reason);
     renderTabs();
 }
 
@@ -1337,6 +1348,109 @@ function toggleRdpFullscreen(session, force) {
 function activeRdpSession() {
     var s = activeIdx >= 0 ? sessions[activeIdx] : null;
     return s && s.kind === 'rdp' ? s : null;
+}
+
+// ==================== 登录失败后重填凭据 ====================
+//
+// 密码打错时只给一个「重新连接」按钮是没用的——它会拿着同一份错密码再试一次。
+// 这里照搬 SSH 侧 sshAuthRetryModal 的做法：弹窗预填主机/端口/用户名，
+// 只把密码清空并聚焦，让用户改完直接重连。
+
+// 认证类失败才值得让用户重填凭据；网络不通、网关握手失败之类重填也没用。
+function isRdpAuthFailure(message) {
+    var text = String(message || '');
+    return /登录失败|密码错误|用户名或密码|账号已被禁用|账号已被锁定|密码已过期|需要先修改密码|拒绝访问|没有远程桌面登录权限|没有被授予远程登录权限|账号被策略限制/.test(text);
+}
+
+function setRdpAuthRetryError(text) {
+    var el = document.getElementById('rdpAuthRetryError');
+    if (!el) return;
+    if (text) {
+        el.textContent = text;
+        el.classList.add('show');
+    } else {
+        el.textContent = '';
+        el.classList.remove('show');
+    }
+}
+
+function showRdpAuthRetryModal(session) {
+    if (!session || !session.authRetry) return;
+    var modal = document.getElementById('rdpAuthRetryModal');
+    if (!modal) return;
+    document.getElementById('rdpRetryHost').value = typeof formatHostForInput === 'function'
+        ? formatHostForInput(session.hostname || '') : (session.hostname || '');
+    document.getElementById('rdpRetryPort').value = session.port || 3389;
+    // 用户名多半是对的，预填省得重打；密码一定要清空，否则用户
+    // 看着一个已经被拒绝的密码，不知道该不该改。
+    document.getElementById('rdpRetryUser').value = session.username || '';
+    document.getElementById('rdpRetryDomain').value = session.domain || '';
+    document.getElementById('rdpRetryPass').value = '';
+    var hint = document.getElementById('rdpAuthRetryHint');
+    if (hint) {
+        hint.textContent = '登录 ' + (session.username || '(未填用户名)') + '@' +
+            session.hostname + ':' + (session.port || 3389) + ' 被拒绝，请确认用户名和密码后重试。';
+    }
+    setRdpAuthRetryError(session.authRetry.error || '');
+    modal.classList.add('show');
+    setTimeout(function () {
+        var pass = document.getElementById('rdpRetryPass');
+        if (pass) pass.focus();
+    }, 60);
+}
+
+function hideRdpAuthRetryModal(dismiss) {
+    var modal = document.getElementById('rdpAuthRetryModal');
+    if (modal) modal.classList.remove('show');
+    setRdpAuthRetryError('');
+    if (dismiss) {
+        var s = activeRdpSession();
+        if (s && s.authRetry) s.authRetry.dismissed = true;
+    }
+}
+
+function updateRdpAuthRetryModalForActive() {
+    var s = activeRdpSession();
+    if (s && s.authRetry && !s.authRetry.dismissed) {
+        showRdpAuthRetryModal(s);
+        return;
+    }
+    hideRdpAuthRetryModal(false);
+}
+
+function handleRdpAuthFailure(session, message) {
+    session.authRetry = { error: message || '登录失败', dismissed: false, ts: Date.now() };
+    if (sessions[activeIdx] === session) updateRdpAuthRetryModalForActive();
+}
+
+function submitRdpAuthRetry() {
+    var session = activeRdpSession();
+    if (!session) { hideRdpAuthRetryModal(false); return; }
+    var hp = parseHostPortInput(document.getElementById('rdpRetryHost').value,
+        document.getElementById('rdpRetryPort').value, 3389);
+    var host = hp.host;
+    var port = hp.port || 3389;
+    var user = document.getElementById('rdpRetryUser').value.trim();
+    var domain = document.getElementById('rdpRetryDomain').value.trim();
+    var pass = document.getElementById('rdpRetryPass').value;
+    if (!host) { setRdpAuthRetryError('请填写主机地址。'); return; }
+    if (!user) { setRdpAuthRetryError('请填写用户名。'); return; }
+    if (!pass) { setRdpAuthRetryError('请输入密码。'); return; }
+
+    document.getElementById('rdpRetryHost').value = typeof formatHostForInput === 'function'
+        ? formatHostForInput(host) : host;
+    document.getElementById('rdpRetryPort').value = port;
+
+    session.hostname = host;
+    session.port = port;
+    session.username = user;
+    session.domain = domain;
+    session.password = pass;
+    session.authRetry = null;
+    hideRdpAuthRetryModal(false);
+    renderTabs();
+    showToast('正在用新的登录信息重连 ' + host + '…', 'info');
+    reconnectRdpTab();
 }
 
 function reconnectRdpTab() {

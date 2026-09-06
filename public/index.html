@@ -1025,6 +1025,48 @@
         </div>
     </div>
 
+    <!-- RDP Auth Retry Dialog -->
+    <div class="modal-overlay" id="rdpAuthRetryModal">
+        <div class="glass-card modal-card ssh-auth-retry-card">
+            <div class="drawer-hd auth-hd">
+                <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>修正远程桌面登录信息</span>
+                <button class="settings-close" type="button" onclick="hideRdpAuthRetryModal(true)" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div class="modal-body ssh-auth-retry-body">
+                <div class="ssh-auth-retry-hint" id="rdpAuthRetryHint">登录失败，请检查用户名和密码后重试。</div>
+                <div class="input-row">
+                    <div class="input-field flex-3">
+                        <label for="rdpRetryHost">主机地址</label>
+                        <input type="text" id="rdpRetryHost" class="script-input" placeholder="IPv4、IPv6 或域名">
+                    </div>
+                    <div class="input-field flex-1">
+                        <label for="rdpRetryPort">端口</label>
+                        <input type="number" id="rdpRetryPort" class="script-input" placeholder="3389" min="1" max="65535">
+                    </div>
+                </div>
+                <div class="input-row">
+                    <div class="input-field flex-1">
+                        <label for="rdpRetryUser">用户名</label>
+                        <input type="text" id="rdpRetryUser" class="script-input" placeholder="Administrator" autocomplete="username">
+                    </div>
+                    <div class="input-field flex-1">
+                        <label for="rdpRetryDomain">域（可选）</label>
+                        <input type="text" id="rdpRetryDomain" class="script-input" placeholder="留空即本机账号">
+                    </div>
+                </div>
+                <div class="input-field">
+                    <label for="rdpRetryPass">密码</label>
+                    <input type="password" id="rdpRetryPass" class="script-input" placeholder="请重新输入密码" autocomplete="current-password">
+                </div>
+                <div class="ssh-auth-retry-error" id="rdpAuthRetryError"></div>
+                <div class="edit-actions">
+                    <button class="drawer-add" type="button" onclick="submitRdpAuthRetry()">重新连接</button>
+                    <button class="drawer-add" type="button" onclick="hideRdpAuthRetryModal(true)">稍后处理</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- SSH Host Key Mismatch Dialog -->
     <div class="modal-overlay" id="hostKeyMismatchModal">
         <div class="glass-card modal-card host-key-card">
@@ -1456,31 +1498,14 @@
                     <div class="connection-share-section-label" id="connectionShareSummaryLabel">当前连接</div>
                     <div class="connection-share-summary" id="connectionShareSummary" aria-live="polite">没有可分享的连接</div>
                 </section>
-                <fieldset class="connection-share-modes" aria-label="分享方式">
-                    <legend>分享方式</legend>
-                    <label class="connection-share-mode-card" for="connectionShareModePlain">
-                        <input type="radio" name="connectionShareMode" id="connectionShareModePlain" value="plain" checked onchange="onConnectionShareModeChange()" aria-describedby="connectionSharePlainHint">
-                        <span class="connection-share-mode-copy">
-                            <strong>明文分享</strong>
-                            <span id="connectionSharePlainHint">账号密码直接编码在链接里，不经过服务器。谁拿到链接谁就能登录。</span>
-                        </span>
-                    </label>
-                    <label class="connection-share-mode-card" for="connectionShareModePrivate">
-                        <input type="radio" name="connectionShareMode" id="connectionShareModePrivate" value="private" onchange="onConnectionShareModeChange()" aria-describedby="connectionSharePrivateHint">
-                        <span class="connection-share-mode-copy">
-                            <strong>隐私分享</strong>
-                            <span id="connectionSharePrivateHint">浏览器本地 AES-GCM 加密后只把密文存到服务器，密钥留在链接的 # 之后、永不发送给服务器。可设有效期与阅后即焚。</span>
-                        </span>
-                    </label>
-                </fieldset>
-                <section class="connection-share-private-options" id="connectionSharePrivateOptions" aria-label="隐私分享选项" hidden>
+                <section class="connection-share-private-options" id="connectionSharePrivateOptions" aria-label="分享选项">
                     <div class="connection-share-section-label">链接有效期</div>
                     <div class="input-row connection-share-expiry-row">
                         <select id="connectionShareExpiry" class="script-input flex-1" aria-label="链接有效期">
                             <option value="900">15 分钟</option>
                             <option value="3600" selected>1 小时</option>
-                            <option value="86400">24 小时</option>
-                            <option value="604800">7 天</option>
+                            <option value="21600">6 小时</option>
+                            <option value="86400">24 小时（上限）</option>
                         </select>
                     </div>
                     <label class="checkbox-field" for="connectionShareBurn">
@@ -1489,7 +1514,7 @@
                         <span>阅后即焚（链接只能成功打开一次）</span>
                     </label>
                 </section>
-                <div class="share-security-note" id="connectionShareSecurityNote"><strong>注意：</strong>链接包含登录凭据，等同于把这台服务器的账号密码交出去。只发给你信任的人。</div>
+                <div class="share-security-note" id="connectionShareSecurityNote"><strong>注意：</strong>凭据在你的浏览器里加密，服务器只存密文；但拿到完整链接的人依然能连上这台服务器。所有链接最长 24 小时后自动失效。</div>
                 <button class="drawer-add primary-action connection-share-generate" id="connectionShareGenerateButton" type="button" onclick="generateConnectionShareLink()">生成分享链接</button>
                 <div class="input-field connection-share-output">
                     <label for="connectionShareUrl">分享链接</label>
@@ -1498,6 +1523,19 @@
                         <button class="tb-btn" type="button" onclick="copyConnectionShareLink()" title="复制链接" aria-label="复制链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
                     </div>
                 </div>
+
+                <section class="connection-share-history" aria-labelledby="connectionShareHistoryToggle">
+                    <button class="connection-share-history-toggle" id="connectionShareHistoryToggle" type="button" onclick="toggleConnectionShareHistory()" aria-expanded="false" aria-controls="connectionShareHistoryPanel">
+                        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><polyline points="9 18 15 12 9 6"/></svg>
+                        <span>分享历史</span>
+                        <span class="connection-share-history-count" id="connectionShareHistoryCount"></span>
+                    </button>
+                    <div class="connection-share-history-panel" id="connectionShareHistoryPanel" hidden>
+                        <div class="connection-share-history-hint" id="connectionShareHistoryHint"></div>
+                        <div class="connection-share-history-list" id="connectionShareHistoryList" aria-live="polite"></div>
+                    </div>
+                </section>
+
                 <div class="connection-share-actions input-row">
                     <button class="drawer-add" type="button" onclick="closeConnectionShareModal()">关闭</button>
                 </div>
