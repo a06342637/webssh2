@@ -98,7 +98,7 @@ func (s *AccountStore) cleanupExpiredSharesLocked(now int64) {
 	}
 }
 
-// 配额按创建者统计：登录用户按账号名，游客按客户端 IP。
+// 配额按创建者统计：登录用户按账号名，游客按浏览器的 trust-scope cookie（见 shareQuotaKeyFor）。
 func (s *AccountStore) shareCountForOwnerLocked(owner string) int {
 	count := 0
 	for _, share := range s.db.Shares {
@@ -110,7 +110,7 @@ func (s *AccountStore) shareCountForOwnerLocked(owner string) int {
 }
 
 // 游客也允许创建分享（否则没有账号就用不了这个功能），但要有配额兜底，
-// 免得接口被当成免费的匿名加密存储。游客的配额挂在客户端 IP 上。
+// 免得接口被当成免费的匿名加密存储。
 func shareOwnerFor(c *gin.Context) (string, bool) {
 	if username, ok := currentAccount(c); ok {
 		return username, true
@@ -118,11 +118,29 @@ func shareOwnerFor(c *gin.Context) (string, bool) {
 	return "", false
 }
 
+// 游客的分享归属到哪里，决定了「谁能看到并删除这条分享」。
+//
+// 不能用客户端 IP：NAT 后面的一群人共用一个出口 IP，会互相看到对方的
+// 分享列表，还能删掉对方的链接。
+//
+// 改用 webssh_trust_scope cookie——它由 EnsureTrustScopeCookie 中间件保证
+// 每个浏览器都有一个、值是 16 字节随机数、HttpOnly、SameSite=Strict。
+// 同一台浏览器每次请求都带同一个值，别的浏览器猜不到，正好当归属密钥。
+//
+// 落库前再 sha256 一次：这个 cookie 同时也是 SSH 主机密钥信任域的标识，
+// 数据库泄漏后不能让人直接拿到可用的原值。
 func shareQuotaKeyFor(c *gin.Context, owner string, loggedIn bool) string {
 	if loggedIn {
 		return owner
 	}
-	return "ip:" + requestIP(c)
+	scope, err := requestTrustScope(c)
+	if err != nil || scope == "" {
+		// 拿不到 cookie（极少见：随机数生成失败）时才退回 IP，
+		// 至少配额还能生效，只是隔离性变差。
+		return "ip:" + requestIP(c)
+	}
+	digest := sha256.Sum256([]byte("share-owner:" + scope))
+	return "scope:" + hex.EncodeToString(digest[:16])
 }
 
 func sanitizeShareLabel(raw string) string {

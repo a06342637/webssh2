@@ -35,7 +35,18 @@ func installTestShareStore(t *testing.T) string {
 	return token
 }
 
+// 两个「不同浏览器」的游客。值必须能通过 core.NormalizeTrustScope（32 位 hex）。
+const (
+	testGuestScopeA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testGuestScopeB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
 func performShareRequest(t *testing.T, handler gin.HandlerFunc, method, target string, body any, sessionToken string, params gin.Params) *httptest.ResponseRecorder {
+	t.Helper()
+	return performShareRequestAs(t, handler, method, target, body, sessionToken, params, testGuestScopeA)
+}
+
+func performShareRequestAs(t *testing.T, handler gin.HandlerFunc, method, target string, body any, sessionToken string, params gin.Params, guestScope string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
@@ -53,6 +64,9 @@ func performShareRequest(t *testing.T, handler gin.HandlerFunc, method, target s
 	request.Header.Set("Content-Type", "application/json")
 	if sessionToken != "" {
 		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
+	}
+	if guestScope != "" {
+		request.AddCookie(&http.Cookie{Name: trustScopeCookieName, Value: guestScope})
 	}
 	context.Request = request
 	context.Params = params
@@ -118,10 +132,10 @@ func TestCreateShareStoresOnlyHashedTokenAndCiphertext(t *testing.T) {
 	}
 }
 
-func TestCreateShareIsAllowedForGuestsAndScopedByIP(t *testing.T) {
+func TestCreateShareIsAllowedForGuestsAndScopedByBrowser(t *testing.T) {
 	installTestShareStore(t)
 	// 没有账号也要能分享，否则这个功能对游客完全不可用。
-	// 配额与归属改挂在客户端 IP 上。
+	// 归属挂在每个浏览器独有的 trust-scope cookie 上，而不是 IP。
 	recorder, token := createTestShare(t, "", map[string]any{
 		"ciphertext": "Y2lwaGVydGV4dA",
 		"iv":         "aXYtdmFsdWU",
@@ -136,8 +150,12 @@ func TestCreateShareIsAllowedForGuestsAndScopedByIP(t *testing.T) {
 	accountStore.mu.RLock()
 	defer accountStore.mu.RUnlock()
 	stored := accountStore.db.Shares[shareStorageKey(token)]
-	if !strings.HasPrefix(stored.Owner, "ip:") {
-		t.Fatalf("guest share was not scoped to an IP: %q", stored.Owner)
+	if !strings.HasPrefix(stored.Owner, "scope:") {
+		t.Fatalf("guest share was not scoped to the browser cookie: %q", stored.Owner)
+	}
+	// 落库的必须是哈希，不能让数据库泄漏后直接拿到可用的 cookie 原值。
+	if strings.Contains(stored.Owner, testGuestScopeA) {
+		t.Fatalf("guest share stored the raw trust-scope cookie: %q", stored.Owner)
 	}
 	if stored.Label != "SSH root@192.0.2.10:22" || stored.Kind != "ssh" {
 		t.Fatalf("share metadata was not stored: %#v", stored)
@@ -501,5 +519,77 @@ func TestShareLabelIsSanitized(t *testing.T) {
 	}
 	if stored.Kind != "" {
 		t.Fatalf("unknown kind should be dropped, got %q", stored.Kind)
+	}
+}
+
+func TestGuestsBehindTheSameIPCannotSeeOrDeleteEachOthersShares(t *testing.T) {
+	// 两个请求都来自 httptest 默认的同一个 RemoteAddr，模拟 NAT 后共用出口 IP。
+	// 区分它们的只能是各自浏览器里的 trust-scope cookie。
+	installTestShareStore(t)
+
+	created := performShareRequestAs(t, CreateShare, http.MethodPost, "/api/share", map[string]any{
+		"ciphertext": "Y2lwaGVydGV4dA",
+		"iv":         "aXYtdmFsdWU",
+		"label":      "SSH root@203.0.113.9:22",
+		"kind":       "ssh",
+		"expiresIn":  3600,
+		"burn":       false,
+	}, "", nil, testGuestScopeA)
+	if created.Code != http.StatusOK {
+		t.Fatalf("guest A could not create a share: %d %s", created.Code, created.Body.String())
+	}
+	data, _ := decodeShareBody(t, created)["data"].(map[string]any)
+	token, _ := data["token"].(string)
+	id, _ := data["id"].(string)
+
+	// 游客 B 的列表里必须是空的。
+	listB := performShareRequestAs(t, ListShares, http.MethodGet, "/api/shares", nil, "", nil, testGuestScopeB)
+	if listB.Code != http.StatusOK {
+		t.Fatalf("guest B list failed: %d", listB.Code)
+	}
+	dataB, _ := decodeShareBody(t, listB)["data"].(map[string]any)
+	if items, _ := dataB["items"].([]any); len(items) != 0 {
+		t.Fatalf("guest B can see guest A's shares: %#v", items)
+	}
+
+	// 游客 B 也删不掉 A 的分享，无论用存储键还是原始 token。
+	for _, target := range []string{id, token} {
+		denied := performShareRequestAs(t, DeleteShare, http.MethodDelete, "/api/shares/"+target, nil, "",
+			gin.Params{{Key: "id", Value: target}}, testGuestScopeB)
+		if denied.Code != http.StatusNotFound {
+			t.Fatalf("guest B deleted guest A's share via %q: %d", target, denied.Code)
+		}
+	}
+
+	// A 自己仍然能看到、能删。
+	listA := performShareRequestAs(t, ListShares, http.MethodGet, "/api/shares", nil, "", nil, testGuestScopeA)
+	dataA, _ := decodeShareBody(t, listA)["data"].(map[string]any)
+	if items, _ := dataA["items"].([]any); len(items) != 1 {
+		t.Fatalf("guest A lost sight of their own share: %#v", items)
+	}
+	ok := performShareRequestAs(t, DeleteShare, http.MethodDelete, "/api/shares/"+id, nil, "",
+		gin.Params{{Key: "id", Value: id}}, testGuestScopeA)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("guest A could not delete their own share: %d %s", ok.Code, ok.Body.String())
+	}
+}
+
+func TestGuestShareQuotaIsPerBrowserNotPerIP(t *testing.T) {
+	// A 把配额用满，不应该影响同 IP 下的 B。
+	installTestShareStore(t)
+	body := map[string]any{"ciphertext": "Y2lwaGVydGV4dA", "iv": "aXYtdmFsdWU", "expiresIn": 3600, "burn": false}
+	for i := 0; i < shareMaxPerOwner; i++ {
+		r := performShareRequestAs(t, CreateShare, http.MethodPost, "/api/share", body, "", nil, testGuestScopeA)
+		if r.Code != http.StatusOK {
+			t.Fatalf("guest A share %d rejected early: %d", i, r.Code)
+		}
+	}
+	full := performShareRequestAs(t, CreateShare, http.MethodPost, "/api/share", body, "", nil, testGuestScopeA)
+	if full.Code != http.StatusTooManyRequests {
+		t.Fatalf("guest A quota was not enforced: %d", full.Code)
+	}
+	fresh := performShareRequestAs(t, CreateShare, http.MethodPost, "/api/share", body, "", nil, testGuestScopeB)
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("guest B was blocked by guest A's quota: %d %s", fresh.Code, fresh.Body.String())
 	}
 }

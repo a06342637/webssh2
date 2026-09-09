@@ -463,6 +463,14 @@ function renderConnectionShareHistory() {
                 };
             });
             paint(merged, body.data.loggedIn === true, true);
+
+            // 服务端是权威：阅后即焚被对方打开烧掉、在别的设备上删除、或已过期，
+            // 服务端都不再返回。本地记录跟着清掉，否则生成端历史里会一直挂着
+            // 一条死链，点复制还会复制出去。
+            var alive = {};
+            (body.data.items || []).forEach(function (entry) { alive[entry.id] = true; });
+            var pruned = local.filter(function (item) { return !item.id || alive[item.id]; });
+            if (pruned.length !== local.length) writeConnectionShareHistory(pruned);
         })
         .catch(function () { /* 服务端不可用时保留本地渲染 */ });
 }

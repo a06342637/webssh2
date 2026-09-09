@@ -3453,6 +3453,11 @@ function applyCurrentAccount(account) {
         accountAutoSynced = '';
         if (nextName) migrateLegacyScriptWorkspace(nextName);
         refreshActiveScriptWorkspaceUI();
+        // 分享历史按账号归集，登录/登出后列表内容会变，弹窗开着时要重画。
+        if (typeof renderConnectionShareHistory === 'function') {
+            var shareModal = document.getElementById('connectionShareModal');
+            if (shareModal && shareModal.classList.contains('show')) renderConnectionShareHistory();
+        }
     }
     updateAccountUI();
     if (currentAccount && currentAccount.isAdmin) {
@@ -9943,6 +9948,13 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') submitSSHAuthRetry();
+    });
+});
+// RDP 的重填框同样要能按回车提交，否则改完密码得伸手去点按钮。
+['rdpRetryHost', 'rdpRetryPort', 'rdpRetryUser', 'rdpRetryDomain', 'rdpRetryPass'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && typeof submitRdpAuthRetry === 'function') submitRdpAuthRetry();
     });
 });
 ['editScriptName', 'editScriptContent'].forEach(function (id) {

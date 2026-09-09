@@ -2237,6 +2237,15 @@ test('share history is listed locally and revocable server-side', () => {
     assert.match(shareSource, /r\.status !== 404/);
     assert.match(indexSource, /id="connectionShareHistoryList"/);
     assert.match(indexSource, /onclick="toggleConnectionShareHistory\(\)"/);
+    // 服务端列表是权威：阅后即焚被对方打开烧掉、别处删除、过期，服务端都不再
+    // 返回，本地记录必须跟着清，否则生成端历史里会一直挂着一条死链。
+    const render = shareSource.slice(shareSource.indexOf('function renderConnectionShareHistory'));
+    const renderBody = render.slice(0, render.indexOf('\nfunction '));
+    assert.match(renderBody, /alive\[entry\.id\] = true/);
+    assert.match(renderBody, /!item\.id \|\| alive\[item\.id\]/);
+    assert.match(renderBody, /writeConnectionShareHistory\(pruned\)/);
+    // 登录/登出后列表内容会变，弹窗开着时要重画。
+    assert.match(appSource, /shareModal\.classList\.contains\('show'\)\) renderConnectionShareHistory\(\)/);
 });
 
 test('RDP clipboard failures are queued for a user gesture instead of being swallowed', () => {
@@ -2416,4 +2425,7 @@ test('RDP login failures ask for credentials instead of retrying the same passwo
     assert.match(indexSource, /id="rdpRetryDomain"/);
     // 切走 RDP 标签时两个协议的重试框都不能串台。
     assert.match(appSource, /hideSSHAuthRetryModal\(false\);[\s\S]{0,200}updateRdpAuthRetryModalForActive\(\)/);
+    // 改完密码按回车就能提交，不用伸手去点按钮（SSH 侧早就有，RDP 漏了）。
+    assert.match(appSource, /\['rdpRetryHost', 'rdpRetryPort', 'rdpRetryUser', 'rdpRetryDomain', 'rdpRetryPass'\]/);
+    assert.match(appSource, /e\.key === 'Enter' && typeof submitRdpAuthRetry === 'function'\) submitRdpAuthRetry\(\)/);
 });
