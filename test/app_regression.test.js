@@ -245,8 +245,8 @@ test('an older cloud request cannot apply after a newer request', async () => {
     assert.equal(applied, 1);
 });
 
-test('SAVE_PASS=false omits new passwords and purges old stored passwords', () => {
-    let savedBookmarks;
+test('SAVE_PASS=false omits prepared bookmark passwords and purges old stored passwords', () => {
+    let bookmarkDraft;
     const elements = {
         hostname: { value: 'ssh.example.com' },
         port: { value: '22' },
@@ -265,7 +265,7 @@ test('SAVE_PASS=false omits new passwords and purges old stored passwords', () =
             parseHostPortInput: (host, port) => ({ host, port: Number(port) }),
             formatHostForInput: (host) => host,
             loadBM: () => [],
-            saveBM: (key, value) => { savedBookmarks = value; },
+            openConnBookmarkModal: (bookmarkId, draft) => { bookmarkDraft = draft; },
             renderConnBookmarks: () => {},
             showToast: () => {},
             safeStorageSet: () => {},
@@ -276,7 +276,7 @@ test('SAVE_PASS=false omits new passwords and purges old stored passwords', () =
     );
 
     sandbox.saveConnBookmark();
-    assert.equal(Object.hasOwn(savedBookmarks[0], 'password'), false);
+    assert.equal(Object.hasOwn(bookmarkDraft, 'password'), false);
 
     let persisted;
     sandbox.loadBM = () => [{ hostname: 'old.example', password: 'old-secret' }];
@@ -287,7 +287,12 @@ test('SAVE_PASS=false omits new passwords and purges old stored passwords', () =
     sandbox.savePasswords = true;
     sandbox.loadBM = () => [];
     sandbox.saveConnBookmark();
-    assert.equal(savedBookmarks[0].password, 'super-secret');
+    assert.equal(bookmarkDraft.password, 'super-secret');
+});
+
+test('RDP bookmarks expose the password panel even while SSH key authentication is selected', () => {
+    assert.match(styleSource, /body\.proto-rdp #passwordAuth\s*\{[^}]*display:\s*flex/);
+    assert.match(styleSource, /body\.proto-rdp \.ssh-only\s*\{[^}]*display:\s*none\s*!important/);
 });
 
 test('SAVE_PASS=false also strips a remembered SOCKS5 password', () => {

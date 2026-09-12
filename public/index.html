@@ -387,10 +387,24 @@
             <!-- Connection Bookmark Drawer -->
             <div class="conn-drawer" id="connDrawer">
                 <div class="drawer-body glass-card">
-                    <div class="drawer-hd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><span>连接书签</span></div>
-                    <div class="conn-security-note">SSH 信息属于重要敏感信息，不会同步到云端；保存的 SSH 信息只会保存在本地浏览器。</div>
-                    <div class="drawer-list" id="connBookmarkList"></div>
-                    <button class="drawer-add" onclick="saveConnBookmark()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>保存当前</button>
+                    <div class="drawer-hd">
+                        <span class="conn-bm-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>连接书签</span>
+                        <button class="settings-close" type="button" onclick="toggleConnDrawer()" aria-label="关闭连接书签"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                    </div>
+                    <div class="conn-security-note">SSH / RDP 书签仅保存在本地浏览器，不会同步到云端。</div>
+                    <div class="conn-bm-toolbar">
+                        <div class="input-wrapper conn-bm-search">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M16 16l5 5"/></svg>
+                            <input type="search" id="connBookmarkSearch" oninput="renderConnBookmarks()" placeholder="主机、账号或备注" aria-label="搜索连接书签" autocomplete="off" spellcheck="false">
+                        </div>
+                        <p class="conn-bm-order-hint" id="connBookmarkSortHint">按 SSH / RDP 分组 · 拖拽手柄排序</p>
+                        <p class="conn-bm-connect-hint">已存密码时点击即连；未存凭据需先补填。可跨协议连接，顺序仅手动调整。</p>
+                    </div>
+                    <div class="drawer-list" id="connBookmarkList" role="region" aria-label="SSH 和 RDP 连接书签" aria-describedby="connBookmarkSortHint"></div>
+                    <div class="conn-bm-footer">
+                        <button class="drawer-add" type="button" onclick="saveConnBookmark()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>保存当前</button>
+                        <button class="drawer-add primary-action" type="button" onclick="openConnBookmarkModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新增书签</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -698,6 +712,63 @@
                     <button class="drawer-add" type="button" onclick="hideSftpDirPicker()">取消</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="connBookmarkModal">
+        <div class="glass-card modal-card conn-bm-modal-card" role="dialog" aria-modal="true" aria-labelledby="connBookmarkModalTitle" aria-describedby="connBookmarkCredentialHint">
+            <div class="drawer-hd auth-hd">
+                <span class="conn-bm-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg><span id="connBookmarkModalTitle">新增书签</span></span>
+                <button class="settings-close" type="button" onclick="closeConnBookmarkModal()" aria-label="关闭书签编辑器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <form id="connBookmarkForm" class="conn-bm-form" onsubmit="saveConnBookmarkEditor(event)" autocomplete="off">
+                <input type="hidden" id="connBookmarkId">
+                <div class="modal-body conn-bm-modal-body">
+                    <div class="input-field">
+                        <label for="connBookmarkProtocol">连接协议</label>
+                        <select id="connBookmarkProtocol" class="script-input" onchange="changeConnBookmarkProtocol()">
+                            <option value="ssh" selected>SSH</option>
+                            <option value="rdp">RDP</option>
+                        </select>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-field flex-3">
+                            <label for="connBookmarkHostname">主机地址</label>
+                            <input type="text" id="connBookmarkHostname" class="script-input" placeholder="IPv4、IPv6 或域名" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+                        </div>
+                        <div class="input-field flex-1">
+                            <label for="connBookmarkPort">端口</label>
+                            <input type="number" id="connBookmarkPort" class="script-input" value="22" min="1" max="65535" step="1" inputmode="numeric" required>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-field flex-1">
+                            <label for="connBookmarkUsername">用户名</label>
+                            <input type="text" id="connBookmarkUsername" class="script-input" value="root" placeholder="登录账号" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+                        </div>
+                        <div class="input-field flex-1" id="connBookmarkAuthRow">
+                            <label for="connBookmarkAuthType">SSH 认证方式</label>
+                            <select id="connBookmarkAuthType" class="script-input" onchange="updateConnBookmarkAuthFields()">
+                                <option value="password" selected>密码</option>
+                                <option value="key">私钥</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="input-field" id="connBookmarkPasswordRow">
+                        <label for="connBookmarkPassword">密码 <span class="conn-bm-optional">（可选）</span></label>
+                        <input type="password" id="connBookmarkPassword" class="script-input" placeholder="未保存时，连接前需补填" autocomplete="new-password" aria-describedby="connBookmarkCredentialHint">
+                    </div>
+                    <div class="input-field">
+                        <label for="connBookmarkNote">备注 <span class="conn-bm-optional">（可选，最多 1000 字）</span></label>
+                        <textarea id="connBookmarkNote" class="script-textarea" rows="3" maxlength="1000" placeholder="用途、环境或连接提醒"></textarea>
+                    </div>
+                    <p class="conn-bm-credential-hint" id="connBookmarkCredentialHint">不保存私钥及其解密口令；密码仅在允许保存密码时保存在本地。未保存的凭据需在连接前补填。</p>
+                </div>
+                <div class="conn-bm-editor-actions">
+                    <button class="drawer-add" type="button" onclick="closeConnBookmarkModal()">取消</button>
+                    <button class="drawer-add primary-action" type="submit">保存书签</button>
+                </div>
+            </form>
         </div>
     </div>
 

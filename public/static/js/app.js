@@ -215,6 +215,8 @@ document.getElementById('loginForm').addEventListener('submit', function (e) {
 
 document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
+        var connBookmarkModal = document.getElementById('connBookmarkModal');
+        if (connBookmarkModal && connBookmarkModal.classList.contains('show')) { closeConnBookmarkModal(); return; }
         var serverInfoDetailModal = document.getElementById('serverInfoDetailModal');
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
@@ -2576,6 +2578,8 @@ function toggleSftp() {
 
 // ==================== Connection Bookmarks ====================
 var CBK = 'webssh_conn_bm';
+var connBookmarkDragId = '';
+var connBookmarkDragProtocol = '';
 var SBK = 'webssh_script_bm';
 var SCAT = 'webssh_script_categories';
 var SBK_UPDATED = 'webssh_script_bm_updated_at';
@@ -3494,6 +3498,10 @@ function broadcastAuthStateChange() {
 }
 
 window.addEventListener('storage', function (event) {
+    if (event.key === CBK || event.key === null) {
+        renderConnBookmarks();
+        if (event.key === CBK) return;
+    }
     if (event.key === AUTH_EVENT_KEY) {
         authStateGeneration++;
         cancelPendingScriptSync();
@@ -4337,90 +4345,344 @@ function bookmarkProtocol(b) {
     return (b && b.protocol === 'rdp') ? 'rdp' : 'ssh';
 }
 
+function createConnBookmarkId() {
+    return 'conn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+}
+
+function loadConnBookmarks() {
+    var changed = false;
+    var seen = Object.create(null);
+    var reserved = Object.create(null);
+    var storedBookmarks = loadBM(CBK);
+    storedBookmarks.forEach(function (bookmark) {
+        if (bookmark && typeof bookmark.id === 'string' && bookmark.id) reserved[bookmark.id] = true;
+    });
+    var bookmarks = storedBookmarks.filter(function (bookmark) {
+        var valid = bookmark && typeof bookmark === 'object' && !Array.isArray(bookmark) && typeof bookmark.hostname === 'string' && bookmark.hostname.trim();
+        if (!valid) changed = true;
+        return valid;
+    }).map(function (bookmark, index) {
+        var normalized = Object.assign({}, bookmark);
+        var attempt = 0;
+        if (typeof normalized.id !== 'string' || !normalized.id || seen[normalized.id]) {
+            do { normalized.id = 'legacy-conn-' + index + '-' + attempt++; } while (reserved[normalized.id] || seen[normalized.id]);
+            changed = true;
+        }
+        seen[normalized.id] = true;
+        var protocol = bookmarkProtocol(bookmark);
+        var note = typeof bookmark.note === 'string' ? bookmark.note : '';
+        if (normalized.protocol !== protocol || normalized.note !== note) changed = true;
+        normalized.protocol = protocol;
+        normalized.note = note;
+        return normalized;
+    });
+    if (changed) saveBM(CBK, bookmarks);
+    return bookmarks;
+}
+
+function connBookmarkMatches(bookmark, query) {
+    var search = String(query || '').trim().toLowerCase();
+    if (!search) return true;
+    return [bookmarkProtocol(bookmark), bookmark.hostname, bookmark.username, bookmark.port || (bookmarkProtocol(bookmark) === 'rdp' ? 3389 : 22), bookmark.note]
+        .join(' ').toLowerCase().indexOf(search) >= 0;
+}
+
+function connBookmarkEndpointMatches(bookmark, candidate) {
+    var protocol = bookmarkProtocol(candidate);
+    var fallbackPort = protocol === 'rdp' ? 3389 : 22;
+    var stored = parseHostPortInput(bookmark.hostname, bookmark.port, fallbackPort);
+    return bookmarkProtocol(bookmark) === protocol && stored.host.toLowerCase() === candidate.hostname.toLowerCase() &&
+        stored.port === candidate.port && (bookmark.username || (protocol === 'rdp' ? 'Administrator' : 'root')) === candidate.username;
+}
+
+function moveConnBookmark(bookmarkId, targetId, placement) {
+    if (bookmarkId === targetId || (placement !== 'before' && placement !== 'after')) return false;
+    var bookmarks = loadConnBookmarks();
+    var source = bookmarks.find(function (bookmark) { return bookmark.id === bookmarkId; });
+    var target = bookmarks.find(function (bookmark) { return bookmark.id === targetId; });
+    if (!source || !target || bookmarkProtocol(source) !== bookmarkProtocol(target)) return false;
+    var protocol = bookmarkProtocol(source);
+    var group = bookmarks.filter(function (bookmark) { return bookmarkProtocol(bookmark) === protocol; });
+    var previousOrder = JSON.stringify(group.map(function (bookmark) { return bookmark.id; }));
+    group.splice(group.findIndex(function (bookmark) { return bookmark.id === bookmarkId; }), 1);
+    var targetIndex = group.findIndex(function (bookmark) { return bookmark.id === targetId; });
+    group.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, source);
+    if (previousOrder === JSON.stringify(group.map(function (bookmark) { return bookmark.id; }))) return false;
+    var nextIndex = 0;
+    var reordered = bookmarks.map(function (bookmark) { return bookmarkProtocol(bookmark) === protocol ? group[nextIndex++] : bookmark; });
+    if (!saveBM(CBK, reordered)) { showToast('浏览器存储失败，书签顺序未保存', 'error'); return false; }
+    renderConnBookmarks();
+    return true;
+}
+
+function moveConnBookmarkStep(bookmarkId, direction) {
+    var bookmarks = loadConnBookmarks();
+    var bookmark = bookmarks.find(function (entry) { return entry.id === bookmarkId; });
+    if (!bookmark || (direction !== -1 && direction !== 1)) return;
+    var group = bookmarks.filter(function (entry) { return bookmarkProtocol(entry) === bookmarkProtocol(bookmark); });
+    var index = group.findIndex(function (entry) { return entry.id === bookmarkId; });
+    var target = group[index + direction];
+    if (target) moveConnBookmark(bookmarkId, target.id, direction < 0 ? 'before' : 'after');
+}
+
+function clearConnBookmarkDragMarkers() {
+    document.querySelectorAll('.conn-bm-item').forEach(function (item) {
+        item.classList.remove('drag-over-before', 'drag-over-after');
+        delete item.dataset.dropPlacement;
+    });
+}
+
+function startConnBookmarkDrag(event, handle) {
+    var item = handle.closest('.conn-bm-item');
+    if (!item || !event.dataTransfer) { event.preventDefault(); return; }
+    clearConnBookmarkDragMarkers();
+    connBookmarkDragId = item.dataset.bookmarkId;
+    connBookmarkDragProtocol = item.dataset.protocol;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', connBookmarkDragId);
+    item.classList.add('dragging');
+}
+
+function dragOverConnBookmark(event, item) {
+    if (!connBookmarkDragId || item.dataset.bookmarkId === connBookmarkDragId || item.dataset.protocol !== connBookmarkDragProtocol) {
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+        clearConnBookmarkDragMarkers();
+        return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    var bounds = item.getBoundingClientRect();
+    var placement = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+    clearConnBookmarkDragMarkers();
+    item.dataset.dropPlacement = placement;
+    item.classList.add('drag-over-' + placement);
+}
+
+function leaveConnBookmarkDrag(event, item) {
+    if (event.relatedTarget && item.contains(event.relatedTarget)) return;
+    item.classList.remove('drag-over-before', 'drag-over-after');
+    delete item.dataset.dropPlacement;
+}
+
+function dropConnBookmark(event, item) {
+    event.preventDefault();
+    var sourceId = connBookmarkDragId;
+    var placement = item.dataset.dropPlacement;
+    var sameProtocol = item.dataset.protocol === connBookmarkDragProtocol;
+    endConnBookmarkDrag();
+    if (sourceId && sameProtocol && placement) moveConnBookmark(sourceId, item.dataset.bookmarkId, placement);
+}
+
+function endConnBookmarkDrag() {
+    connBookmarkDragId = '';
+    connBookmarkDragProtocol = '';
+    clearConnBookmarkDragMarkers();
+    document.querySelectorAll('.conn-bm-item.dragging').forEach(function (item) { item.classList.remove('dragging'); });
+}
+
 function renderConnBookmarks() {
-    var l = document.getElementById('connBookmarkList'), bms = loadBM(CBK);
-    if (!bms.length) { l.innerHTML = '<div class="bm-empty">暂无书签</div>'; return; }
-    l.innerHTML = bms.map(function (b, i) {
-        var isRdp = bookmarkProtocol(b) === 'rdp';
-        // 同一台机器可能同时存了 SSH 和 RDP，图标是唯一能一眼区分的线索
-        var icon = isRdp
-            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>'
-            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M4 17l6-6-6-6M12 19h8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-        var noPass = !b.password ? '<span class="bm-item-nopass" title="未保存密码，连接前需要补填">需密码</span>' : '';
-        return '<div class="bm-item" onclick="applyConn(' + i + ')">' +
-            '<div class="bm-item-info">' +
-            '<div class="bm-item-name"><span class="bm-item-proto' + (isRdp ? ' is-rdp' : '') + '">' + icon + '</span>' +
-            esc(b.username + '@' + b.hostname) + '</div>' +
-            '<div class="bm-item-host">:' + (b.port || (isRdp ? 3389 : 22)) + noPass + '</div>' +
-            '</div>' +
-            '<button class="bm-item-del" onclick="event.stopPropagation();delConn(' + i + ')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
+    var list = document.getElementById('connBookmarkList');
+    if (!list) return;
+    connBookmarkDragId = '';
+    connBookmarkDragProtocol = '';
+    var bookmarks = loadConnBookmarks();
+    var searchInput = document.getElementById('connBookmarkSearch');
+    var query = searchInput ? searchInput.value.trim() : '';
+    list.innerHTML = ['ssh', 'rdp'].map(function (protocol) {
+        var group = bookmarks.filter(function (bookmark) { return bookmarkProtocol(bookmark) === protocol; });
+        var visible = group.filter(function (bookmark) { return connBookmarkMatches(bookmark, query); });
+        var count = (query ? visible.length + ' / ' : '') + group.length;
+        return '<section class="conn-bm-group" data-protocol="' + protocol + '" aria-label="' + protocol.toUpperCase() + ' 连接书签">' +
+            '<div class="conn-bm-group-header"><span>' + protocol.toUpperCase() + '</span><span>' + count + '</span></div>' +
+            (visible.length ? visible.map(function (bookmark) {
+                var index = group.findIndex(function (entry) { return entry.id === bookmark.id; });
+                return connBookmarkItemHtml(bookmark, index, group.length);
+            }).join('') : '<div class="bm-empty">' + (query ? '没有匹配的书签' : '暂无 ' + protocol.toUpperCase() + ' 书签') + '</div>') + '</section>';
     }).join('');
+}
+
+function connBookmarkItemHtml(bookmark, index, count) {
+    var protocol = bookmarkProtocol(bookmark);
+    var needsKey = protocol === 'ssh' && bookmark.authType === 'key';
+    var needsPassword = !needsKey && (!savePasswords || !bookmark.password);
+    var credentialHint = needsKey ? '需私钥' : (needsPassword ? '需密码' : '');
+    var target = (bookmark.username || (protocol === 'rdp' ? 'Administrator' : 'root')) + '@' + bookmark.hostname;
+    var sourceId = "this.closest('.conn-bm-item').dataset.bookmarkId";
+    return '<div class="bm-item conn-bm-item" data-bookmark-id="' + escAttr(bookmark.id) + '" data-protocol="' + protocol + '" ' +
+        'ondragover="dragOverConnBookmark(event,this)" ondragleave="leaveConnBookmarkDrag(event,this)" ondrop="dropConnBookmark(event,this)">' +
+        '<button type="button" class="conn-bm-drag" draggable="true" aria-label="拖拽排序" title="拖拽调整组内顺序" ondragstart="startConnBookmarkDrag(event,this)" ondragend="endConnBookmarkDrag()">⠿</button>' +
+        '<button type="button" class="conn-bm-connect bm-item-info" onclick="applyConn(' + sourceId + ')" title="' + escAttr(credentialHint ? '填入书签，补充凭据后连接' : '一键连接 ' + target) + '">' +
+        '<span class="bm-item-name">' + esc(target) + '</span>' +
+        '<span class="bm-item-host">:' + esc(String(bookmark.port || (protocol === 'rdp' ? 3389 : 22))) +
+        (credentialHint ? '<span class="bm-item-nopass">' + credentialHint + '</span>' : '') + '</span>' +
+        (bookmark.note ? '<span class="conn-bm-note">' + esc(bookmark.note) + '</span>' : '') + '</button>' +
+        '<div class="conn-bm-actions">' +
+        '<button type="button" class="conn-bm-action" title="编辑书签" aria-label="编辑书签" onclick="openConnBookmarkModal(' + sourceId + ')">✎</button>' +
+        '<button type="button" class="conn-bm-action" title="删除书签" aria-label="删除书签" onclick="delConn(' + sourceId + ')">×</button>' +
+        '<button type="button" class="conn-bm-action" title="上移书签" aria-label="上移书签"' + (index === 0 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',-1)">↑</button>' +
+        '<button type="button" class="conn-bm-action" title="下移书签" aria-label="下移书签"' + (index === count - 1 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',1)">↓</button>' +
+        '</div></div>';
 }
 
 function saveConnBookmark() {
     var isRdp = typeof currentProtocol !== 'undefined' && currentProtocol === 'rdp';
-    var hp = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value);
-    var h = hp.host;
-    var p = hp.port || (isRdp ? 3389 : 22);
-    var u = document.getElementById('username').value.trim() || (isRdp ? 'Administrator' : 'root');
-    if (!h) { showToast('请先填写主机', 'error'); return; }
-    document.getElementById('hostname').value = formatHostForInput(h);
-    document.getElementById('port').value = p;
-
-    // RDP 只有密码一种登录方式
-    var at = isRdp ? 'password' : document.querySelector('.auth-tab.active').dataset.tab;
-    var bm = { protocol: isRdp ? 'rdp' : 'ssh', hostname: h, port: p, username: u, authType: at };
-
-    // 密码留空也允许保存：书签本来就可以只记地址和账号，连接前再补。
-    if (savePasswords && at === 'password') {
-        var pwd = document.getElementById('password').value;
-        if (pwd) bm.password = pwd;
+    var endpoint = parseHostPortInput(document.getElementById('hostname').value, document.getElementById('port').value, isRdp ? 3389 : 22);
+    if (!endpoint.host) { showToast('请先填写主机，或使用“新增书签”', 'error'); return; }
+    document.getElementById('hostname').value = formatHostForInput(endpoint.host);
+    document.getElementById('port').value = endpoint.port;
+    var authType = isRdp ? 'password' : document.querySelector('.auth-tab.active').dataset.tab;
+    var draft = {
+        protocol: isRdp ? 'rdp' : 'ssh', hostname: endpoint.host, port: endpoint.port,
+        username: document.getElementById('username').value.trim() || (isRdp ? 'Administrator' : 'root'), authType: authType
+    };
+    if (savePasswords && authType === 'password') {
+        var password = document.getElementById('password').value;
+        if (password) draft.password = password;
     }
-
-    // 去重要把协议算进去，同一台机器的 SSH 和 RDP 是两条独立书签
-    var bms = loadBM(CBK), idx = bms.findIndex(function (b) {
-        return b.hostname === h && b.port === p && b.username === u && bookmarkProtocol(b) === bm.protocol;
-    });
-    if (idx >= 0) bms[idx] = bm; else bms.push(bm);
-    if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未保存', 'error'); return; }
-    renderConnBookmarks();
-    showToast(bm.password ? '已保存' : '已保存（未含密码，连接前补填即可）', 'success');
+    openConnBookmarkModal('', draft);
 }
 
-function applyConn(i) {
-    var b = loadBM(CBK)[i]; if (!b) return;
-    var isRdp = bookmarkProtocol(b) === 'rdp';
+function openConnBookmarkModal(bookmarkId, draft) {
+    var bookmarks = loadConnBookmarks();
+    var stored = bookmarkId ? bookmarks.find(function (bookmark) { return bookmark.id === bookmarkId; }) : null;
+    if (bookmarkId && !stored) { showToast('书签已不存在，请刷新列表后重试', 'error'); return; }
+    if (!stored && draft) stored = bookmarks.find(function (bookmark) { return connBookmarkEndpointMatches(bookmark, draft); });
+    var bookmark = Object.assign({ protocol: 'ssh', hostname: '', authType: 'password', note: '' }, stored || {}, draft || {});
+    var protocol = bookmarkProtocol(bookmark);
+    var endpoint = parseHostPortInput(bookmark.hostname, bookmark.port, protocol === 'rdp' ? 3389 : 22);
+    document.getElementById('connBookmarkId').value = stored ? stored.id : '';
+    document.getElementById('connBookmarkModalTitle').textContent = stored ? '编辑连接书签' : '新增连接书签';
+    document.getElementById('connBookmarkProtocol').value = protocol;
+    document.getElementById('connBookmarkHostname').value = formatHostForInput(endpoint.host);
+    document.getElementById('connBookmarkPort').value = endpoint.port;
+    document.getElementById('connBookmarkUsername').value = bookmark.username || (protocol === 'rdp' ? 'Administrator' : 'root');
+    document.getElementById('connBookmarkAuthType').value = protocol === 'ssh' && bookmark.authType === 'key' ? 'key' : 'password';
+    document.getElementById('connBookmarkPassword').value = savePasswords ? (bookmark.password || '') : '';
+    document.getElementById('connBookmarkNote').value = bookmark.note || '';
+    updateConnBookmarkAuthFields();
+    document.getElementById('connBookmarkModal').classList.add('show');
+    document.getElementById(stored || draft ? 'connBookmarkNote' : 'connBookmarkHostname').focus();
+}
 
-    // 书签带着协议，填之前先把表单切到对应的那一套
+function closeConnBookmarkModal() {
+    document.getElementById('connBookmarkModal').classList.remove('show');
+    document.getElementById('connBookmarkForm').reset();
+    document.getElementById('connBookmarkPassword').value = '';
+}
+
+function changeConnBookmarkProtocol() {
+    var isRdp = document.getElementById('connBookmarkProtocol').value === 'rdp';
+    var portInput = document.getElementById('connBookmarkPort');
+    var usernameInput = document.getElementById('connBookmarkUsername');
+    if (!portInput.value || portInput.value === (isRdp ? '22' : '3389')) portInput.value = isRdp ? '3389' : '22';
+    if (!usernameInput.value || usernameInput.value === (isRdp ? 'root' : 'Administrator')) usernameInput.value = isRdp ? 'Administrator' : 'root';
+    updateConnBookmarkAuthFields();
+}
+
+function updateConnBookmarkAuthFields() {
+    var isRdp = document.getElementById('connBookmarkProtocol').value === 'rdp';
+    var authType = document.getElementById('connBookmarkAuthType');
+    if (isRdp) authType.value = 'password';
+    authType.disabled = isRdp;
+    document.getElementById('connBookmarkAuthRow').hidden = isRdp;
+    var needsKey = !isRdp && authType.value === 'key';
+    document.getElementById('connBookmarkPasswordRow').hidden = needsKey;
+    var passwordInput = document.getElementById('connBookmarkPassword');
+    passwordInput.disabled = !savePasswords || needsKey;
+    if (!savePasswords || needsKey) passwordInput.value = '';
+    passwordInput.placeholder = savePasswords ? '留空则不保存密码' : '服务端已禁用密码保存';
+    document.getElementById('connBookmarkCredentialHint').textContent = needsKey
+        ? '私钥和私钥口令不会保存在书签中；点击书签后，请补充私钥再连接。'
+        : (savePasswords ? '密码仅保存在本地浏览器；留空会移除已保存的密码。已保存密码的书签支持一键连接。' : '服务端已禁用密码保存；书签仅保存连接信息，使用时需要补充密码。');
+}
+
+function saveConnBookmarkEditor(event) {
+    if (event) event.preventDefault();
+    var form = document.getElementById('connBookmarkForm');
+    if (form && typeof form.reportValidity === 'function' && !form.reportValidity()) return false;
+    var bookmarkId = document.getElementById('connBookmarkId').value;
+    var protocol = document.getElementById('connBookmarkProtocol').value === 'rdp' ? 'rdp' : 'ssh';
+    var hostname = document.getElementById('connBookmarkHostname').value.trim();
+    var portValue = String(document.getElementById('connBookmarkPort').value).trim();
+    if (!hostname) { showToast('请输入书签主机', 'error'); return false; }
+    if (portValue && (!/^\d+$/.test(portValue) || Number(portValue) < 1 || Number(portValue) > 65535)) {
+        showToast('端口必须为 1 到 65535 的整数', 'error');
+        return false;
+    }
+    var endpoint = parseHostPortInput(hostname, portValue, protocol === 'rdp' ? 3389 : 22);
+    var authType = protocol === 'ssh' && document.getElementById('connBookmarkAuthType').value === 'key' ? 'key' : 'password';
+    var candidate = {
+        protocol: protocol, hostname: endpoint.host, port: endpoint.port,
+        username: document.getElementById('connBookmarkUsername').value.trim() || (protocol === 'rdp' ? 'Administrator' : 'root'),
+        authType: authType, note: document.getElementById('connBookmarkNote').value.trim().slice(0, 1000)
+    };
+    var bookmarks = loadConnBookmarks();
+    var index = bookmarkId ? bookmarks.findIndex(function (bookmark) { return bookmark.id === bookmarkId; }) : -1;
+    if (bookmarkId && index < 0) { showToast('书签已被删除，请重新打开编辑窗口', 'error'); return false; }
+    var duplicateIndex = bookmarks.findIndex(function (bookmark) { return bookmark.id !== bookmarkId && connBookmarkEndpointMatches(bookmark, candidate); });
+    if (bookmarkId && duplicateIndex >= 0) { showToast('相同协议、主机、端口和账号的书签已存在', 'error'); return false; }
+    if (!bookmarkId && duplicateIndex >= 0) index = duplicateIndex;
+    var item = Object.assign({}, index >= 0 ? bookmarks[index] : { id: createConnBookmarkId() }, candidate);
+    delete item.password;
+    delete item.privateKey;
+    delete item.passphrase;
+    var password = document.getElementById('connBookmarkPassword').value;
+    if (savePasswords && authType === 'password' && password) item.password = password;
+    if (index >= 0) bookmarks[index] = item; else bookmarks.push(item);
+    if (!saveBM(CBK, bookmarks)) { showToast('浏览器存储失败，连接书签未保存', 'error'); return false; }
+    closeConnBookmarkModal();
+    renderConnBookmarks();
+    showToast(index >= 0 ? '连接书签已更新' : '连接书签已添加', 'success');
+    return true;
+}
+
+function applyConn(bookmarkId) {
+    var bookmarks = loadConnBookmarks();
+    var bookmark = bookmarks.find(function (entry) { return entry.id === bookmarkId; });
+    if (!bookmark) return;
+    var isRdp = bookmarkProtocol(bookmark) === 'rdp';
+    if (isRdp && typeof switchProtocol !== 'function') { showToast('远程桌面模块尚未就绪，请稍后重试', 'error'); return; }
     if (typeof switchProtocol === 'function') switchProtocol(isRdp ? 'rdp' : 'ssh');
     else if (typeof ensureSSHProtocolForFill === 'function') ensureSSHProtocolForFill();
 
-    var hp = parseHostPortInput(b.hostname, b.port);
-    document.getElementById('hostname').value = formatHostForInput(hp.host);
-    document.getElementById('port').value = hp.port || (isRdp ? 3389 : 22);
-    document.getElementById('username').value = b.username || (isRdp ? 'Administrator' : 'root');
+    var endpoint = parseHostPortInput(bookmark.hostname, bookmark.port, isRdp ? 3389 : 22);
+    document.getElementById('hostname').value = formatHostForInput(endpoint.host);
+    document.getElementById('port').value = endpoint.port;
+    document.getElementById('username').value = bookmark.username || (isRdp ? 'Administrator' : 'root');
     document.getElementById('password').value = '';
 
     if (!isRdp) {
         document.getElementById('privateKey').value = '';
         document.getElementById('passphrase').value = '';
-        if (b.authType === 'key') { switchAuthTab('key'); showToast('已填入', 'info'); return; }
+        if (bookmark.authType === 'key') {
+            switchAuthTab('key');
+            document.getElementById('privateKey').focus();
+            showToast('已填入 SSH 书签，请补充私钥后连接', 'info');
+            return;
+        }
         switchAuthTab('password');
     }
 
-    var savedPass = savePasswords && b.password ? b.password : '';
-    document.getElementById('password').value = savedPass;
-    if (savedPass) {
-        showToast('已填入', 'info');
+    var savedPassword = savePasswords && bookmark.password ? bookmark.password : '';
+    document.getElementById('password').value = savedPassword;
+    if (savedPassword) {
+        connectFromLogin();
         return;
     }
-    // 没存密码的书签：直接把光标送到密码框，省得用户再找
-    var pwdInput = document.getElementById('password');
-    if (pwdInput) { pwdInput.focus(); }
+    document.getElementById('password').focus();
     showToast('已填入，请补充密码后连接', 'info');
 }
 
-function delConn(i) { var bms = loadBM(CBK); bms.splice(i, 1); if (!saveBM(CBK, bms)) { showToast('浏览器存储失败，连接书签未删除', 'error'); return; } renderConnBookmarks(); showToast('已删除', 'info'); }
+function delConn(bookmarkId) {
+    var bookmarks = loadConnBookmarks();
+    var bookmark = bookmarks.find(function (entry) { return entry.id === bookmarkId; });
+    if (!bookmark || !confirm('确定删除 ' + bookmarkProtocol(bookmark).toUpperCase() + ' 书签 ' + bookmark.hostname + ' 吗？')) return false;
+    bookmarks = loadConnBookmarks().filter(function (entry) { return entry.id !== bookmarkId; });
+    if (!saveBM(CBK, bookmarks)) { showToast('浏览器存储失败，连接书签未删除', 'error'); return false; }
+    renderConnBookmarks();
+    showToast('连接书签已删除', 'info');
+    return true;
+}
 
 // ==================== Preset Scripts ====================
 var PRESET_SCRIPTS = [
@@ -9882,6 +10144,12 @@ loadProxyConfig();
 tryAutoLogin();
 initPreviewMode();
 
+var connBookmarkModalEl = document.getElementById('connBookmarkModal');
+if (connBookmarkModalEl) {
+    connBookmarkModalEl.addEventListener('click', function (event) {
+        if (event.target === connBookmarkModalEl) closeConnBookmarkModal();
+    });
+}
 var authModalEl = document.getElementById('authModal');
 if (authModalEl) {
     authModalEl.addEventListener('click', function (e) {
