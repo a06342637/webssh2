@@ -766,7 +766,7 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 
 /* Keep touch/tablet layouts unchanged; desktop tabs grow into additional rows. */
 @media(min-width:1025px) and (hover:hover) and (pointer:fine){
-    .term-topbar{align-items:flex-start}
+    .term-topbar{align-items:flex-start;zoom:var(--desktop-toolbar-zoom,1)}
     .topbar-left{height:36px}
     .tab-bar{flex:1 1 auto;flex-wrap:wrap;overflow:visible;padding-bottom:0}
     .topbar-metrics.show{flex:0 1 360px;min-height:36px}

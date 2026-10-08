@@ -44,6 +44,7 @@
             if (Number.isFinite(zoom) && zoom >= 50 && zoom <= 200 && zoom !== 100) {
                 var zoomRatio = (zoom / 100).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
                 root.style.setProperty('--init-zoom', zoomRatio);
+                root.style.setProperty('--desktop-toolbar-zoom', String(Math.min(1, 100 / zoom)));
                 var zoomStyle = document.createElement('style');
                 zoomStyle.textContent = '#terminalView{zoom:' + zoomRatio + '}';
                 document.head.appendChild(zoomStyle);

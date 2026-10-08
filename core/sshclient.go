@@ -86,6 +86,7 @@ func normalizeSSHClientAddress(client *SSHClient) {
 }
 
 const sshConnectTimeout = 5 * time.Second
+const sshSetupTimeout = 12 * time.Second
 
 func tuneInteractiveConn(conn net.Conn) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -114,12 +115,25 @@ func writeAll(w io.Writer, p []byte) error {
 }
 
 func sshClientFromConn(conn net.Conn, addr string, clientConfig *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	return sshClientFromConnContext(context.Background(), conn, addr, clientConfig, timeout)
+}
+
+func sshClientFromConnContext(ctx context.Context, conn net.Conn, addr string, clientConfig *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stopClosing := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClosing()
 	tuneInteractiveConn(conn)
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to set ssh handshake deadline: %v", err)
 	}
 	connection, channels, requests, err := ssh.NewClientConn(conn, addr, clientConfig)
+	stopClosing()
+	if ctx.Err() != nil {
+		_ = conn.Close()
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -132,6 +146,13 @@ func sshClientFromConn(conn net.Conn, addr string, clientConfig *ssh.ClientConfi
 }
 
 func (sclient *SSHClient) GenerateClient() error {
+	return sclient.GenerateClientContext(context.Background())
+}
+
+func (sclient *SSHClient) GenerateClientContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var (
 		auth         []ssh.AuthMethod
 		addr         string
@@ -209,13 +230,13 @@ func (sclient *SSHClient) GenerateClient() error {
 		if !ok {
 			return fmt.Errorf("socks5 proxy does not support bounded dialing")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), sshConnectTimeout)
-		conn, err := contextDialer.DialContext(ctx, "tcp", addr)
+		dialCtx, cancel := context.WithTimeout(ctx, sshConnectTimeout)
+		conn, err := contextDialer.DialContext(dialCtx, "tcp", addr)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to connect via proxy: %v", err)
 		}
-		client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
+		client, err := sshClientFromConnContext(ctx, conn, addr, clientConfig, sshConnectTimeout)
 		if err != nil {
 			return fmt.Errorf("failed to ssh handshake via proxy: %w", err)
 		}
@@ -223,11 +244,11 @@ func (sclient *SSHClient) GenerateClient() error {
 		return nil
 	}
 
-	conn, err := networkDialer.Dial("tcp", addr)
+	conn, err := networkDialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}
-	client, err := sshClientFromConn(conn, addr, clientConfig, sshConnectTimeout)
+	client, err := sshClientFromConnContext(ctx, conn, addr, clientConfig, sshConnectTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to ssh handshake: %w", err)
 	}
@@ -244,18 +265,47 @@ func (sclient *SSHClient) WriteWebSocketMessage(ws *websocket.Conn, messageType 
 	return ws.WriteMessage(messageType, data)
 }
 
+func (sclient *SSHClient) SetWebSocketWriteDeadline(ws *websocket.Conn, deadline time.Time) {
+	sclient.wsWriteMu.Lock()
+	defer sclient.wsWriteMu.Unlock()
+	_ = ws.SetWriteDeadline(deadline)
+}
+
 func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHClient {
+	if err := sclient.InitTerminalContext(context.Background(), ws, rows, cols); err != nil {
+		return nil
+	}
+	return sclient
+}
+
+func (sclient *SSHClient) InitTerminalContext(ctx context.Context, ws *websocket.Conn, rows, cols int) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, sshSetupTimeout)
+	defer cancel()
+	transport := sclient.Client
+	stopClosing := context.AfterFunc(ctx, func() { _ = transport.Close() })
+	defer func() {
+		stopClosing()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			sclient.Close()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	sshSession, err := sclient.Client.NewSession()
 	if err != nil {
 		log.Println(err)
-		return nil
+		return err
 	}
 	sclient.Session = sshSession
 	stdinPipe, err := sshSession.StdinPipe()
 	if err != nil {
 		log.Println(err)
 		sshSession.Close()
-		return nil
+		return err
 	}
 	sclient.StdinPipe = stdinPipe
 	if sclient.wsWriteMu == nil {
@@ -274,17 +324,23 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 	if err := sshSession.RequestPty("xterm", rows, cols, modes); err != nil {
 		log.Println(err)
 		sshSession.Close()
-		return nil
+		return err
 	}
 	if err := sshSession.Shell(); err != nil {
 		log.Println(err)
 		sshSession.Close()
-		return nil
+		return err
 	}
-	return sclient
+	return nil
 }
 
 func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, closeTip string) {
+	sclient.ConnectWithReader(ws, timeout, closeTip, ws.ReadMessage)
+}
+
+// The same WebSocket reader is used during setup and the live terminal so early
+// keystrokes are preserved and browser disconnects can cancel pending setup.
+func (sclient *SSHClient) ConnectWithReader(ws *websocket.Conn, timeout time.Duration, closeTip string, readMessage func() (int, []byte, error)) {
 	session := sclient.Session
 	stdinPipe := sclient.StdinPipe
 	if session == nil || stdinPipe == nil {
@@ -317,7 +373,7 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 	go func() {
 		defer workers.Done()
 		for {
-			messageType, p, err := ws.ReadMessage()
+			messageType, p, err := readMessage()
 			if err != nil {
 				signalStop(stopWebSocket)
 				return

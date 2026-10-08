@@ -13,11 +13,28 @@ import (
 )
 
 func (sclient *SSHClient) CreateSftp() error {
-	err := sclient.GenerateClient()
+	return sclient.CreateSftpContext(context.Background())
+}
+
+func (sclient *SSHClient) CreateSftpContext(ctx context.Context) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, sshSetupTimeout)
+	defer cancel()
+	err = sclient.GenerateClientContext(ctx)
 	if err != nil {
 		return err
 	}
-	client, err := sftp.NewClient(sclient.Client)
+	transport := sclient.Client
+	stopClosing := context.AfterFunc(ctx, func() { _ = transport.Close() })
+	defer func() {
+		stopClosing()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			sclient.Close()
+		}
+	}()
+	client, err := sftp.NewClient(transport)
 	if err != nil {
 		sclient.Close()
 		return err

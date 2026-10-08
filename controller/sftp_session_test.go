@@ -56,7 +56,7 @@ func TestSFTPSessionLeaseWaitHonorsCancellation(test *testing.T) {
 			originalFactory := createSFTPSessionClient
 			test.Cleanup(func() { createSFTPSessionClient = originalFactory })
 			var creates atomic.Int32
-			createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+			createSFTPSessionClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
 				creates.Add(1)
 				return &configuration, nil
 			}
@@ -147,7 +147,7 @@ func TestSFTPSessionCancelledRequestDoesNotReserveQuota(test *testing.T) {
 	originalFactory := createSFTPSessionClient
 	test.Cleanup(func() { createSFTPSessionClient = originalFactory })
 	creates := 0
-	createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
 		creates++
 		return &configuration, nil
 	}
@@ -176,7 +176,7 @@ func TestSFTPSessionCancellationAfterRegistrationReleasesQuota(test *testing.T) 
 	originalFactory := createSFTPSessionClient
 	test.Cleanup(func() { createSFTPSessionClient = originalFactory })
 	creates := 0
-	createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
 		creates++
 		return &configuration, nil
 	}
@@ -209,7 +209,7 @@ func TestSFTPSessionCancellationDuringCreationReleasesQuota(test *testing.T) {
 			originalFactory := createSFTPSessionClient
 			test.Cleanup(func() { createSFTPSessionClient = originalFactory })
 			var created *core.SSHClient
-			createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+			createSFTPSessionClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
 				created = &configuration
 				cancel()
 				return created, nil
@@ -290,7 +290,7 @@ func TestFileListReusesPersistentSFTPSession(t *testing.T) {
 	oldFactory := createSFTPSessionClient
 	t.Cleanup(func() { createSFTPSessionClient = oldFactory })
 	var creates atomic.Int32
-	createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, client core.SSHClient) (*core.SSHClient, error) {
 		creates.Add(1)
 		client.Sftp = newEditorTestSFTPClient(t)
 		return &client, nil
@@ -374,7 +374,7 @@ func TestCloseSFTPSessionForcesReconnect(t *testing.T) {
 	oldFactory := createSFTPSessionClient
 	t.Cleanup(func() { createSFTPSessionClient = oldFactory })
 	var creates atomic.Int32
-	createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, client core.SSHClient) (*core.SSHClient, error) {
 		creates.Add(1)
 		client.Sftp = newEditorTestSFTPClient(t)
 		return &client, nil
@@ -406,7 +406,7 @@ func TestCancelledPersistentSFTPSessionIsDiscarded(t *testing.T) {
 	t.Cleanup(resetSFTPSessionRegistryForTest)
 	oldFactory := createSFTPSessionClient
 	t.Cleanup(func() { createSFTPSessionClient = oldFactory })
-	createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, client core.SSHClient) (*core.SSHClient, error) {
 		client.Sftp = newEditorTestSFTPClient(t)
 		return &client, nil
 	}

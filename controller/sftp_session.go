@@ -96,8 +96,8 @@ var sftpSessionRegistry = struct {
 	clients: make(map[string]int),
 }
 
-var createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
-	if err := client.CreateSftp(); err != nil {
+var createSFTPSessionClient = func(ctx context.Context, client core.SSHClient) (*core.SSHClient, error) {
+	if err := client.CreateSftpContext(ctx); err != nil {
 		return nil, err
 	}
 	return &client, nil
@@ -255,7 +255,7 @@ func newTransientSFTPSessionLease(c *gin.Context, decoded core.SSHClient) (*sftp
 	if runtimeShuttingDown.Load() {
 		return nil, errRuntimeShuttingDown
 	}
-	client, err := createSFTPSessionClient(cloneSFTPClientConfig(decoded))
+	client, err := createSFTPSessionClient(c.Request.Context(), cloneSFTPClientConfig(decoded))
 	if err == nil {
 		err = c.Request.Context().Err()
 	}
@@ -330,7 +330,7 @@ func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded 
 			entry.idleTimer = nil
 		}
 		if entry.client == nil {
-			client, createErr := createSFTPSessionClient(cloneSFTPClientConfig(decoded))
+			client, createErr := createSFTPSessionClient(c.Request.Context(), cloneSFTPClientConfig(decoded))
 			if createErr == nil {
 				createErr = ctx.Err()
 			}

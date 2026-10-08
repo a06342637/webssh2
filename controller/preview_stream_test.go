@@ -42,7 +42,7 @@ func TestAuthorizeFilePreviewCancellationInterruptsMetadata(test *testing.T) {
 			connectionClosed = closed
 			originalFactory := createPreviewSFTPClient
 			test.Cleanup(func() { createPreviewSFTPClient = originalFactory })
-			createPreviewSFTPClient = func(configuration *core.SSHClient) error {
+			createPreviewSFTPClient = func(ctx context.Context, configuration *core.SSHClient) error {
 				configuration.Sftp = client
 				return nil
 			}
@@ -104,7 +104,7 @@ func TestAuthorizeFilePreviewPreservesRemotePathWhitespace(test *testing.T) {
 	}
 	originalFactory := createPreviewSFTPClient
 	test.Cleanup(func() { createPreviewSFTPClient = originalFactory })
-	createPreviewSFTPClient = func(configuration *core.SSHClient) error {
+	createPreviewSFTPClient = func(ctx context.Context, configuration *core.SSHClient) error {
 		configuration.Sftp, _ = newMemorySFTPTestClient(test, handlers)
 		return nil
 	}

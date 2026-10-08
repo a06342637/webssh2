@@ -554,6 +554,14 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 
 ## 版本更新（页面或命令行）
 
+### v0.5.82 初始化取消、剪贴板和分享修复
+
+- 编辑框、脚本管理和命令草稿的复制/粘贴快捷键交给输入框处理，避免内容误发到 SSH。
+- SSH 与 SFTP 初始化增加 12 秒上限，并响应浏览器断开或请求取消，释放对应连接与任务额度；SSH 初始化期间已输入的内容会保留。
+- HTTP 页面复制终端选区、IP 和自动复制使用备用方式；复制失败不再提示成功，并保留原输入框焦点。
+- SSH 分享和片段登录恢复代理地址、端口及认证信息；无代理的分享会关闭当前表单代理，分享凭据不会自动写入已保存的代理设置。
+- 桌面端放大终端时顶栏保持正常大小，多标签继续换行，避免把终端挤出屏幕；手机/iPad 布局保持原样。
+
 ### v0.5.81 顶栏对齐与文件面板切换
 
 - 修复桌面顶栏圆点偏上、右侧按钮与标签不齐的问题，多行标签时仍与第一行垂直居中对齐。
@@ -705,7 +713,7 @@ go run . -a admin:password
 ```
 
 回归检查：`go test ./...`、`go vet ./...` 和 `node --test test/*.test.js`。
-安装 Playwright 和 Chromium 后，可运行 `node test/terminal_browser.cjs` 验证终端缩放选区、标签换行和书签面板；使用 Edge 时设置 `WEBSSH_BROWSER=msedge`。
+安装 Playwright 和 Chromium 后，可运行 `node test/terminal_browser.cjs` 和 `node test/boundary_browser.cjs` 验证终端缩放选区、标签换行、面板、剪贴板及分享代理；使用 Edge 时设置 `WEBSSH_BROWSER=msedge`。
 
 ## 配置参数
 

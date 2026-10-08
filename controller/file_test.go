@@ -141,11 +141,11 @@ func installMemorySFTPFileFactories(test *testing.T, handlers sftp.Handlers) {
 		createFileSFTPClient = originalFileFactory
 		createSFTPSessionClient = originalSessionFactory
 	})
-	createFileSFTPClient = func(client *core.SSHClient) error {
+	createFileSFTPClient = func(ctx context.Context, client *core.SSHClient) error {
 		client.Sftp, _ = newMemorySFTPTestClient(test, handlers)
 		return nil
 	}
-	createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
+	createSFTPSessionClient = func(ctx context.Context, client core.SSHClient) (*core.SSHClient, error) {
 		client.Sftp, _ = newMemorySFTPTestClient(test, handlers)
 		return &client, nil
 	}

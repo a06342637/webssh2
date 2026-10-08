@@ -104,16 +104,35 @@ func serveLifecycleTestSSH(ctx context.Context, listener net.Listener, configura
 			}
 			switch request.Type {
 			case "pty-req":
-				if err := request.Reply(stage == "terminal", nil); err != nil {
+				if stage == "pty" {
+					close(blocked)
+					<-ctx.Done()
+					return nil
+				}
+				if err := request.Reply(stage == "terminal" || stage == "shell", nil); err != nil {
 					return err
 				}
 			case "shell":
+				if stage == "shell" {
+					close(blocked)
+					<-ctx.Done()
+					return nil
+				}
 				if stage != "terminal" {
 					return fmt.Errorf("unexpected shell request")
 				}
 				transport.paused.Store(true)
 				if err := request.Reply(true, nil); err != nil {
 					return err
+				}
+				close(blocked)
+				<-ctx.Done()
+				return nil
+			case "subsystem":
+				if stage == "sftp_version" {
+					if err := request.Reply(true, nil); err != nil {
+						return err
+					}
 				}
 				close(blocked)
 				<-ctx.Done()

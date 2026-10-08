@@ -787,7 +787,7 @@ func runFolderArchiveJob(job *folderArchiveJob) {
 		return
 	}
 	job.setStatus("connecting", "")
-	if err := createFileSFTPClient(job.client); err != nil {
+	if err := createFileSFTPClient(job.ctx, job.client); err != nil {
 		finishFolderArchiveWorker(job, err)
 		return
 	}

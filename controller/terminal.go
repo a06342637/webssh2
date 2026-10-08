@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"time"
 	"webssh/core"
@@ -13,6 +15,13 @@ import (
 )
 
 const terminalControlPrefix = "__WEBSSH_CONTROL__:"
+
+const terminalSetupTimeout = 12 * time.Second
+
+type terminalInputFrame struct {
+	kind int
+	data []byte
+}
 
 // clampTermSize 把查询参数里的终端行列数转成合法值，非法或越界时用 fallback。
 func clampTermSize(raw string, fallback int) int {
@@ -113,6 +122,45 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	// Terminal frames have a separate bounded limit so a paste larger than
 	// 128 KiB does not inherit the handshake limit and disconnect the session.
 	wsConn.SetReadLimit(websocketTerminalInputLimit)
+	connectionCtx, cancelConnection := context.WithCancel(c.Request.Context())
+	input := make(chan terminalInputFrame, 8)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(input)
+		defer cancelConnection()
+		for {
+			kind, data, err := wsConn.ReadMessage()
+			if err != nil {
+				return
+			}
+			select {
+			case input <- terminalInputFrame{kind: kind, data: data}:
+			case <-connectionCtx.Done():
+				return
+			}
+		}
+	}()
+	defer func() {
+		cancelConnection()
+		_ = wsConn.Close()
+		<-readerDone
+	}()
+	setupDuration := terminalSetupTimeout
+	if timeout > 0 && timeout < setupDuration {
+		setupDuration = timeout
+	}
+	setupCtx, cancelSetup := context.WithTimeout(connectionCtx, setupDuration)
+	defer cancelSetup()
+	unregisterCloser, registered := registerRuntimeCloser(func() {
+		cancelConnection()
+		_ = wsConn.Close()
+	})
+	if !registered {
+		responseBody.Msg = errRuntimeShuttingDown.Error()
+		return &responseBody
+	}
+	defer unregisterCloser()
 
 	sshInfo := string(initMsg)
 	sshClient, err := decodeSSHClient(c, sshInfo)
@@ -123,7 +171,7 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	err = sshClient.GenerateClient()
+	err = sshClient.GenerateClientContext(setupCtx)
 	if err != nil {
 		var mismatch *core.HostKeyMismatchError
 		if errors.As(err, &mismatch) {
@@ -136,21 +184,16 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	unregisterCloser, registered := registerRuntimeCloser(func() {
-		_ = wsConn.Close()
-		sshClient.Close()
-	})
-	if !registered {
-		responseBody.Msg = errRuntimeShuttingDown.Error()
-		return &responseBody
-	}
-	defer unregisterCloser()
-
-	if sshClient.InitTerminal(wsConn, row, col) == nil {
-		wsConn.WriteMessage(1, []byte("\033[31mTerminal initialization failed\033[0m"))
+	defer sshClient.Close()
+	transport := sshClient.Client
+	stopTransport := context.AfterFunc(connectionCtx, func() { _ = transport.Close() })
+	defer stopTransport()
+	// Bound writes while Shell may already be producing a banner during setup.
+	_ = wsConn.SetWriteDeadline(time.Now().Add(setupDuration))
+	if err := sshClient.InitTerminalContext(setupCtx, wsConn, row, col); err != nil {
+		_ = sshClient.WriteWebSocketMessage(wsConn, websocket.TextMessage, []byte("\033[31mTerminal initialization failed: "+err.Error()+"\033[0m"))
 		wsConn.Close()
-		sshClient.Close()
-		responseBody.Msg = "terminal initialization failed"
+		responseBody.Msg = "terminal initialization failed: " + err.Error()
 		return &responseBody
 	}
 	if err := writeTerminalControlMessage(&sshClient, wsConn, "connection-ready"); err != nil {
@@ -159,6 +202,18 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	sshClient.Connect(wsConn, timeout, closeTip)
+	sshClient.SetWebSocketWriteDeadline(wsConn, time.Time{})
+	cancelSetup()
+	sshClient.ConnectWithReader(wsConn, timeout, closeTip, func() (int, []byte, error) {
+		select {
+		case frame, ok := <-input:
+			if !ok {
+				return 0, nil, io.EOF
+			}
+			return frame.kind, frame.data, nil
+		case <-connectionCtx.Done():
+			return 0, nil, connectionCtx.Err()
+		}
+	})
 	return &responseBody
 }

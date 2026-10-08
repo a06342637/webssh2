@@ -54,8 +54,8 @@ var previewGrants = struct {
 	items map[string]*previewGrant
 }{items: make(map[string]*previewGrant)}
 
-var createPreviewSFTPClient = func(client *core.SSHClient) error {
-	return client.CreateSftp()
+var createPreviewSFTPClient = func(ctx context.Context, client *core.SSHClient) error {
+	return client.CreateSftpContext(ctx)
 }
 
 func newPreviewGrantToken() (string, error) {
@@ -237,7 +237,7 @@ func AuthorizeFilePreview(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := createPreviewSFTPClient(&client); err != nil {
+	if err := createPreviewSFTPClient(c.Request.Context(), &client); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -393,7 +393,7 @@ func PreviewFileStream(c *gin.Context) {
 	defer releaseSSH()
 
 	client := cloneSFTPClientConfig(grant.client)
-	if err := client.CreateSftp(); err != nil {
+	if err := client.CreateSftpContext(c.Request.Context()); err != nil {
 		c.JSON(http.StatusBadGateway, ResponseBody{Msg: err.Error()})
 		return
 	}

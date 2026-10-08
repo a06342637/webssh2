@@ -268,6 +268,35 @@ func TestTerminalPtyUsesRequestedSize(t *testing.T) {
 	}
 }
 
+func TestTerminalPreservesInputSentBeforeSetupCompletes(t *testing.T) {
+	t.Setenv("WEBSSH_HOST_KEY_POLICY", "insecure")
+	server := startFakeSSHServer(t)
+	host, port := server.hostPort(t)
+	router := gin.New()
+	finished := make(chan struct{})
+	router.GET("/term", func(c *gin.Context) { defer close(finished); TermWs(c, time.Minute) })
+	httpServer := httptest.NewServer(router)
+	defer httpServer.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/term", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(); <-finished }()
+	info, _ := json.Marshal(map[string]any{"hostname": host, "port": port, "username": "tester", "password": "secret", "logintype": 0})
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(base64.StdEncoding.EncodeToString(info))); err != nil {
+		t.Fatal(err)
+	}
+	// Send both frames without waiting for the pty or connection-ready signal.
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("echo early\r")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("resize:25:91")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "early input", func() bool { return server.stdinText() == "echo early\r" })
+	waitFor(t, "early resize", func() bool { size, ok := server.lastResize(); return ok && size == [2]uint32{91, 25} })
+}
+
 func TestTerminalPtyFallsBackOnInvalidSize(t *testing.T) {
 	// The browser can send a size before the terminal has been laid out.
 	// Opening the pty at 0 columns is what made long command echoes overlap.

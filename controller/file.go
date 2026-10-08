@@ -90,8 +90,8 @@ var remoteEditorTargetLocks = struct {
 	entries map[string]*remoteEditorTargetLock
 }{entries: make(map[string]*remoteEditorTargetLock)}
 
-var createFileSFTPClient = func(client *core.SSHClient) error {
-	return client.CreateSftp()
+var createFileSFTPClient = func(ctx context.Context, client *core.SSHClient) error {
+	return client.CreateSftpContext(ctx)
 }
 
 func validateRemoteTextContent(content []byte, maxBytes int64, action, pastAction string) error {
@@ -689,7 +689,7 @@ func OpenFileForEdit(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -735,7 +735,7 @@ func PreviewFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
 		return &responseBody
@@ -817,7 +817,7 @@ func SaveEditedFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -918,7 +918,7 @@ func DeleteFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -1166,7 +1166,7 @@ func UploadFile(c *gin.Context) *ResponseBody {
 				responseBody.Msg = decodeErr.Error()
 				return &responseBody
 			}
-			if err := createFileSFTPClient(&client); err != nil {
+			if err := createFileSFTPClient(c.Request.Context(), &client); err != nil {
 				releaseSSH()
 				_ = part.Close()
 				responseBody.Msg = err.Error()
@@ -1790,7 +1790,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
@@ -1896,7 +1896,7 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := createFileSFTPClient(&sshClient); err != nil {
+	if err := createFileSFTPClient(c.Request.Context(), &sshClient); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		return &responseBody

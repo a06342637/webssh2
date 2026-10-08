@@ -8770,11 +8770,7 @@ function termCopy() {
     if (!session.term) return;
     var sel = session.term.getSelection();
     if (!sel) { showToast('没有选中内容', 'info'); return; }
-    navigator.clipboard.writeText(sel).then(function () {
-        showCopyToast();
-    }).catch(function () {
-        fallbackCopy(sel);
-    });
+    copyTextToClipboard(sel);
     hideCtxMenu();
 }
 
@@ -8987,11 +8983,34 @@ function termClear() {
 }
 
 function fallbackCopy(text) {
+    var previousFocus = document.activeElement;
+    var selectionStart = previousFocus && previousFocus.selectionStart;
+    var selectionEnd = previousFocus && previousFocus.selectionEnd;
     var ta = document.createElement('textarea');
     ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); showCopyToast(); } catch (e) { }
+    var copied = false;
+    try { copied = document.execCommand('copy') === true; } catch (e) { }
     document.body.removeChild(ta);
+    if (previousFocus && typeof previousFocus.focus === 'function') {
+        try {
+            previousFocus.focus({ preventScroll: true });
+            if (typeof selectionStart === 'number' && typeof previousFocus.setSelectionRange === 'function') previousFocus.setSelectionRange(selectionStart, selectionEnd);
+        } catch (e) { }
+    }
+    if (copied) showCopyToast();
+    else showToast('复制失败，请使用浏览器的复制菜单或快捷键', 'error');
+    return copied;
+}
+
+function copyTextToClipboard(text) {
+    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') return Promise.resolve(fallbackCopy(text));
+    try {
+        return Promise.resolve(navigator.clipboard.writeText(text)).then(function () {
+            showCopyToast();
+            return true;
+        }, function () { return fallbackCopy(text); });
+    } catch (e) { return Promise.resolve(fallbackCopy(text)); }
 }
 
 function showCopyToast() {
@@ -9010,11 +9029,7 @@ function setupAutoCopy(session) {
     session._selectionDisposable = session.term.onSelectionChange(function () {
         var sel = session.term.getSelection();
         if (sel && sel.length > 0) {
-            navigator.clipboard.writeText(sel).then(function () {
-                showCopyToast();
-            }).catch(function () {
-                fallbackCopy(sel);
-            });
+            copyTextToClipboard(sel);
         }
     });
 }
@@ -9046,6 +9061,10 @@ function hideCtxMenu() {
 // 以及 RDP 画面尚未获得焦点时（比如刚点完工具栏）的情况。
 document.addEventListener('keydown', function (e) {
     if (activeIdx < 0 || !sessions[activeIdx]) return;
+    // Forms and editors own their clipboard shortcuts; never send their text to SSH.
+    var target = e.target;
+    if (target && target.closest && !target.closest('.xterm') &&
+        (target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),.modal-overlay,[role="dialog"]') || target.isContentEditable)) return;
     if (!e.shiftKey) return;
     var wantMeta = typeof rdpClipboardModifierIsMeta === 'function' && rdpClipboardModifierIsMeta();
     var modifierDown = wantMeta ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey);
@@ -9092,11 +9111,7 @@ function sendCmdInput() {
 
 // ==================== Copy IP ====================
 function copyIP(ip) {
-    navigator.clipboard.writeText(ip).then(function () {
-        showCopyToast();
-    }).catch(function () {
-        fallbackCopy(ip);
-    });
+    return copyTextToClipboard(ip);
 }
 
 // ==================== Font Size ====================
@@ -9523,7 +9538,10 @@ function applyPageZoom(val) {
     numeric = Math.max(50, Math.min(200, numeric));
     document.body.style.zoom = '';
     var terminalView = document.getElementById('terminalView');
-    if (terminalView) terminalView.style.zoom = String(numeric / 100);
+    if (terminalView) {
+        terminalView.style.zoom = String(numeric / 100);
+        terminalView.style.setProperty('--desktop-toolbar-zoom', String(Math.min(1, 100 / numeric)));
+    }
 
     // CSS zoom does not reliably emit resize, so fit live SSH/RDP sessions explicitly.
     requestAnimationFrame(function () {
@@ -9933,7 +9951,13 @@ function parseUrlLoginFragment(hash) {
             user: String(data.username !== undefined ? data.username : (data.user || 'root')),
             pass: keyLogin ? privateKey : password,
             passphrase: typeof data.passphrase === 'string' ? data.passphrase : '',
-            authType: keyLogin ? 'key' : 'password'
+            authType: keyLogin ? 'key' : 'password',
+            proxy: {
+                host: typeof data.proxyHost === 'string' ? data.proxyHost : '',
+                port: normalizePortValue(data.proxyPort, 1080),
+                user: typeof data.proxyUser === 'string' ? data.proxyUser : '',
+                pass: typeof data.proxyPass === 'string' ? data.proxyPass : ''
+            }
         };
     } catch (e) {
         return null;
@@ -9955,6 +9979,17 @@ function tryAutoLogin() {
     document.getElementById('hostname').value = formatHostForInput(info.host);
     document.getElementById('port').value = info.port;
     document.getElementById('username').value = info.user;
+
+    // Restore the shared route in memory only; a direct link clears any saved route.
+    if (info.proxy) {
+        document.getElementById('proxyHost').value = info.proxy.host;
+        document.getElementById('proxyPort').value = info.proxy.port;
+        document.getElementById('proxyUser').value = info.proxy.user;
+        document.getElementById('proxyPass').value = info.proxy.pass;
+        document.getElementById('enableProxy').checked = !!info.proxy.host;
+        document.getElementById('rememberProxy').checked = false;
+        toggleProxyPanel();
+    }
 
     if (info.authType === 'key') {
         switchAuthTab('key');

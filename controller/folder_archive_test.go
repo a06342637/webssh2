@@ -154,7 +154,7 @@ func TestFolderArchivePreservesSourceWhitespaceAndCleansDownloadedArchive(test *
 	client, _ := newMemorySFTPTestClient(test, handlers)
 	originalFactory := createFileSFTPClient
 	test.Cleanup(func() { createFileSFTPClient = originalFactory })
-	createFileSFTPClient = func(configuration *core.SSHClient) error {
+	createFileSFTPClient = func(ctx context.Context, configuration *core.SSHClient) error {
 		configuration.Sftp = client
 		return nil
 	}
