@@ -37,6 +37,15 @@ const server = http.createServer((req, res) => {
       await new Promise(r => setTimeout(r,250));
       await new Promise(r => sessions[0].term.write(Array.from({length:24}, (_,i)=>'ROW'+String(i+1).padStart(2,'0')+' abcdefghijklmnopqrstuvwxyz').join('\r\n'),r));
     });
+    async function checkFirstRowAlignment() {
+      const centers = await page.evaluate(() => {
+        const center = selector => { const rect = document.querySelector(selector).getBoundingClientRect(); return rect.y + rect.height / 2; };
+        return {dots:center('.term-dots'),tab:center('.ssh-tab'),tools:center('.topbar-right .tb-btn')};
+      });
+      assert.ok(Math.abs(centers.dots-centers.tab)<1, 'dots must align with the first tab: '+JSON.stringify(centers));
+      assert.ok(Math.abs(centers.tools-centers.tab)<1, 'toolbar must align with the first tab: '+JSON.stringify(centers));
+    }
+    await checkFirstRowAlignment();
     for (const zoom of [50,80,90,100,110,125,150,200]) {
       await page.evaluate(z=>applyPageZoom(z),zoom);
       await page.waitForTimeout(200);
@@ -68,11 +77,30 @@ const server = http.createServer((req, res) => {
     assert.equal(desktop.wrap,'wrap');
     assert.ok(desktop.rows>1);
     assert.equal(desktop.scroll,desktop.client);
+    await checkFirstRowAlignment();
     await page.locator('[onclick="toggleScriptDrawer()"]').first().click();
     assert.equal(await page.locator('#scriptDrawer').evaluate(el=>el.classList.contains('open')),false,'explicit toggle closes drawer');
     await page.locator('.ssh-tab').first().click();
     await page.waitForTimeout(400);
     if (process.env.WEBSSH_UI_SCREENSHOT) await page.screenshot({path:process.env.WEBSSH_UI_SCREENSHOT});
+    await page.evaluate(() => {
+      window.sftpTestLoads = [];
+      sftpLoad = (path, session) => window.sftpTestLoads.push(session.id);
+      window.sftpTestController = new AbortController();
+      sessions[0]._sftpListController = window.sftpTestController;
+    });
+    await page.locator('[onclick="toggleSftp()"]').first().click();
+    await page.locator('.ssh-tab').first().click();
+    assert.equal(await page.locator('#sftpPanel').evaluate(el=>el.classList.contains('open')),true,'same SSH tab keeps SFTP open');
+    const loadCount = await page.evaluate(()=>window.sftpTestLoads.length);
+    await page.locator('.ssh-tab').nth(1).click();
+    assert.equal(await page.locator('#sftpPanel').evaluate(el=>el.classList.contains('open')),false,'different SSH tab closes SFTP');
+    assert.equal(await page.evaluate(()=>window.sftpTestController.signal.aborted),true,'switch cancels the old directory listing');
+    assert.equal(await page.evaluate(()=>window.sftpTestLoads.length),loadCount,'switch does not automatically load the new host');
+    await page.locator('[onclick="toggleSftp()"]').first().click();
+    assert.equal(await page.evaluate(()=>window.sftpTestLoads.at(-1)===sessions[1].id),true,'reopening SFTP uses the new host');
+    await page.evaluate(()=>closeTab(activeIdx));
+    assert.equal(await page.locator('#sftpPanel').evaluate(el=>el.classList.contains('open')),false,'closing the active SSH tab closes its SFTP panel');
     for (const size of [{width:390,height:844},{width:1024,height:768}]) {
       await page.setViewportSize(size);
       await page.waitForTimeout(200);
@@ -84,6 +112,6 @@ const server = http.createServer((req, res) => {
     await ipad.goto(`http://127.0.0.1:${server.address().port}/?preview=terminal&drawer=none`);
     assert.equal(await ipad.locator('#tabBar').evaluate(el=>getComputedStyle(el).flexWrap),'nowrap');
     assert.deepEqual(errors,[]);
-    console.log('Browser checks passed: 8 zoom levels, tab wrapping, persistent drawer, phone/tablet/iPad Pro layouts.');
+    console.log('Browser checks passed: 8 zoom levels, first-row alignment, tab wrapping, persistent scripts, SFTP tab isolation, phone/tablet/iPad Pro layouts.');
   } finally { await browser.close(); server.close(); }
 })().catch(e=>{console.error(e);server.close();process.exitCode=1;});

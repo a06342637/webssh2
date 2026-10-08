@@ -767,10 +767,11 @@ input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;hei
 /* Keep touch/tablet layouts unchanged; desktop tabs grow into additional rows. */
 @media(min-width:1025px) and (hover:hover) and (pointer:fine){
     .term-topbar{align-items:flex-start}
-    .topbar-left,.topbar-right{padding-top:2px}
+    .topbar-left{height:36px}
     .tab-bar{flex:1 1 auto;flex-wrap:wrap;overflow:visible;padding-bottom:0}
-    .topbar-metrics.show{flex:0 1 360px}
-    .ssh-tab{max-width:100%;min-width:0}
+    .topbar-metrics.show{flex:0 1 360px;min-height:36px}
+    .ssh-tab{max-width:100%;min-width:0;height:36px}
+    .tab-add-btn{height:36px}
     .ssh-tab .tab-ip{min-width:0;overflow:hidden;text-overflow:ellipsis}
 }
 

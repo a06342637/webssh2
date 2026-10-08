@@ -673,7 +673,10 @@ function switchTab(idx, userActivated) {
     if (idx < 0 || idx >= sessions.length) return;
     var prevIdx = activeIdx;
     var previousSession = prevIdx >= 0 ? sessions[prevIdx] : null;
-    if (previousSession && previousSession !== sessions[idx]) cancelSessionSftpBrowsing(previousSession);
+    if (previousSession && previousSession !== sessions[idx]) {
+        cancelSessionSftpBrowsing(previousSession);
+        hideSftpPanel();
+    }
     if (sftpRemoteSessionId && (!sessions[idx] || sessions[idx].id !== sftpRemoteSessionId)) hideSftpRemoteModal();
     if (sftpDirPickerSessionId && (!sessions[idx] || sessions[idx].id !== sftpDirPickerSessionId)) hideSftpDirPicker();
     activeIdx = idx;
@@ -691,8 +694,7 @@ function switchTab(idx, userActivated) {
         document.body.classList.add('active-rdp');
         setTimeout(function () { try { s.canvas.focus(); } catch (e) { } }, 100);
         scheduleRdpResize(s);
-        var sftpPanelRdp = document.getElementById('sftpPanel');
-        if (sftpPanelRdp) sftpPanelRdp.classList.remove('open');
+        hideSftpPanel();
         setTopbarMetricsVisible(false);
         // SSH 侧的两个对话框跟着 SSH 会话走，切到 RDP 必须收起来。
         hideSSHAuthRetryModal(false);
@@ -1404,6 +1406,7 @@ function closeTab(idx) {
         if (currentIndex >= 0) closeTab(currentIndex, true);
     })) return;
     var activeSession = activeIdx >= 0 ? sessions[activeIdx] : null;
+    if (activeSession === requestedSession) hideSftpPanel();
     if (serverInfoModalIdx === idx) hideServerInfoModal();
     var s = sessions[idx];
     closeRemoteEditorsForSession(s, true);
@@ -2570,6 +2573,13 @@ function toggleScriptDrawer() {
     remoteEditorLayerWidth();
     setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
 }
+function hideSftpPanel() {
+    var panel = document.getElementById('sftpPanel');
+    if (!panel || !panel.classList.contains('open')) return;
+    panel.classList.remove('open');
+    remoteEditorLayerWidth();
+}
+
 function toggleSftp() {
     var p = document.getElementById('sftpPanel');
     var wasOpen = p.classList.contains('open');
