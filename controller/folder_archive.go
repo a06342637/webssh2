@@ -25,13 +25,14 @@ import (
 )
 
 const (
-	folderArchiveJobMaxCount  = 128
-	folderArchiveJobMaxRun    = 30 * time.Minute
-	folderArchiveLeaseTimeout = 90 * time.Second
-	folderArchiveJobReadyTTL  = 10 * time.Minute
-	folderArchiveJobResultTTL = 2 * time.Minute
-	folderArchiveCancelTTL    = 2 * time.Minute
-	folderArchiveCancelMax    = folderArchiveJobMaxCount * 4
+	folderArchiveJobMaxCount    = 128
+	folderArchiveJobMaxRun      = 30 * time.Minute
+	folderArchiveLeaseTimeout   = 90 * time.Second
+	folderArchiveJobReadyTTL    = 10 * time.Minute
+	folderArchiveJobResultTTL   = 2 * time.Minute
+	folderArchiveCancelTTL      = 2 * time.Minute
+	folderArchiveCancelMax      = folderArchiveJobMaxCount * 4
+	folderArchiveCleanupTimeout = 5 * time.Second
 )
 
 type folderArchivePrepareRequest struct {
@@ -92,6 +93,8 @@ var folderArchiveJobs = struct {
 	items         map[string]*folderArchiveJob
 	cancellations map[string]time.Time
 }{items: make(map[string]*folderArchiveJob), cancellations: make(map[string]time.Time)}
+
+var createFolderArchiveCleanupClient = dialFolderArchiveCleanupClient
 
 type folderArchiveStoreResult int
 
@@ -359,6 +362,96 @@ func (job *folderArchiveJob) workFinished() bool {
 	}
 }
 
+func dialFolderArchiveCleanupClient(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+	client := cloneSFTPClientConfig(configuration)
+	scrubSFTPSessionCredentials(&configuration)
+	if err := ctx.Err(); err != nil {
+		scrubSFTPSessionCredentials(&client)
+		return nil, err
+	}
+	type connectionResult struct {
+		client *core.SSHClient
+		err    error
+	}
+	connected := make(chan connectionResult)
+	go func() {
+		err := client.GenerateClient()
+		if err == nil {
+			transport := client.Client
+			stopCancellation := context.AfterFunc(ctx, func() { _ = transport.Close() })
+			if err = ctx.Err(); err == nil {
+				client.Sftp, err = sftp.NewClient(transport)
+			}
+			stopCancellation()
+		}
+		scrubSFTPSessionCredentials(&client)
+		select {
+		case connected <- connectionResult{client: &client, err: err}:
+		case <-ctx.Done():
+			client.Close()
+		}
+	}()
+	select {
+	case result := <-connected:
+		if err := ctx.Err(); err != nil {
+			result.err = err
+		}
+		if result.err != nil {
+			result.client.Close()
+			return nil, result.err
+		}
+		return result.client, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func cleanupRemoteFolderArchive(ctx context.Context, client *core.SSHClient, archivePath string) error {
+	archivePath = pathpkg.Clean(archivePath)
+	if !isRemoteFolderArchiveName(pathpkg.Base(archivePath)) {
+		return fmt.Errorf("invalid temporary archive path")
+	}
+	if client == nil {
+		return fmt.Errorf("missing archive SSH client")
+	}
+	configuration := cloneSFTPClientConfig(*client)
+	defer scrubSFTPSessionCredentials(&configuration)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if client.Sftp != nil {
+		stopCancellation := closeSSHOnContextDone(ctx, client)
+		err := removeRemoteFolderArchive(client.Sftp, archivePath)
+		stopCancellation()
+		if err == nil {
+			return nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cleanupClient, err := createFolderArchiveCleanupClient(ctx, configuration)
+	if cleanupClient != nil {
+		defer cleanupClient.Close()
+		defer scrubSFTPSessionCredentials(cleanupClient)
+	}
+	if err != nil {
+		return fmt.Errorf("reconnect for archive cleanup: %w", err)
+	}
+	if cleanupClient == nil || cleanupClient.Sftp == nil {
+		return fmt.Errorf("missing archive cleanup SFTP client")
+	}
+	stopCancellation := closeSSHOnContextDone(ctx, cleanupClient)
+	defer stopCancellation()
+	if err := removeRemoteFolderArchive(cleanupClient.Sftp, archivePath); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return err
+	}
+	return nil
+}
+
 func (job *folderArchiveJob) cleanupResources() {
 	job.cleanupOnce.Do(func() {
 		job.mu.Lock()
@@ -369,6 +462,7 @@ func (job *folderArchiveJob) cleanupResources() {
 		stopIOCancel := job.stopIOCancel
 		job.client = nil
 		job.release = nil
+		job.cancel = nil
 		job.stopIOCancel = nil
 		if job.runtimeTimer != nil {
 			job.runtimeTimer.Stop()
@@ -380,23 +474,24 @@ func (job *folderArchiveJob) cleanupResources() {
 		}
 		job.mu.Unlock()
 
-		if cancel != nil {
-			cancel()
-		}
 		if stopIOCancel != nil {
 			stopIOCancel()
 		}
+		if cancel != nil {
+			cancel()
+		}
 		if client != nil {
-			if client.Sftp != nil && archivePath != "" {
-				if err := removeRemoteFolderArchive(client.Sftp, archivePath); err != nil {
+			if archivePath != "" {
+				cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), folderArchiveCleanupTimeout)
+				if err := cleanupRemoteFolderArchive(cleanupCtx, client, archivePath); err != nil {
 					log.Printf("could not remove prepared folder archive %q: %v", archivePath, err)
+				} else {
+					job.clearArchivePath(archivePath)
 				}
+				stopCleanup()
 			}
 			client.Close()
-			client.Password = ""
-			client.PrivateKey = ""
-			client.Passphrase = ""
-			client.ProxyPass = ""
+			scrubSFTPSessionCredentials(client)
 		}
 		if release != nil {
 			release()
@@ -610,11 +705,16 @@ func prepareRemoteArchiveManifest(job *folderArchiveJob, sourcePath string, mani
 			return "", nil, err
 		}
 		archivePath, err := reserveRemoteFolderArchive(job.client.Sftp, directory)
+		if archivePath != "" {
+			job.setArchivePath(archivePath)
+		}
 		if err != nil {
+			if archivePath != "" {
+				return "", nil, err
+			}
 			failures = append(failures, directory+": "+err.Error())
 			continue
 		}
-		job.setArchivePath(archivePath)
 		job.beginCompression(manifest.TotalBytes, int64(len(manifest.Entries)), sourcePath)
 		err = writeRemoteArchiveManifest(job.ctx, job.client.Sftp, archivePath, manifest, func(bytes, entries int64, currentPath string) {
 			job.mu.Lock()
@@ -625,24 +725,30 @@ func prepareRemoteArchiveManifest(job *folderArchiveJob, sourcePath string, mani
 			job.mu.Unlock()
 		})
 		if err != nil {
-			_ = removeRemoteFolderArchive(job.client.Sftp, archivePath)
-			job.clearArchivePath(archivePath)
 			if ctxErr := job.ctx.Err(); ctxErr != nil {
 				return "", nil, ctxErr
 			}
+			if cleanupErr := removeRemoteFolderArchive(job.client.Sftp, archivePath); cleanupErr != nil {
+				return "", nil, errors.Join(err, cleanupErr)
+			}
+			job.clearArchivePath(archivePath)
 			failures = append(failures, directory+": "+err.Error())
 			continue
 		}
 		job.setStatus("finalizing", "")
 		info, err := job.client.Sftp.Lstat(archivePath)
 		if err != nil {
-			_ = removeRemoteFolderArchive(job.client.Sftp, archivePath)
+			if cleanupErr := removeRemoteFolderArchive(job.client.Sftp, archivePath); cleanupErr != nil {
+				return "", nil, errors.Join(err, cleanupErr)
+			}
 			job.clearArchivePath(archivePath)
 			failures = append(failures, directory+": verify archive: "+err.Error())
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 {
-			_ = removeRemoteFolderArchive(job.client.Sftp, archivePath)
+			if cleanupErr := removeRemoteFolderArchive(job.client.Sftp, archivePath); cleanupErr != nil {
+				return "", nil, cleanupErr
+			}
 			job.clearArchivePath(archivePath)
 			failures = append(failures, directory+": remote archive is empty or invalid")
 			continue
@@ -681,7 +787,7 @@ func runFolderArchiveJob(job *folderArchiveJob) {
 		return
 	}
 	job.setStatus("connecting", "")
-	if err := job.client.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(job.client); err != nil {
 		finishFolderArchiveWorker(job, err)
 		return
 	}
@@ -772,7 +878,7 @@ func PrepareDirectoryArchive(c *gin.Context) {
 		return
 	}
 	request.SSHInfo = strings.TrimSpace(request.SSHInfo)
-	request.Path = pathpkg.Clean(strings.TrimSpace(request.Path))
+	request.Path = pathpkg.Clean(request.Path)
 	if request.SSHInfo == "" || request.Path == "." || request.Path == "" {
 		c.JSON(http.StatusBadRequest, ResponseBody{Msg: "missing sshInfo or path"})
 		return
@@ -944,9 +1050,15 @@ func DownloadPreparedDirectoryArchive(c *gin.Context) {
 		c.JSON(status, ResponseBody{Msg: err.Error()})
 		return
 	}
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), client)
+	defer stopCancellation()
 	archiveFile, err := client.Download(archivePath)
 	if err != nil {
-		job.markTerminal("error", err)
+		if c.Request.Context().Err() != nil || job.ctx.Err() != nil {
+			job.markTerminal("cancelled", nil)
+		} else {
+			job.markTerminal("error", err)
+		}
 		job.cleanupResources()
 		deleteFolderArchiveJob(job)
 		c.JSON(http.StatusInternalServerError, ResponseBody{Msg: err.Error()})

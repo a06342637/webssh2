@@ -70,27 +70,42 @@ func (w *boundedSSHOutput) Exceeded() bool {
 	return w.exceeded
 }
 
-func runSSHCommandBounded(ctx context.Context, session *ssh.Session, command string, limit int) ([]byte, error) {
+func runSSHCommandBounded(ctx context.Context, client *ssh.Client, command string, limit int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stopClosing := context.AfterFunc(ctx, func() { _ = client.Close() })
+	defer stopClosing()
+	session, err := client.NewSession()
+	if err != nil {
+		if contextError := ctx.Err(); contextError != nil {
+			return nil, contextError
+		}
+		return nil, err
+	}
+	defer session.Close()
 	output := newBoundedSSHOutput(limit)
 	session.Stdout = output
 	session.Stderr = output
-	if err := session.Start(command); err != nil {
-		return nil, err
-	}
 	done := make(chan error, 1)
-	go func() { done <- session.Wait() }()
+	go func() { done <- session.Run(command) }()
 
 	select {
 	case err := <-done:
+		if contextError := ctx.Err(); contextError != nil {
+			return nil, contextError
+		}
 		if output.Exceeded() {
 			return nil, errSysInfoOutputLimit
 		}
 		return output.Bytes(), err
 	case <-output.limitHit:
-		_ = session.Close()
+		_ = client.Close()
+		<-done
 		return nil, errSysInfoOutputLimit
 	case <-ctx.Done():
-		_ = session.Close()
+		_ = client.Close()
+		<-done
 		return nil, ctx.Err()
 	}
 }
@@ -121,12 +136,8 @@ func SysInfo(c *gin.Context) *ResponseBody {
 	}
 	defer sshClient.Close()
 
-	session, err := sshClient.Client.NewSession()
-	if err != nil {
-		responseBody.Msg = err.Error()
-		return &responseBody
-	}
-	defer session.Close()
+	commandContext, cancel := context.WithTimeout(c.Request.Context(), sysInfoCommandTimeout)
+	defer cancel()
 
 	cmd := strings.Join([]string{
 		`echo "===OS==="`,
@@ -173,9 +184,7 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`echo "===END==="`,
 	}, "; ")
 
-	commandContext, cancel := context.WithTimeout(c.Request.Context(), sysInfoCommandTimeout)
-	defer cancel()
-	out, err := runSSHCommandBounded(commandContext, session, cmd, sysInfoOutputLimit)
+	out, err := runSSHCommandBounded(commandContext, sshClient.Client, cmd, sysInfoOutputLimit)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			responseBody.Msg = "system information command timed out"
@@ -227,6 +236,22 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	wsConn.SetPongHandler(func(string) error {
 		return wsConn.SetReadDeadline(time.Now().Add(sysInfoNetIdleTimeout))
 	})
+	monitorContext, cancelMonitor := context.WithCancel(c.Request.Context())
+	defer cancelMonitor()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer cancelMonitor()
+		for {
+			if _, _, err := wsConn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		_ = wsConn.Close()
+		<-done
+	}()
 	sshInfo := string(initMsg)
 
 	sshClient, err := decodeSSHClient(c, sshInfo)
@@ -241,6 +266,11 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer sshClient.Close()
+	defer closeSSHOnContextDone(monitorContext, &sshClient)()
+	setupContext, cancelSetup := context.WithTimeout(monitorContext, sysInfoCommandTimeout)
+	defer cancelSetup()
+	stopSetup := context.AfterFunc(setupContext, func() { _ = sshClient.Client.Close() })
+	defer stopSetup()
 	unregisterCloser, registered := registerRuntimeCloser(func() {
 		_ = wsConn.Close()
 		sshClient.Close()
@@ -253,11 +283,13 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 
 	session, err := sshClient.Client.NewSession()
 	if err != nil {
+		if contextError := setupContext.Err(); contextError != nil {
+			err = contextError
+		}
 		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	defer session.Close()
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
@@ -266,19 +298,8 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 
-	done := make(chan struct{})
-	streamFinished := make(chan struct{})
-	defer close(streamFinished)
 	lifetimeDone := make(chan struct{})
 	defer close(lifetimeDone)
-	go func() {
-		defer close(done)
-		for {
-			if _, _, err := wsConn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -311,17 +332,20 @@ func SysInfoNetWs(c *gin.Context) *ResponseBody {
 	cmd := `while :; do echo "===NET_MAIN==="; ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || echo ""; echo "===NET==="; cat /proc/net/dev 2>/dev/null | awk 'NR>2 {gsub(/:$/,"",$1); print $1" "$2" "$10}'; sleep 1; done`
 
 	if err := session.Start(cmd); err != nil {
+		if contextError := setupContext.Err(); contextError != nil {
+			err = contextError
+		}
 		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	go func() {
-		select {
-		case <-done:
-			_ = session.Close()
-		case <-streamFinished:
-		}
-	}()
+	stopSetup()
+	if err := setupContext.Err(); err != nil {
+		writeSysInfoNetMessage(wsConn, &wsWriteMu, &ResponseBody{Msg: err.Error()})
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	cancelSetup()
 
 	var prev *netSnapshot
 	var snap *netSnapshot
@@ -824,6 +848,9 @@ func parseCPUFields(line string) []float64 {
 
 func cpuTotals(values []float64) (float64, float64) {
 	total := 0.0
+	if len(values) > 8 {
+		values = values[:8]
+	}
 	for _, value := range values {
 		total += value
 	}

@@ -84,6 +84,9 @@ func (sclient *SSHClient) Close() {
 				log.Println("SSHClient Close recover from panic: ", err)
 			}
 		}()
+		if sclient.Client != nil {
+			_ = sclient.Client.Close()
+		}
 		if sclient.StdinPipe != nil {
 			_ = sclient.StdinPipe.Close()
 		}
@@ -92,9 +95,6 @@ func (sclient *SSHClient) Close() {
 		}
 		if sclient.Sftp != nil {
 			_ = sclient.Sftp.Close()
-		}
-		if sclient.Client != nil {
-			_ = sclient.Client.Close()
 		}
 	})
 }

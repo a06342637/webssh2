@@ -90,6 +90,10 @@ var remoteEditorTargetLocks = struct {
 	entries map[string]*remoteEditorTargetLock
 }{entries: make(map[string]*remoteEditorTargetLock)}
 
+var createFileSFTPClient = func(client *core.SSHClient) error {
+	return client.CreateSftp()
+}
+
 func validateRemoteTextContent(content []byte, maxBytes int64, action, pastAction string) error {
 	if int64(len(content)) > maxBytes {
 		return fmt.Errorf("file is too large to %s (maximum %s)", action, Bytefmt(uint64(maxBytes)))
@@ -191,7 +195,7 @@ func formatRemoteFileSize(size int64, isDir bool) string {
 }
 
 func statRemoteTarget(client *sftp.Client, remotePath string) (os.FileInfo, string, error) {
-	remotePath = pathpkg.Clean(strings.TrimSpace(remotePath))
+	remotePath = pathpkg.Clean(remotePath)
 	if remotePath == "." || remotePath == "" {
 		return nil, "", fmt.Errorf("missing path")
 	}
@@ -304,7 +308,6 @@ func RemoteEditorRequestBodyLimit() int64 {
 }
 
 func resolveRemotePreviewTarget(client *sftp.Client, requestedPath string, maxBytes int64) (os.FileInfo, string, remotePreviewSpec, error) {
-	requestedPath = strings.TrimSpace(requestedPath)
 	if requestedPath == "" {
 		return nil, "", remotePreviewSpec{}, fmt.Errorf("missing path")
 	}
@@ -330,7 +333,7 @@ func remoteEditorTargetKey(client core.SSHClient, path string) string {
 		strings.ToLower(strings.TrimSpace(client.Hostname)),
 		strconv.Itoa(client.Port),
 		strings.TrimSpace(client.Username),
-		pathpkg.Clean(strings.TrimSpace(path)),
+		pathpkg.Clean(path),
 	}, "\x00")
 }
 
@@ -376,7 +379,6 @@ func acquireRemoteEditorTargets(ctx context.Context, keys ...string) (func(), er
 	unique := make(map[string]struct{}, len(keys))
 	ordered := make([]string, 0, len(keys))
 	for _, key := range keys {
-		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
@@ -416,7 +418,6 @@ func remoteFileVersion(info os.FileInfo, content []byte) string {
 }
 
 func resolveRemoteTextTarget(client *sftp.Client, requestedPath string) (os.FileInfo, string, error) {
-	requestedPath = strings.TrimSpace(requestedPath)
 	if requestedPath == "" {
 		return nil, "", fmt.Errorf("missing path")
 	}
@@ -482,7 +483,6 @@ func writeRemoteTextFileTarget(client *sftp.Client, path string, content []byte,
 	if err != nil {
 		return remoteFileSnapshot{}, err
 	}
-	expectedTargetPath = strings.TrimSpace(expectedTargetPath)
 	if expectedTargetPath != "" {
 		expectedTargetPath = pathpkg.Clean(expectedTargetPath)
 		if current.TargetPath != expectedTargetPath {
@@ -572,7 +572,6 @@ func writeRemoteTextFileTarget(client *sftp.Client, path string, content []byte,
 }
 
 func createRemoteTextFile(client *sftp.Client, path string, content []byte, maxBytes int64) (remoteFileSnapshot, error) {
-	path = strings.TrimSpace(path)
 	name := pathpkg.Base(path)
 	if path == "" || path == "/" || name == "." || name == ".." || name == "/" || len([]byte(name)) > 255 || strings.IndexFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 		return remoteFileSnapshot{}, fmt.Errorf("invalid file path")
@@ -647,7 +646,7 @@ func saveRemoteTextFileWithLock(ctx context.Context, lockKey string, client *sft
 		if strings.TrimSpace(request.Version) != "" {
 			return remoteFileSnapshot{}, fmt.Errorf("new files must not include an existing version")
 		}
-		if strings.TrimSpace(request.TargetPath) != "" {
+		if request.TargetPath != "" {
 			return remoteFileSnapshot{}, fmt.Errorf("new files must not include an existing target path")
 		}
 		return createRemoteTextFile(client, request.Path, []byte(request.Content), maxBytes)
@@ -656,7 +655,7 @@ func saveRemoteTextFileWithLock(ctx context.Context, lockKey string, client *sft
 }
 
 func remoteSnapshotData(path string, snapshot remoteFileSnapshot, maxBytes int64) gin.H {
-	requestedPath := pathpkg.Clean(strings.TrimSpace(path))
+	requestedPath := pathpkg.Clean(path)
 	return gin.H{
 		"path":       requestedPath,
 		"targetPath": snapshot.TargetPath,
@@ -690,14 +689,14 @@ func OpenFileForEdit(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	defer sshClient.Close()
 	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
 	defer stopCancellation()
-	path := strings.TrimSpace(request.Path)
+	path := request.Path
 	maxBytes := remoteEditorMaxBytes()
 	snapshot, err := readRemoteTextFile(sshClient.Sftp, path, maxBytes)
 	if err != nil {
@@ -736,7 +735,7 @@ func PreviewFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
 		return &responseBody
@@ -745,7 +744,7 @@ func PreviewFile(c *gin.Context) *ResponseBody {
 	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
 	defer stopCancellation()
 
-	requestedPath := strings.TrimSpace(request.Path)
+	requestedPath := request.Path
 	maxBytes := remotePreviewMaxBytes()
 	info, targetPath, spec, err := resolveRemotePreviewTarget(sshClient.Sftp, requestedPath, maxBytes)
 	if err != nil {
@@ -818,19 +817,18 @@ func SaveEditedFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	defer sshClient.Close()
 	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &sshClient)
 	defer stopCancellation()
-	path := strings.TrimSpace(request.Path)
+	path := request.Path
 	request.Path = path
 	maxBytes := remoteEditorMaxBytes()
 	lockPath := path
 	if !request.Create {
-		request.TargetPath = strings.TrimSpace(request.TargetPath)
 		if request.TargetPath == "" {
 			_, resolvedPath, resolveErr := resolveRemoteTextTarget(sshClient.Sftp, path)
 			if resolveErr != nil {
@@ -853,7 +851,6 @@ func SaveEditedFile(c *gin.Context) *ResponseBody {
 }
 
 func deleteRemoteFile(client *sftp.Client, remotePath string) error {
-	remotePath = strings.TrimSpace(remotePath)
 	if remotePath == "" {
 		return fmt.Errorf("missing path")
 	}
@@ -905,7 +902,7 @@ func DeleteFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	remotePath := pathpkg.Clean(strings.TrimSpace(request.Path))
+	remotePath := pathpkg.Clean(request.Path)
 	if remotePath == "." || remotePath == "/" {
 		responseBody.Msg = "invalid file path"
 		return &responseBody
@@ -921,7 +918,7 @@ func DeleteFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -937,7 +934,6 @@ func DeleteFile(c *gin.Context) *ResponseBody {
 }
 
 func validateRemoteRenameName(name string) (string, error) {
-	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." {
 		return "", fmt.Errorf("请输入有效的新名称")
 	}
@@ -956,7 +952,7 @@ func validateRemoteRenameName(name string) (string, error) {
 }
 
 func renameRemotePath(ctx context.Context, sshClient core.SSHClient, client *sftp.Client, sourcePath, newName string) (string, bool, error) {
-	sourcePath = pathpkg.Clean(strings.TrimSpace(sourcePath))
+	sourcePath = pathpkg.Clean(sourcePath)
 	if sourcePath == "." || sourcePath == "/" || sourcePath == "" {
 		return "", false, fmt.Errorf("不能重命名根目录")
 	}
@@ -1053,7 +1049,7 @@ func RenameFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	responseBody.Data = gin.H{
-		"oldPath": pathpkg.Clean(strings.TrimSpace(request.Path)),
+		"oldPath": pathpkg.Clean(request.Path),
 		"newPath": newPath,
 		"name":    pathpkg.Base(newPath),
 		"isDir":   isDir,
@@ -1097,7 +1093,6 @@ func (reader *idleReadCloser) Close() error {
 }
 
 func validateUploadSubdirectory(value string) (string, error) {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", nil
 	}
@@ -1171,14 +1166,14 @@ func UploadFile(c *gin.Context) *ResponseBody {
 				responseBody.Msg = decodeErr.Error()
 				return &responseBody
 			}
-			if err := client.CreateSftp(); err != nil {
+			if err := createFileSFTPClient(&client); err != nil {
 				releaseSSH()
 				_ = part.Close()
 				responseBody.Msg = err.Error()
 				return &responseBody
 			}
 			stopCancellation := closeSSHOnContextDone(c.Request.Context(), &client)
-			path := strings.TrimSpace(fields["path"])
+			path := fields["path"]
 			if path == "" {
 				path = detectHomeDir(client.Sftp, client.Username)
 			}
@@ -1388,15 +1383,22 @@ func reserveRemoteFolderArchive(client *sftp.Client, directory string) (string, 
 			if os.IsExist(err) {
 				continue
 			}
+			if sftpSessionConnectionBroken(err) {
+				return archivePath, err
+			}
 			return "", err
 		}
 		if err := file.Chmod(0o600); err != nil {
 			_ = file.Close()
-			_ = client.Remove(archivePath)
+			if cleanupErr := removeRemoteFolderArchive(client, archivePath); cleanupErr != nil {
+				return archivePath, errors.Join(err, cleanupErr)
+			}
 			return "", err
 		}
 		if err := file.Close(); err != nil {
-			_ = client.Remove(archivePath)
+			if cleanupErr := removeRemoteFolderArchive(client, archivePath); cleanupErr != nil {
+				return archivePath, errors.Join(err, cleanupErr)
+			}
 			return "", err
 		}
 		return archivePath, nil
@@ -1417,7 +1419,7 @@ func isRemoteFolderArchiveName(name string) bool {
 }
 
 func removeRemoteFolderArchive(client *sftp.Client, archivePath string) error {
-	archivePath = pathpkg.Clean(strings.TrimSpace(archivePath))
+	archivePath = pathpkg.Clean(archivePath)
 	name := pathpkg.Base(archivePath)
 	if archivePath == "." || !isRemoteFolderArchiveName(name) {
 		return fmt.Errorf("invalid temporary archive path")
@@ -1442,7 +1444,7 @@ func cleanupStaleRemoteFolderArchives(client *sftp.Client, directories ...string
 	seen := make(map[string]struct{}, len(directories))
 	now := time.Now()
 	for _, directory := range directories {
-		directory = pathpkg.Clean(strings.TrimSpace(directory))
+		directory = pathpkg.Clean(directory)
 		if directory == "." || directory == "" {
 			continue
 		}
@@ -1467,7 +1469,7 @@ func cleanupStaleRemoteFolderArchives(client *sftp.Client, directories ...string
 }
 
 func prepareRemoteDirectoryArchive(ctx context.Context, client *sftp.Client, sourcePath string, archive remoteDirectoryArchiver) (string, os.FileInfo, error) {
-	sourcePath = pathpkg.Clean(strings.TrimSpace(sourcePath))
+	sourcePath = pathpkg.Clean(sourcePath)
 	if sourcePath == "." || sourcePath == "" {
 		return "", nil, fmt.Errorf("missing directory path")
 	}
@@ -1491,25 +1493,34 @@ func prepareRemoteDirectoryArchive(ctx context.Context, client *sftp.Client, sou
 		}
 		archivePath, err := reserveRemoteFolderArchive(client, directory)
 		if err != nil {
+			if archivePath != "" {
+				return archivePath, nil, err
+			}
 			failures = append(failures, directory+": "+err.Error())
 			continue
 		}
 		if err := archive(ctx, sourcePath, archivePath); err != nil {
-			_ = removeRemoteFolderArchive(client, archivePath)
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return "", nil, ctxErr
+				return archivePath, nil, ctxErr
+			}
+			if cleanupErr := removeRemoteFolderArchive(client, archivePath); cleanupErr != nil {
+				return archivePath, nil, errors.Join(err, cleanupErr)
 			}
 			failures = append(failures, directory+": "+err.Error())
 			continue
 		}
 		info, err := client.Lstat(archivePath)
 		if err != nil {
-			_ = removeRemoteFolderArchive(client, archivePath)
+			if cleanupErr := removeRemoteFolderArchive(client, archivePath); cleanupErr != nil {
+				return archivePath, nil, errors.Join(err, cleanupErr)
+			}
 			failures = append(failures, directory+": verify archive: "+err.Error())
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 {
-			_ = removeRemoteFolderArchive(client, archivePath)
+			if cleanupErr := removeRemoteFolderArchive(client, archivePath); cleanupErr != nil {
+				return archivePath, nil, cleanupErr
+			}
 			failures = append(failures, directory+": remote archive is empty or invalid")
 			continue
 		}
@@ -1522,7 +1533,7 @@ func prepareRemoteDirectoryArchive(ctx context.Context, client *sftp.Client, sou
 }
 
 func remoteFolderArchiveDownloadName(requestedPath string) string {
-	name := pathpkg.Base(pathpkg.Clean(strings.TrimSpace(requestedPath)))
+	name := pathpkg.Base(pathpkg.Clean(requestedPath))
 	if name == "." || name == "/" || name == "" {
 		name = "folder"
 	}
@@ -1701,6 +1712,17 @@ func downloadRemoteDirectoryArchive(c *gin.Context, sshClient *core.SSHClient, r
 		// the archive beyond the configured bound.
 		return writeRemoteDirectoryArchiveViaSFTP(ctx, sshClient.Sftp, sourcePath, archivePath)
 	})
+	if archivePath != "" {
+		defer func() {
+			stopCancellation()
+			cleanupCtx, stopCleanup := context.WithTimeout(context.Background(), folderArchiveCleanupTimeout)
+			defer stopCleanup()
+			defer scrubSFTPSessionCredentials(sshClient)
+			if cleanupErr := cleanupRemoteFolderArchive(cleanupCtx, sshClient, archivePath); cleanupErr != nil {
+				log.Printf("could not remove remote folder archive %q: %v", archivePath, cleanupErr)
+			}
+		}()
+	}
 	if err != nil {
 		responseBody.Msg = err.Error()
 		status := ResponseHTTPStatus(responseBody)
@@ -1710,11 +1732,6 @@ func downloadRemoteDirectoryArchive(c *gin.Context, sshClient *core.SSHClient, r
 		c.JSON(status, responseBody)
 		return
 	}
-	defer func() {
-		if cleanupErr := removeRemoteFolderArchive(sshClient.Sftp, archivePath); cleanupErr != nil {
-			log.Printf("could not remove remote folder archive %q: %v", archivePath, cleanupErr)
-		}
-	}()
 	archiveFile, err := sshClient.Download(archivePath)
 	if err != nil {
 		responseBody.Msg = err.Error()
@@ -1759,7 +1776,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer releaseDownload()
-	path := strings.TrimSpace(request.Path)
+	path := request.Path
 	sshInfo := request.SSHInfo
 	release, ok := acquireSSHSlot(c)
 	if !ok {
@@ -1773,7 +1790,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		c.JSON(http.StatusBadRequest, responseBody)
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		c.JSON(http.StatusInternalServerError, responseBody)
@@ -1852,7 +1869,7 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 	readTimer := time.AfterFunc(30*time.Second, func() { _ = c.Request.Body.Close() })
 	sshInfo := c.PostForm("sshInfo")
 	rawURL := strings.TrimSpace(c.PostForm("url"))
-	dir := strings.TrimSpace(c.DefaultPostForm("path", ""))
+	dir := c.DefaultPostForm("path", "")
 	filename := sanitizeRemoteFilename(c.PostForm("filename"))
 	readTimer.Stop()
 	if rawURL == "" {
@@ -1879,7 +1896,7 @@ func RemoteDownloadFile(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.CreateSftp(); err != nil {
+	if err := createFileSFTPClient(&sshClient); err != nil {
 		fmt.Println(err)
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -2044,7 +2061,6 @@ func filenameFromDisposition(value string) string {
 }
 
 func sanitizeRemoteFilename(filename string) string {
-	filename = strings.TrimSpace(filename)
 	filename = strings.ReplaceAll(filename, "\\", "/")
 	filename = pathpkg.Base(filename)
 	filename = strings.Map(func(r rune) rune {
@@ -2053,8 +2069,7 @@ func sanitizeRemoteFilename(filename string) string {
 		}
 		return r
 	}, filename)
-	filename = strings.TrimSpace(filename)
-	if filename == "" || filename == "." || filename == ".." || filename == "/" {
+	if strings.TrimSpace(filename) == "" || filename == "." || filename == ".." || filename == "/" {
 		return ""
 	}
 	return filename
@@ -2131,7 +2146,7 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 }
 
 func readSFTPDirectoryForList(client *core.SSHClient, requestedPath string) (string, string, []os.FileInfo, error) {
-	path := strings.TrimSpace(requestedPath)
+	path := requestedPath
 	home := ""
 	if path == "" {
 		if client.Username == "root" {

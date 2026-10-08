@@ -676,6 +676,9 @@ func currentAccount(c *gin.Context) (string, bool) {
 }
 
 func (s *AccountStore) sessionForTokenLocked(token string) (string, StoredSession, bool) {
+	if token == "" || strings.HasPrefix(token, "sha256:") {
+		return "", StoredSession{}, false
+	}
 	storageKey := sessionStorageKey(token)
 	session, ok := s.db.Sessions[storageKey]
 	if ok {
@@ -685,6 +688,15 @@ func (s *AccountStore) sessionForTokenLocked(token string) (string, StoredSessio
 	// startup migration was introduced.
 	session, ok = s.db.Sessions[token]
 	return token, session, ok
+}
+
+func (s *AccountStore) sessionMatchesAccountLocked(token, username string) bool {
+	_, session, exists := s.sessionForTokenLocked(token)
+	if !exists || session.Username != username || session.ExpiresAt <= time.Now().Unix() {
+		return false
+	}
+	_, exists = s.db.Users[username]
+	return exists
 }
 
 func requireAccount(c *gin.Context) (string, bool) {
@@ -990,11 +1002,7 @@ func AuthLogout(c *gin.Context) {
 	if accountStore != nil {
 		if token, err := c.Cookie(sessionCookieName); err == nil && token != "" {
 			accountStore.mu.Lock()
-			storageKey := sessionStorageKey(token)
-			if _, exists := accountStore.db.Sessions[storageKey]; !exists {
-				storageKey = token
-			}
-			if _, exists := accountStore.db.Sessions[storageKey]; exists {
+			if storageKey, _, exists := accountStore.sessionForTokenLocked(token); exists {
 				before := accountStore.snapshotLocked()
 				delete(accountStore.db.Sessions, storageKey)
 				if err := accountStore.saveLocked(); err != nil {
@@ -1187,6 +1195,11 @@ func AdminDeleteAccount(c *gin.Context) {
 	delete(accountStore.db.Users, username)
 	delete(accountStore.db.Scripts, username)
 	accountStore.deleteUserSessionsLocked(username, "")
+	for key, share := range accountStore.db.Shares {
+		if share.Owner == username {
+			delete(accountStore.db.Shares, key)
+		}
+	}
 	if err := accountStore.saveLocked(); err != nil {
 		accountStore.restoreLocked(before)
 		accountStore.mu.Unlock()
@@ -1449,7 +1462,13 @@ func SyncScriptBookmarks(c *gin.Context) {
 	}
 	baseRevision := sanitizeScriptRevision(req.BaseRevision)
 
+	sessionToken, _ := c.Cookie(sessionCookieName)
 	accountStore.mu.Lock()
+	if !accountStore.sessionMatchesAccountLocked(sessionToken, username) {
+		accountStore.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录"})
+		return
+	}
 
 	serverNow := time.Now().UnixMilli()
 	cloud := accountStore.db.Scripts[username]

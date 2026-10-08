@@ -13,10 +13,10 @@ const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose
 const setupSource = fs.readFileSync(path.join(__dirname, '..', 'setup.sh'), 'utf8');
 const updateScriptSource = fs.readFileSync(path.join(__dirname, '..', 'update.sh'), 'utf8');
 
-function extractFunction(name) {
-    const start = appSource.indexOf('function ' + name + '(');
+function extractFunction(name, source = appSource) {
+    const start = source.indexOf('function ' + name + '(');
     assert.notEqual(start, -1, 'missing function ' + name);
-    const open = appSource.indexOf('{', start);
+    const open = source.indexOf('{', start);
     let depth = 0;
     let quote = '';
     let escaped = false;
@@ -24,9 +24,9 @@ function extractFunction(name) {
     let blockComment = false;
     let regex = false;
     let regexClass = false;
-    for (let i = open; i < appSource.length; i++) {
-        const ch = appSource[i];
-        const next = appSource[i + 1];
+    for (let i = open; i < source.length; i++) {
+        const ch = source[i];
+        const next = source[i + 1];
         if (lineComment) {
             if (ch === '\n') lineComment = false;
             continue;
@@ -70,8 +70,8 @@ function extractFunction(name) {
         }
         if (ch === '/') {
             let previousIndex = i - 1;
-            while (previousIndex >= open && /\s/.test(appSource[previousIndex])) previousIndex--;
-            const previous = previousIndex >= open ? appSource[previousIndex] : '';
+            while (previousIndex >= open && /\s/.test(source[previousIndex])) previousIndex--;
+            const previous = previousIndex >= open ? source[previousIndex] : '';
             if (!previous || /[\(\[\{=,:;!?&|+\-*%^~<>]/.test(previous)) {
                 regex = true;
                 regexClass = false;
@@ -84,14 +84,14 @@ function extractFunction(name) {
             continue;
         }
         if (ch === '{') depth++;
-        if (ch === '}' && --depth === 0) return appSource.slice(start, i + 1);
+        if (ch === '}' && --depth === 0) return source.slice(start, i + 1);
     }
     throw new Error('unterminated function ' + name);
 }
 
-function loadFunctions(names, sandbox) {
+function loadFunctions(names, sandbox, source = appSource) {
     vm.createContext(sandbox);
-    vm.runInContext(names.map(extractFunction).join('\n'), sandbox);
+    vm.runInContext(names.map((name) => extractFunction(name, source)).join('\n'), sandbox);
     return sandbox;
 }
 
@@ -522,6 +522,28 @@ test('terminal close marks the session offline and cancels dependent work', () =
     assert.match(connectSource, /session\.ws = null;/);
     assert.match(connectSource, /stopServerInfoNetStream\(session\);/);
     assert.match(connectSource, /cancelSessionSftpRequests\(session, false\);/);
+});
+
+test('terminal admission errors stay visible without success or fallback reconnects', () => {
+    const sockets = [], notices = [], output = [];
+    const session = { hostname: 'server', term: { cols: 80, rows: 24, onData: () => ({dispose() {}}), write: data => output.push(data) } };
+    const sandbox = loadFunctions(['connectSession', 'parseTerminalControlMessage'], {
+        sessions: [session], activeIdx: 0, TERMINAL_CONTROL_PREFIX: '__WEBSSH_CONTROL__:',
+        WebSocket: function () { this.readyState = 0; sockets.push(this); },
+        buildTerminalWebSocketURL: (cols, rows, fallback) => fallback ? 'ws://fallback/term' : 'ws://direct/term',
+        stopTopbarMetricsPolling() {}, stopServerInfoNetStream() {}, cancelSessionSftpRequests() {},
+        handleRemoteEditorsSessionDisconnected() {}, addEventListener() {},
+        setTimeout: () => 1, clearTimeout() {},
+        showToast: (message, kind) => notices.push({message, kind}),
+    });
+    sandbox.connectSession(session);
+    sockets[0].onmessage({data:'__WEBSSH_CONTROL__:' + JSON.stringify({type:'connection-error',message:'SSH 终端数量已达上限'})});
+    sockets[0].onclose();
+    assert.equal(sockets.length, 1);
+    assert.equal(session._connected, false);
+    assert.equal(session.ws, null);
+    assert.deepEqual(output, []);
+    assert.deepEqual(notices, [{message:'server 连接失败：SSH 终端数量已达上限',kind:'error'}]);
 });
 
 test('credential-bearing path login is gated behind an explicit server flag', () => {
@@ -2230,8 +2252,8 @@ test('sharing keeps the key in the fragment and only uploads ciphertext', () => 
 test('share history is listed locally and revocable server-side', () => {
     // 完整链接（含解密密钥）只能留在本机：服务端没有密钥，拼不出链接。
     assert.match(shareSource, /CONNECTION_SHARE_HISTORY_KEY/);
-    assert.match(shareSource, /function rememberConnectionShare\(entry\)/);
-    assert.match(shareSource, /function forgetConnectionShare\(token\)/);
+    assert.match(shareSource, /function rememberConnectionShare\(entry, scope\)/);
+    assert.match(shareSource, /function forgetConnectionShare\(token, scope\)/);
     assert.match(shareSource, /function renderConnectionShareHistory\(\)/);
     assert.match(shareSource, /function deleteConnectionShare\(id, token\)/);
     assert.match(shareSource, /'\/api\/shares'/);
@@ -2248,7 +2270,7 @@ test('share history is listed locally and revocable server-side', () => {
     const renderBody = render.slice(0, render.indexOf('\nfunction '));
     assert.match(renderBody, /alive\[entry\.id\] = true/);
     assert.match(renderBody, /!item\.id \|\| alive\[item\.id\]/);
-    assert.match(renderBody, /writeConnectionShareHistory\(pruned\)/);
+    assert.match(renderBody, /writeConnectionShareHistory\(pruned, identity\.scope\)/);
     // 登录/登出后列表内容会变，弹窗开着时要重画。
     assert.match(appSource, /shareModal\.classList\.contains\('show'\)\) renderConnectionShareHistory\(\)/);
 });
@@ -2433,4 +2455,719 @@ test('RDP login failures ask for credentials instead of retrying the same passwo
     // 改完密码按回车就能提交，不用伸手去点按钮（SSH 侧早就有，RDP 漏了）。
     assert.match(appSource, /\['rdpRetryHost', 'rdpRetryPort', 'rdpRetryUser', 'rdpRetryDomain', 'rdpRetryPass'\]/);
     assert.match(appSource, /e\.key === 'Enter' && typeof submitRdpAuthRetry === 'function'\) submitRdpAuthRetry\(\)/);
+});
+
+function createRdpRelayHarness() {
+    const elements = new Map();
+    const storage = new Map();
+    const requests = [];
+    function element(id) {
+        if (!elements.has(id)) elements.set(id, { value: '', checked: false, classList: { add() {} } });
+        return elements.get(id);
+    }
+    const sandbox = loadFunctions(
+        ['saveRdpSettings', 'openRdpSettings', 'activeRdpRelay', 'rdpRelayConfig', 'requestRdpCredential'],
+        {
+            RDP_SETTINGS_KEY: 'settings', RDP_RELAY_KEY: 'relay', rdpPendingRelay: null,
+            activeIdx: -1, sessions: [], AbortController,
+            document: { getElementById: element },
+            rdpSettings: () => ({ openInNewWindow: false }),
+            safeStorageGet: (key) => storage.get(key),
+            safeStorageSet: (key, value) => { storage.set(key, value); return true; },
+            safeStorageRemove: (key) => storage.delete(key),
+            invalidateRdpClipboardModifierCache() {}, updateRdpQuickSummary() {},
+            applyRdpToolbarMode() {}, activeRdpSession: () => null, closeRdpSettings() {}, showToast() {},
+            onRdpResolutionChange() {}, onRdpRelayKindChange() {},
+            fetch: (url, options) => {
+                requests.push({ url, body: JSON.parse(options.body) });
+                return Promise.resolve({ ok: true, json: () => Promise.resolve({ Msg: 'success', Data: {} }) });
+            },
+        }, rdpSource,
+    );
+    element('rdpRelayHost').value = 'relay.example';
+    element('rdpRelayPort').value = '22';
+    element('rdpRelayUser').value = 'relay-user';
+    return { sandbox, storage, requests, element };
+}
+
+for (const scenario of [
+    { kind: 'ssh', field: 'rdpRelayPass', property: 'password' },
+    { kind: 'ssh', field: 'rdpRelayKey', property: 'privateKey' },
+    { kind: 'socks5', field: 'rdpRelayPass', property: 'password' },
+]) {
+    test('unremembered ' + scenario.kind + ' relay retains its ' + scenario.property + ' for the current connection', async () => {
+        const harness = createRdpRelayHarness();
+        harness.element('rdpRelayKind').value = scenario.kind;
+        harness.element(scenario.field).value = 'in-memory-secret';
+        harness.sandbox.saveRdpSettings();
+        const relay = harness.sandbox.activeRdpRelay();
+        await harness.sandbox.requestRdpCredential({ hostname: 'desktop.example', port: 3389, relay });
+        assert.equal(harness.storage.has('relay'), false);
+        assert.equal(harness.requests[0].body.relay[scenario.property], 'in-memory-secret');
+        harness.sandbox.openRdpSettings();
+        assert.equal(harness.element(scenario.field).value, 'in-memory-secret');
+        assert.equal(harness.element('rdpRememberRelay').checked, false);
+    });
+}
+
+test('remembering a relay persists it, and disabling it removes both the saved and pending route', () => {
+    const harness = createRdpRelayHarness();
+    harness.element('rdpRelayKind').value = 'ssh';
+    harness.element('rdpRelayPass').value = 'remembered-secret';
+    harness.element('rdpRememberRelay').checked = true;
+    harness.sandbox.saveRdpSettings();
+    assert.equal(JSON.parse(harness.storage.get('relay')).password, 'remembered-secret');
+    harness.element('rdpRelayKind').value = 'none';
+    harness.element('rdpRememberRelay').checked = false;
+    harness.sandbox.saveRdpSettings();
+    assert.equal(harness.storage.has('relay'), false);
+    assert.equal(harness.sandbox.activeRdpRelay().kind, 'none');
+});
+
+function createRdpConnectionHarness() {
+    const loading = deferred();
+    const credentials = [];
+    const connections = [];
+    const errors = [];
+    const state = { inputAttachments: 0, inputCleanups: 0 };
+    const session = {
+        id: 'rdp-session', hostname: 'desktop.example', port: 3389, username: 'user', password: 'secret',
+        rdpSettings: { clipboard: false, dynamicResize: false, startFullscreen: false },
+        canvas: { style: {}, focus() {} }, resizeObs: { disconnect() {} },
+        rdpSession: null, _closing: false, _connected: false, _connectGeneration: 0,
+    };
+    class SessionBuilder {
+        connect() {
+            const request = deferred();
+            connections.push(request);
+            return request.promise;
+        }
+    }
+    for (const name of ['username', 'password', 'serverDomain', 'destination', 'proxyAddress', 'authToken',
+        'desktopSize', 'renderCanvas', 'extension', 'setCursorStyleCallbackContext', 'setCursorStyleCallback', 'canvasResizedCallback']) {
+        SessionBuilder.prototype[name] = function () { return this; };
+    }
+    const module = { SessionBuilder, DesktopSize: class {}, Extension: class {} };
+    const sandbox = loadFunctions(
+        ['cancelRdpConnectionAttempt', 'rdpConnectionIsCurrent', 'discardRdpClient', 'connectRdpSession',
+            'requestRdpCredential', 'startRdpConnection', 'handleRdpSessionEnd', 'closeRdpSession', 'reconnectRdpTab'],
+        {
+            sessions: [session], AbortController, navigator: {}, location: { protocol: 'https:', host: 'webssh.example' },
+            loadRdpWasm: () => loading.promise, setRdpOverlay() {}, setStatus() {}, renderTabs() {},
+            activeRdpSession: () => session, rdpTargetSize: () => ({ width: 800, height: 600 }),
+            applyRdpCanvasScale() {}, isRdpAuthFailure: () => false,
+            rdpErrorText: (target, error) => error.message, showToast: (message) => errors.push(message),
+            attachRdpInput: () => { state.inputAttachments++; return () => { state.inputCleanups++; }; },
+            fetch: (url, options) => {
+                const request = deferred();
+                credentials.push({ request, signal: options.signal });
+                return request.promise;
+            },
+        }, rdpSource,
+    );
+    function client() {
+        const running = deferred();
+        const counts = { shutdown: 0, free: 0, run: 0 };
+        const instance = {
+            desktopSize: () => ({ width: 800, height: 600 }),
+            run: () => { counts.run++; return running.promise; },
+            shutdown: () => { counts.shutdown++; },
+            free: () => { counts.free++; },
+        };
+        return { instance, running, counts };
+    }
+    async function finishCredential(index) {
+        credentials[index].request.resolve({ ok: true, json: () => Promise.resolve({ Msg: 'success', Data: { credential: 'ticket' } }) });
+        await flushPromises();
+    }
+    function close() {
+        sandbox.closeRdpSession(session);
+        sandbox.sessions.splice(0, 1);
+    }
+    return { sandbox, session, loading, module, credentials, connections, errors, state, client, finishCredential, close };
+}
+
+test('closing RDP during module loading never requests credentials or starts a connection', async () => {
+    const harness = createRdpConnectionHarness();
+    const connecting = harness.sandbox.connectRdpSession(harness.session);
+    harness.close();
+    harness.loading.resolve(harness.module);
+    await connecting;
+    assert.equal(harness.credentials.length, 0);
+    assert.equal(harness.connections.length, 0);
+    assert.equal(harness.session._connected, false);
+    assert.deepEqual(harness.errors, []);
+});
+
+test('closing RDP aborts its credential request and ignores a late successful response', async () => {
+    const harness = createRdpConnectionHarness();
+    const connecting = harness.sandbox.connectRdpSession(harness.session);
+    harness.loading.resolve(harness.module);
+    await flushPromises();
+    harness.close();
+    assert.equal(harness.credentials[0].signal.aborted, true);
+    await harness.finishCredential(0);
+    await connecting;
+    assert.equal(harness.connections.length, 0);
+    assert.equal(harness.session._credentialController, null);
+    assert.deepEqual(harness.errors, []);
+});
+
+test('a failed RDP credential request after close cannot repaint an error', async () => {
+    const harness = createRdpConnectionHarness();
+    const connecting = harness.sandbox.connectRdpSession(harness.session);
+    harness.loading.resolve(harness.module);
+    await flushPromises();
+    harness.close();
+    harness.credentials[0].request.reject(new Error('aborted'));
+    await connecting;
+    assert.deepEqual(harness.errors, []);
+});
+
+test('closing RDP during the handshake shuts down and frees a late client without running it', async () => {
+    const harness = createRdpConnectionHarness();
+    const connecting = harness.sandbox.connectRdpSession(harness.session);
+    harness.loading.resolve(harness.module);
+    await flushPromises();
+    await harness.finishCredential(0);
+    harness.close();
+    const late = harness.client();
+    harness.connections[0].resolve(late.instance);
+    await connecting;
+    assert.deepEqual(late.counts, { shutdown: 1, free: 1, run: 0 });
+    assert.equal(harness.state.inputAttachments, 0);
+    assert.equal(harness.session.rdpSession, null);
+    assert.equal(harness.session._connected, false);
+});
+
+test('a late RDP handshake cannot replace the client created by a newer retry', async () => {
+    const harness = createRdpConnectionHarness();
+    const first = harness.sandbox.connectRdpSession(harness.session);
+    harness.loading.resolve(harness.module);
+    await flushPromises();
+    await harness.finishCredential(0);
+    const retry = harness.sandbox.reconnectRdpTab();
+    await flushPromises();
+    await harness.finishCredential(1);
+    const current = harness.client();
+    harness.connections[1].resolve(current.instance);
+    await retry;
+    const stale = harness.client();
+    harness.connections[0].resolve(stale.instance);
+    await first;
+    assert.equal(harness.session.rdpSession, current.instance);
+    assert.equal(harness.session._connected, true);
+    assert.deepEqual(stale.counts, { shutdown: 1, free: 1, run: 0 });
+    assert.equal(harness.state.inputAttachments, 1);
+});
+
+test('termination of an old RDP client cannot disconnect its replacement', async () => {
+    const harness = createRdpConnectionHarness();
+    const first = harness.sandbox.connectRdpSession(harness.session);
+    harness.loading.resolve(harness.module);
+    await flushPromises();
+    await harness.finishCredential(0);
+    const previous = harness.client();
+    harness.connections[0].resolve(previous.instance);
+    await first;
+    const retry = harness.sandbox.reconnectRdpTab();
+    await flushPromises();
+    await harness.finishCredential(1);
+    const current = harness.client();
+    harness.connections[1].resolve(current.instance);
+    await retry;
+    previous.running.reject(new Error('old connection ended'));
+    await flushPromises();
+    assert.equal(harness.session.rdpSession, current.instance);
+    assert.equal(harness.session._connected, true);
+    assert.equal(previous.counts.free, 1);
+    assert.equal(harness.state.inputCleanups, 1);
+    assert.deepEqual(harness.errors, []);
+});
+
+function createShareHistoryHarness() {
+    const storage = new Map();
+    const elements = new Map();
+    const requests = [];
+    const messages = [];
+    const state = { failedKey: '', accountRefreshes: 0, copied: '' };
+    function element(id) {
+        if (!elements.has(id)) elements.set(id, { value: '', innerHTML: '', textContent: '', checked: false });
+        return elements.get(id);
+    }
+    const sandbox = loadFunctions(
+        ['connectionShareHistoryScope', 'connectionShareIdentitySnapshot', 'connectionShareIdentityIsCurrent', 'connectionShareResponseScope',
+            'connectionShareHistoryStorageKey', 'readConnectionShareHistoryItems', 'readConnectionShareHistory',
+            'writeConnectionShareHistory', 'rememberConnectionShare', 'forgetConnectionShare',
+            'renderConnectionShareHistory', 'connectionShareRelativeTime', 'copyConnectionShareHistoryLink',
+            'generateConnectionShareLink', 'deleteConnectionShare'],
+        {
+            CONNECTION_SHARE_HISTORY_KEY: 'share-history', CONNECTION_SHARE_MAX_TTL: 86400000,
+            CONNECTION_SHARE_PATH_PREFIX: '/s/', connectionShareHistoryGeneration: 0,
+            currentAccount: null, authStateGeneration: 0, connectionShareBusy: false,
+            document: { getElementById: element }, esc: String, escAttr: String,
+            safeStorageGet: (key) => storage.get(key),
+            safeStorageSet: (key, value) => { if (key === state.failedKey) return false; storage.set(key, value); return true; },
+            refreshAccountState: () => { state.accountRefreshes++; },
+            connectionShareActiveSession: () => ({ hostname: 'server.example' }),
+            buildConnectionSharePayload: () => ({ kind: 'ssh', data: {} }),
+            connectionShareCryptoAvailable: () => true,
+            encryptConnectionSharePayload: () => Promise.resolve({ ciphertext: 'encrypted', iv: 'iv', key: 'key' }),
+            connectionShareSummaryText: () => 'SSH server.example',
+            connectionShareOrigin: () => 'https://webssh.example',
+            connectionShareSetBusy: (busy) => { sandbox.connectionShareBusy = busy; },
+            copyConnectionShareLink: () => { state.copied = element('connectionShareUrl').value; },
+            showToast: (message) => messages.push(message),
+            fetch: (url, options) => {
+                const request = deferred();
+                requests.push({ request, url, options });
+                return request.promise;
+            },
+        }, shareSource,
+    );
+    function account(username) {
+        sandbox.currentAccount = username ? { username } : null;
+        sandbox.authStateGeneration++;
+        element('connectionShareUrl').value = '';
+    }
+    function record(id) {
+        return {
+            id, token: 'token-' + id, link: 'https://webssh.example/s/token-' + id + '#k=secret-' + id,
+            label: id, createdAt: Date.now(), expiresAt: Date.now() + 3600000,
+        };
+    }
+    function serverRecord(entry) {
+        return { id: entry.id, label: entry.label, expiresAt: Math.floor(entry.expiresAt / 1000) };
+    }
+    function reply(index, body, status = 200) {
+        requests[index].request.resolve({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) });
+    }
+    return { sandbox, storage, state, requests, messages, element, account, record, serverRecord, reply };
+}
+
+test('share history has separate account and guest storage scopes', () => {
+    const harness = createShareHistoryHarness();
+    for (const username of ['alice', 'bravo', '']) {
+        harness.account(username);
+        harness.sandbox.rememberConnectionShare(harness.record(username || 'guest'));
+    }
+    for (const username of ['alice', 'bravo', '']) {
+        harness.account(username);
+        const entries = harness.sandbox.readConnectionShareHistory();
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0].id, username || 'guest');
+    }
+    assert.equal(harness.storage.has('share-history'), false);
+});
+
+test('a logged-out share list cannot expose or delete the previous account link', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const entry = harness.record('alice-link');
+    harness.sandbox.rememberConnectionShare(entry);
+    harness.account('');
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    assert.doesNotMatch(harness.element('connectionShareHistoryList').innerHTML, /alice-link/);
+    harness.reply(0, { ok: true, data: { loggedIn: false, items: [] } });
+    await listing;
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:alice')[0].link, entry.link);
+    harness.account('alice');
+    const restored = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(1, { ok: true, data: { loggedIn: true, items: [harness.serverRecord(entry)] } });
+    await restored;
+    harness.sandbox.copyConnectionShareHistoryLink(entry.token);
+    assert.equal(harness.state.copied, entry.link);
+});
+
+test('a stale share response cannot prune or repaint after switching accounts', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    harness.sandbox.rememberConnectionShare(harness.record('alice-link'));
+    const first = harness.sandbox.renderConnectionShareHistory();
+    harness.account('bravo');
+    const bravo = harness.record('bravo-link');
+    harness.sandbox.rememberConnectionShare(bravo);
+    const second = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(1, { ok: true, data: { loggedIn: true, items: [harness.serverRecord(bravo)] } });
+    await second;
+    harness.reply(0, { ok: true, data: { loggedIn: true, items: [] } });
+    await first;
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:alice').length, 1);
+    assert.match(harness.element('connectionShareHistoryList').innerHTML, /bravo-link/);
+    assert.doesNotMatch(harness.element('connectionShareHistoryList').innerHTML, /alice-link/);
+});
+
+test('share pruning removes known dead links but preserves links created during the request', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    harness.sandbox.rememberConnectionShare(harness.record('burned'));
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    harness.sandbox.rememberConnectionShare(harness.record('created-later'));
+    harness.reply(0, { ok: true, data: { loggedIn: true, items: [] } });
+    await listing;
+    const entries = harness.sandbox.readConnectionShareHistory();
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].id, 'created-later');
+});
+
+test('legacy share links migrate only when the current server list proves their ownership', async () => {
+    const harness = createShareHistoryHarness();
+    const alice = harness.record('legacy-alice');
+    const guest = harness.record('legacy-guest');
+    harness.storage.set('share-history', JSON.stringify([alice, guest]));
+    const guestListing = harness.sandbox.renderConnectionShareHistory();
+    assert.doesNotMatch(harness.element('connectionShareHistoryList').innerHTML, /legacy-/);
+    harness.reply(0, { ok: true, data: { loggedIn: false, items: [harness.serverRecord(guest)] } });
+    await guestListing;
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, guest.link);
+    assert.deepEqual(JSON.parse(harness.storage.get('share-history')), [alice]);
+    harness.account('alice');
+    const accountListing = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(1, { ok: true, data: { loggedIn: true, items: [harness.serverRecord(alice)] } });
+    await accountListing;
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, alice.link);
+    assert.deepEqual(JSON.parse(harness.storage.get('share-history')), []);
+    assert.equal(harness.sandbox.readConnectionShareHistory('guest')[0].link, guest.link);
+});
+
+test('failed share migration never removes the legacy key copy', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const entry = harness.record('legacy-alice');
+    harness.storage.set('share-history', JSON.stringify([entry]));
+    harness.state.failedKey = harness.sandbox.connectionShareHistoryStorageKey();
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(0, { ok: true, data: { loggedIn: true, items: [harness.serverRecord(entry)] } });
+    await listing;
+    assert.equal(harness.storage.has(harness.state.failedKey), false);
+    assert.deepEqual(JSON.parse(harness.storage.get('share-history')), [entry]);
+});
+
+test('a signed-in response during guest bootstrap cannot claim or prune account links', async () => {
+    const harness = createShareHistoryHarness();
+    const entry = harness.record('legacy-alice');
+    harness.storage.set('share-history', JSON.stringify([entry]));
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(0, { ok: true, data: { loggedIn: true, items: [harness.serverRecord(entry)] } });
+    await listing;
+    assert.equal(harness.state.accountRefreshes, 1);
+    assert.equal(harness.sandbox.readConnectionShareHistory('guest').length, 0);
+    assert.deepEqual(JSON.parse(harness.storage.get('share-history')), [entry]);
+});
+
+test('switching accounts during share encryption prevents an upload under the new identity', async () => {
+    const harness = createShareHistoryHarness();
+    const encryption = deferred();
+    harness.sandbox.encryptConnectionSharePayload = () => encryption.promise;
+    harness.account('alice');
+    const generating = harness.sandbox.generateConnectionShareLink();
+    harness.account('bravo');
+    encryption.resolve({ ciphertext: 'encrypted', iv: 'iv', key: 'key' });
+    await generating;
+    assert.equal(harness.requests.length, 0);
+    assert.equal(harness.sandbox.connectionShareBusy, false);
+});
+
+test('a share created before an account switch keeps its key in the original scope', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const generating = harness.sandbox.generateConnectionShareLink();
+    await flushPromises();
+    assert.equal(harness.requests[0].url, '/api/share');
+    harness.account('bravo');
+    harness.reply(0, { ok: true, data: { id: 'created-alice', token: 'token-alice', expiresAt: Math.floor(Date.now() / 1000) + 3600 } });
+    await generating;
+    assert.equal(harness.sandbox.readConnectionShareHistory().length, 0);
+    assert.match(harness.sandbox.readConnectionShareHistory('account:alice')[0].link, /#k=key$/);
+    assert.equal(harness.element('connectionShareUrl').value, '');
+    assert.equal(harness.requests.length, 1);
+});
+
+test('a late share deletion removes only the initiating identity local record', async () => {
+    const harness = createShareHistoryHarness();
+    const alice = harness.record('alice-link');
+    const bravo = harness.record('bravo-link');
+    harness.sandbox.rememberConnectionShare(alice, 'account:alice');
+    harness.sandbox.rememberConnectionShare(bravo, 'account:bravo');
+    harness.account('alice');
+    const deleting = harness.sandbox.deleteConnectionShare(alice.id, alice.token);
+    harness.account('bravo');
+    harness.reply(0, { ok: true, data: { historyScope: 'account:alice' } });
+    await deleting;
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:alice').length, 0);
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, bravo.link);
+    assert.equal(harness.requests.length, 1);
+});
+
+function createCorruptScriptSyncHarness(corruption) {
+    const storage = new Map([
+        ['scripts::alice', '[]'], ['categories::alice', '[]'],
+        ['updated::alice', '123'], ['revision::alice', '4'],
+    ]);
+    const requests = [];
+    const messages = [];
+    if (corruption === 'json') storage.set('scripts::alice', '{broken');
+    if (corruption === 'shape') storage.set('scripts::alice', '{}');
+    if (corruption === 'categories') storage.set('categories::alice', '{broken');
+    const sandbox = loadFunctions(
+        ['safeStorageGet', 'storageReadIsUnavailable', 'scriptAccountName', 'scriptStorageKey',
+            'isScriptStorageBaseKey', 'activeStorageKey', 'scriptStorageGet', 'markScriptStorageCorrupt',
+            'loadBM', 'isScriptStorageCorrupt', 'getScriptUpdatedAt', 'getScriptRevision',
+            'normalizeImportedScripts', 'sortScriptBookmarks', 'loadSortedScriptBookmarks',
+            'normalizeScriptCategories', 'loadScriptCategories', 'captureScriptSyncSnapshot', 'syncScriptBookmarks'],
+        {
+            SBK: 'scripts', SCAT: 'categories', SBK_UPDATED: 'updated', SBK_REVISION: 'revision',
+            currentAccount: { username: 'alice' }, scriptStorageCorrupt: {}, storageReadFailed: {}, scriptSyncGeneration: 0,
+            MAX_SCRIPT_BOOKMARKS: 500, MAX_SCRIPT_CATEGORIES: 100, MAX_SCRIPT_COMMAND_CHARS: 20000,
+            localStorage: { getItem: (key) => {
+                if (corruption === 'unavailable' && key === 'scripts::alice') throw new Error('storage unavailable');
+                return storage.has(key) ? storage.get(key) : null;
+            } },
+            setCloudStatus: (message) => messages.push(message), showToast: (message) => messages.push(message),
+            apiJSON: (url, options) => { requests.push({ url, body: options.body }); return new Promise(() => {}); },
+        },
+    );
+    return { sandbox, storage, requests, messages };
+}
+
+for (const mode of ['auto', 'push']) {
+    for (const corruption of ['json', 'shape', 'categories', 'unavailable']) {
+        test('script ' + mode + ' sync blocks ' + corruption + ' storage before making a POST', () => {
+            const harness = createCorruptScriptSyncHarness(corruption);
+            harness.sandbox.syncScriptBookmarks(mode);
+            assert.equal(harness.sandbox.isScriptStorageCorrupt(), true);
+            assert.equal(harness.requests.length, 0);
+            assert.ok(harness.messages.some((message) => message.includes('损坏')));
+            assert.equal(harness.storage.get('revision::alice'), '4');
+        });
+    }
+}
+
+test('an explicit cloud pull never uploads corrupt local script content', () => {
+    const harness = createCorruptScriptSyncHarness('json');
+    harness.sandbox.syncScriptBookmarks('pull');
+    assert.equal(harness.requests.length, 1);
+    assert.equal(harness.requests[0].body.mode, 'pull');
+    assert.equal(Object.hasOwn(harness.requests[0].body, 'scripts'), false);
+    assert.equal(Object.hasOwn(harness.requests[0].body, 'categories'), false);
+});
+
+test('valid empty script workspaces are still allowed to upload', () => {
+    const harness = createCorruptScriptSyncHarness('none');
+    harness.sandbox.syncScriptBookmarks('push');
+    assert.equal(harness.requests.length, 1);
+    assert.equal(harness.requests[0].body.baseRevision, 4);
+    assert.equal(harness.requests[0].body.scripts.length, 0);
+});
+
+test('remote path normalization preserves whitespace that distinguishes sibling files', () => {
+    const sandbox = loadFunctions(['normalizeSftpDir', 'normalizeRemoteFilePath', 'sanitizeRemoteFileName',
+        'joinRemoteFilePath', 'utf8ByteLength'], { TextEncoder });
+    assert.equal(sandbox.normalizeSftpDir('/tmp /'), '/tmp ');
+    assert.equal(sandbox.normalizeRemoteFilePath('/tmp /report.txt '), '/tmp /report.txt ');
+    assert.notEqual(sandbox.normalizeRemoteFilePath('/tmp /report.txt '), sandbox.normalizeRemoteFilePath('/tmp /report.txt'));
+    assert.equal(sandbox.sanitizeRemoteFileName(' report.txt '), ' report.txt ');
+    assert.equal(sandbox.sanitizeRemoteFileName('   '), '');
+    assert.equal(sandbox.joinRemoteFilePath('/tmp ', ' report.txt '), '/tmp / report.txt ');
+});
+
+test('SFTP address navigation validates blank input without trimming a valid path', () => {
+    const input = { value: '/tmp ' };
+    const paths = [];
+    const sandbox = loadFunctions(['sftpGo'], {
+        document: { getElementById: () => input }, getActiveSession: () => ({}),
+        sftpLoad: (remotePath) => paths.push(remotePath),
+    });
+    sandbox.sftpGo();
+    input.value = '   ';
+    sandbox.sftpGo();
+    assert.deepEqual(paths, ['/tmp ', '/']);
+});
+
+function createWhitespaceFileOperationHarness() {
+    const elements = new Map();
+    const requests = [];
+    const renamed = [];
+    const refreshed = [];
+    const session = { id: 'ssh-session', sshInfo: 'credential', sftpSessionId: 'sftp-session', _connected: true, sftpPath: '/tmp ' };
+    function element(id) {
+        if (!elements.has(id)) elements.set(id, {
+            value: '', textContent: '', classList: { add() {}, remove() {} }, focus() {}, setSelectionRange() {},
+        });
+        return elements.get(id);
+    }
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'sanitizeRemoteFileName', 'joinRemoteFilePath', 'utf8ByteLength',
+            'requestSftpDelete', 'confirmSftpDelete', 'hideSftpDeleteConfirm', 'setSftpDeleteConfirmBusy',
+            'requestSftpRename', 'confirmSftpRename', 'hideSftpRenameConfirm', 'setSftpRenameConfirmBusy'],
+        {
+            sessions: [session], remoteEditors: [], sftpDeleteConfirmRequest: null, sftpRenameConfirmRequest: null,
+            AbortController, TextEncoder, setTimeout: (callback) => callback(),
+            document: { getElementById: element }, getActiveSession: () => session, getSessionById: () => session,
+            remoteEditorsForPath: () => [], remoteEditorsAffectedByRename: () => [], showToast() {},
+            abortSessionController() {}, invalidateSftpDirectoryCache() {}, requestWasAborted: () => false,
+            remoteEditorRequest: (url, body) => { requests.push({ url, body: JSON.parse(JSON.stringify(body)) }); return Promise.resolve({}); },
+            updateRemoteEditorsAfterRename: (target, oldPath, newPath) => renamed.push({ oldPath, newPath }),
+            sftpLoad: (remotePath) => refreshed.push(remotePath),
+        },
+    );
+    return { sandbox, requests, renamed, refreshed, element };
+}
+
+test('SFTP deletion sends the selected whitespace-suffixed path, not its sibling', async () => {
+    const harness = createWhitespaceFileOperationHarness();
+    harness.sandbox.requestSftpDelete('/tmp /same ');
+    assert.equal(harness.element('sftpDeleteConfirmPath').textContent, '/tmp /same ');
+    assert.equal(await harness.sandbox.confirmSftpDelete(), true);
+    assert.deepEqual(harness.requests[0], { url: '/file/delete', body: { sshInfo: 'credential', path: '/tmp /same ' } });
+    assert.deepEqual(harness.refreshed, ['/tmp ']);
+});
+
+test('SFTP renaming preserves the exact source path, destination name and editor paths', async () => {
+    const harness = createWhitespaceFileOperationHarness();
+    harness.sandbox.requestSftpRename('/tmp /same ', false);
+    assert.equal(harness.element('sftpRenameInput').value, 'same ');
+    harness.element('sftpRenameInput').value = 'new ';
+    assert.equal(await harness.sandbox.confirmSftpRename(), true);
+    assert.deepEqual(harness.requests[0], {
+        url: '/file/rename', body: { sshInfo: 'credential', path: '/tmp /same ', newName: 'new ', sessionId: 'sftp-session' },
+    });
+    assert.deepEqual(harness.renamed, [{ oldPath: '/tmp /same ', newPath: '/tmp /new ' }]);
+    assert.deepEqual(harness.refreshed, ['/tmp ']);
+});
+
+test('confirming an unchanged whitespace-suffixed filename does not rename it to a trimmed sibling', async () => {
+    const harness = createWhitespaceFileOperationHarness();
+    harness.sandbox.requestSftpRename('/tmp /same ', false);
+    assert.equal(await harness.sandbox.confirmSftpRename(), false);
+    assert.equal(harness.requests.length, 0);
+});
+
+test('RDP clipboard callbacks from an invalidated attempt cannot read or write the local clipboard', () => {
+    const session = { _connectGeneration: 1, _closing: false };
+    const callbacks = {};
+    const accesses = [];
+    const sandbox = loadFunctions(['rdpConnectionIsCurrent', 'attachRdpClipboard'], {
+        sessions: [session], extractRdpClipboardText: (value) => value, rdpClipboardApiAvailable: () => true,
+        setRdpClipboardPending() {}, pushLocalClipboardToRdp: () => accesses.push('read'),
+        navigator: { clipboard: { writeText: () => { accesses.push('write'); return Promise.resolve(); } } },
+    }, rdpSource);
+    sandbox.attachRdpClipboard(session, {
+        remoteClipboardChangedCallback: (callback) => { callbacks.changed = callback; },
+        forceClipboardUpdateCallback: (callback) => { callbacks.force = callback; },
+    }, {}, 1);
+    session._connectGeneration++;
+    callbacks.changed('stale text');
+    callbacks.force();
+    assert.deepEqual(accesses, []);
+});
+
+test('a shared Cookie switching to another logged-in account cannot prune an unchanged local account scope', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const alice = harness.record('alice-link');
+    const bravo = harness.record('bravo-link');
+    harness.sandbox.rememberConnectionShare(alice);
+    const generation = harness.sandbox.authStateGeneration;
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(0, { ok: true, data: {
+        loggedIn: true, historyScope: 'account:bravo', items: [harness.serverRecord(bravo)],
+    } });
+    await listing;
+    assert.equal(harness.sandbox.currentAccount.username, 'alice');
+    assert.equal(harness.sandbox.authStateGeneration, generation);
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, alice.link);
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:bravo').length, 0);
+    assert.doesNotMatch(harness.element('connectionShareHistoryList').innerHTML, /bravo-link/);
+    assert.equal(harness.state.accountRefreshes, 1);
+});
+
+test('share creation follows the server Cookie owner while the local account and generation remain stale', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const alice = harness.record('alice-link');
+    harness.sandbox.rememberConnectionShare(alice);
+    const generation = harness.sandbox.authStateGeneration;
+    const generating = harness.sandbox.generateConnectionShareLink();
+    await flushPromises();
+    harness.reply(0, { ok: true, data: {
+        id: 'bravo-created', token: 'bravo-token', historyScope: 'account:bravo',
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    } });
+    await generating;
+    assert.equal(harness.sandbox.currentAccount.username, 'alice');
+    assert.equal(harness.sandbox.authStateGeneration, generation);
+    assert.equal(harness.sandbox.readConnectionShareHistory().length, 1);
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, alice.link);
+    assert.match(harness.sandbox.readConnectionShareHistory('account:bravo')[0].link, /bravo-token#k=key$/);
+    assert.equal(harness.element('connectionShareUrl').value, '');
+    assert.equal(harness.state.accountRefreshes, 1);
+});
+
+test('an explicit server history scope is validated instead of silently using the local fallback', () => {
+    const harness = createShareHistoryHarness();
+    for (const historyScope of [null, '', 123, 'account:', 'account:alice bravo', 'unknown']) {
+        assert.throws(() => harness.sandbox.connectionShareResponseScope({ historyScope }, 'account:alice'));
+    }
+    assert.equal(harness.sandbox.connectionShareResponseScope({ historyScope: 'account:bravo' }, 'account:alice'), 'account:bravo');
+    assert.equal(harness.sandbox.connectionShareResponseScope({ historyScope: 'guest' }, 'account:alice'), 'guest');
+    assert.equal(harness.sandbox.connectionShareResponseScope({}, 'account:alice'), 'account:alice');
+});
+
+test('a matching server history scope can prune only its own known missing links', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    harness.sandbox.rememberConnectionShare(harness.record('alice-burned'));
+    harness.sandbox.rememberConnectionShare(harness.record('bravo-kept'), 'account:bravo');
+    const listing = harness.sandbox.renderConnectionShareHistory();
+    harness.reply(0, { ok: true, data: { loggedIn: true, historyScope: 'account:alice', items: [] } });
+    await listing;
+    assert.equal(harness.sandbox.readConnectionShareHistory().length, 0);
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:bravo')[0].id, 'bravo-kept');
+});
+
+for (const status of [200, 404]) {
+    test('share DELETE ' + status + ' from a changed Cookie owner cannot discard the stale local account key', async () => {
+        const harness = createShareHistoryHarness();
+        harness.account('alice');
+        const alice = harness.record('alice-still-valid');
+        harness.sandbox.rememberConnectionShare(alice);
+        const generation = harness.sandbox.authStateGeneration;
+        const deleting = harness.sandbox.deleteConnectionShare(alice.id, alice.token);
+        harness.reply(0, { ok: status === 200, data: { historyScope: 'account:bravo' } }, status);
+        await deleting;
+        assert.equal(harness.sandbox.currentAccount.username, 'alice');
+        assert.equal(harness.sandbox.authStateGeneration, generation);
+        assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, alice.link);
+        assert.equal(harness.state.accountRefreshes, 1);
+        assert.equal(harness.requests.length, 1);
+        assert.equal(harness.messages.some((message) => message.includes('已删除')), false);
+    });
+}
+
+test('share DELETE 404 clears a local key only when the server confirms the initiating scope', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const alice = harness.record('alice-gone');
+    harness.sandbox.rememberConnectionShare(alice);
+    harness.sandbox.rememberConnectionShare(harness.record('bravo-kept'), 'account:bravo');
+    harness.sandbox.renderConnectionShareHistory = () => {};
+    const deleting = harness.sandbox.deleteConnectionShare(alice.id, alice.token);
+    harness.reply(0, { ok: false, data: { historyScope: 'account:alice' } }, 404);
+    await deleting;
+    assert.equal(harness.sandbox.readConnectionShareHistory().length, 0);
+    assert.equal(harness.sandbox.readConnectionShareHistory('account:bravo')[0].id, 'bravo-kept');
+    assert.equal(harness.state.accountRefreshes, 0);
+});
+
+test('share DELETE 404 without authoritative ownership does not erase the local key', async () => {
+    const harness = createShareHistoryHarness();
+    harness.account('alice');
+    const alice = harness.record('alice-unverified');
+    harness.sandbox.rememberConnectionShare(alice);
+    const deleting = harness.sandbox.deleteConnectionShare(alice.id, alice.token);
+    harness.reply(0, { ok: false }, 404);
+    await deleting;
+    assert.equal(harness.sandbox.readConnectionShareHistory()[0].link, alice.link);
+    assert.equal(harness.state.accountRefreshes, 1);
 });

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime/multipart"
@@ -27,6 +28,320 @@ import (
 type testFileInfo struct {
 	name string
 	size int64
+}
+
+const memorySFTPTestTimeout = 3 * time.Second
+
+type memorySFTPTestConn struct {
+	net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (connection *memorySFTPTestConn) Close() error {
+	err := connection.Conn.Close()
+	connection.closeOnce.Do(func() { close(connection.closed) })
+	return err
+}
+
+func newMemorySFTPTestClient(test *testing.T, handlers sftp.Handlers) (*sftp.Client, <-chan struct{}) {
+	test.Helper()
+	local, remote := net.Pipe()
+	connection := &memorySFTPTestConn{Conn: local, closed: make(chan struct{})}
+	server := sftp.NewRequestServer(remote, handlers)
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		_ = server.Serve()
+	}()
+	var client *sftp.Client
+	test.Cleanup(func() {
+		_ = connection.Close()
+		_ = remote.Close()
+		if client != nil {
+			_ = client.Close()
+		}
+		_ = server.Close()
+		select {
+		case <-serverDone:
+		case <-time.After(memorySFTPTestTimeout):
+			test.Error("in-memory SFTP server did not stop")
+		}
+	})
+	deadline := time.Now().Add(memorySFTPTestTimeout)
+	if err := connection.SetDeadline(deadline); err != nil {
+		test.Fatal(err)
+	}
+	if err := remote.SetDeadline(deadline); err != nil {
+		test.Fatal(err)
+	}
+	var err error
+	client, err = sftp.NewClientPipe(connection, connection)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		test.Fatal(err)
+	}
+	if err := remote.SetDeadline(time.Time{}); err != nil {
+		test.Fatal(err)
+	}
+	return client, connection.closed
+}
+
+func writeMemorySFTPTestFile(test *testing.T, client *sftp.Client, remotePath, content string) {
+	test.Helper()
+	if err := client.MkdirAll(pathpkg.Dir(remotePath)); err != nil {
+		test.Fatal(err)
+	}
+	file, err := client.Create(remotePath)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write([]byte(content)); err != nil {
+		test.Fatal(err)
+	}
+}
+
+func readMemorySFTPTestFile(test *testing.T, client *sftp.Client, remotePath string) string {
+	test.Helper()
+	file, err := client.Open(remotePath)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		test.Fatal(err)
+	}
+	return string(content)
+}
+
+func memorySFTPTestRequest(test *testing.T, endpoint string, payload any) (*gin.Context, *httptest.ResponseRecorder) {
+	test.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		test.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	requestContext, _ := gin.CreateTestContext(recorder)
+	requestContext.Request = httptest.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	requestContext.Request.Header.Set("Content-Type", "application/json")
+	requestContext.Request.RemoteAddr = "198.51.100.240:43210"
+	requestContext.Set(trustScopeContextKey, strings.Repeat("a", 32))
+	return requestContext, recorder
+}
+
+func installMemorySFTPFileFactories(test *testing.T, handlers sftp.Handlers) {
+	test.Helper()
+	originalFileFactory := createFileSFTPClient
+	originalSessionFactory := createSFTPSessionClient
+	test.Cleanup(func() {
+		createFileSFTPClient = originalFileFactory
+		createSFTPSessionClient = originalSessionFactory
+	})
+	createFileSFTPClient = func(client *core.SSHClient) error {
+		client.Sftp, _ = newMemorySFTPTestClient(test, handlers)
+		return nil
+	}
+	createSFTPSessionClient = func(client core.SSHClient) (*core.SSHClient, error) {
+		client.Sftp, _ = newMemorySFTPTestClient(test, handlers)
+		return &client, nil
+	}
+}
+
+type memorySFTPTestLister struct {
+	sftp.FileLister
+	before func(method, remotePath string) error
+}
+
+func (handler memorySFTPTestLister) Lstat(request *sftp.Request) (sftp.ListerAt, error) {
+	if err := handler.before("Lstat", request.Filepath); err != nil {
+		return nil, err
+	}
+	return handler.FileLister.(sftp.LstatFileLister).Lstat(request)
+}
+
+func (handler memorySFTPTestLister) Readlink(remotePath string) (string, error) {
+	if err := handler.before("Readlink", remotePath); err != nil {
+		return "", err
+	}
+	return handler.FileLister.(sftp.ReadlinkFileLister).Readlink(remotePath)
+}
+
+type memorySFTPTestCommands struct {
+	sftp.FileCmder
+	before func(request *sftp.Request) error
+}
+
+func (handler memorySFTPTestCommands) Filecmd(request *sftp.Request) error {
+	if err := handler.before(request); err != nil {
+		return err
+	}
+	return handler.FileCmder.Filecmd(request)
+}
+
+type memorySFTPTestWriter struct {
+	sftp.FileWriter
+	before func(request *sftp.Request) error
+}
+
+func (handler memorySFTPTestWriter) Filewrite(request *sftp.Request) (io.WriterAt, error) {
+	if err := handler.before(request); err != nil {
+		return nil, err
+	}
+	return handler.FileWriter.Filewrite(request)
+}
+
+func TestFileHandlersPreserveRemotePathWhitespace(test *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, suffix := range []string{" ", "\t", "\u00a0", "\u3000"} {
+		test.Run("suffix="+suffix, func(test *testing.T) {
+			handlers := sftp.InMemHandler()
+			client, _ := newMemorySFTPTestClient(test, handlers)
+			installMemorySFTPFileFactories(test, handlers)
+			const plainPath = "/srv/report.png"
+			spacedPath := plainPath + suffix
+			writeMemorySFTPTestFile(test, client, plainPath, "plain file")
+			writeMemorySFTPTestFile(test, client, spacedPath, "requested file")
+			sshInfo := sftpSessionTestSSHInfo(test)
+			request := fileRequest{SSHInfo: sshInfo, Path: spacedPath}
+			for _, stream := range []struct {
+				endpoint string
+				handler  func(*gin.Context) *ResponseBody
+			}{
+				{endpoint: "/file/download", handler: DownloadFile},
+				{endpoint: "/file/preview", handler: PreviewFile},
+			} {
+				requestContext, recorder := memorySFTPTestRequest(test, stream.endpoint, request)
+				response := stream.handler(requestContext)
+				if response.Msg != "success" || recorder.Body.String() != "requested file" {
+					test.Fatalf("%s(%q) = %q, body %q", stream.endpoint, spacedPath, response.Msg, recorder.Body.String())
+				}
+			}
+			requestContext, _ := memorySFTPTestRequest(test, "/file/edit/open", request)
+			opened := OpenFileForEdit(requestContext)
+			if opened.Msg != "success" {
+				test.Fatal(opened.Msg)
+			}
+			snapshot := opened.Data.(gin.H)
+			if snapshot["path"] != spacedPath || snapshot["targetPath"] != spacedPath || snapshot["content"] != "requested file" {
+				test.Fatalf("editor opened the wrong target: %#v", snapshot)
+			}
+			requestContext, _ = memorySFTPTestRequest(test, "/file/edit/save", fileSaveRequest{
+				SSHInfo: sshInfo, Path: spacedPath, TargetPath: spacedPath,
+				Content: "saved requested file", Version: snapshot["version"].(string),
+			})
+			if response := SaveEditedFile(requestContext); response.Msg != "success" {
+				test.Fatal(response.Msg)
+			}
+			if content := readMemorySFTPTestFile(test, client, spacedPath); content != "saved requested file" {
+				test.Fatalf("saved content = %q", content)
+			}
+			requestContext, _ = memorySFTPTestRequest(test, "/file/rename", fileRenameRequest{
+				SSHInfo: sshInfo, Path: spacedPath, NewName: "renamed ",
+			})
+			renamed := RenameFile(requestContext)
+			if renamed.Msg != "success" || renamed.Data.(gin.H)["oldPath"] != spacedPath || renamed.Data.(gin.H)["newPath"] != "/srv/renamed " {
+				test.Fatalf("rename response = %#v", renamed)
+			}
+			if content := readMemorySFTPTestFile(test, client, "/srv/renamed "); content != "saved requested file" {
+				test.Fatalf("renamed content = %q", content)
+			}
+			writeMemorySFTPTestFile(test, client, spacedPath, "delete only this file")
+			requestContext, _ = memorySFTPTestRequest(test, "/file/delete", request)
+			if response := DeleteFile(requestContext); response.Msg != "success" {
+				test.Fatal(response.Msg)
+			}
+			if _, err := client.Lstat(spacedPath); !os.IsNotExist(err) {
+				test.Fatalf("deleted path still exists: %v", err)
+			}
+			if content := readMemorySFTPTestFile(test, client, plainPath); content != "plain file" {
+				test.Fatalf("an operation changed the unrequested file: %q", content)
+			}
+		})
+	}
+}
+
+func TestUploadFilePreservesRemotePathWhitespace(test *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, suffix := range []string{" ", "\t", "\u00a0"} {
+		test.Run("suffix="+suffix, func(test *testing.T) {
+			handlers := sftp.InMemHandler()
+			client, _ := newMemorySFTPTestClient(test, handlers)
+			installMemorySFTPFileFactories(test, handlers)
+			directory := "/srv/uploads" + suffix
+			const subdirectory = " nested "
+			const filename = " report.txt "
+			expectedPath := pathpkg.Join(directory, subdirectory, filename)
+			var paths []string
+			for _, root := range []string{"/srv/uploads", directory} {
+				for _, child := range []string{"nested", subdirectory} {
+					for _, name := range []string{"report.txt", filename} {
+						remotePath := pathpkg.Join(root, child, name)
+						paths = append(paths, remotePath)
+						writeMemorySFTPTestFile(test, client, remotePath, "untouched")
+					}
+				}
+			}
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			for _, field := range [][2]string{{"sshInfo", sftpSessionTestSSHInfo(test)}, {"path", directory}, {"dir", subdirectory}} {
+				if err := writer.WriteField(field[0], field[1]); err != nil {
+					test.Fatal(err)
+				}
+			}
+			part, err := writer.CreateFormFile("file", filename)
+			if err != nil {
+				test.Fatal(err)
+			}
+			if _, err := io.WriteString(part, "uploaded"); err != nil {
+				test.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				test.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			requestContext, _ := gin.CreateTestContext(recorder)
+			requestContext.Request = httptest.NewRequest(http.MethodPost, "/file/upload", &body)
+			requestContext.Request.Header.Set("Content-Type", writer.FormDataContentType())
+			if response := UploadFile(requestContext); response.Msg != "success" {
+				test.Fatal(response.Msg)
+			}
+			for _, remotePath := range paths {
+				expected := "untouched"
+				if remotePath == expectedPath {
+					expected = "uploaded"
+				}
+				if content := readMemorySFTPTestFile(test, client, remotePath); content != expected {
+					test.Fatalf("upload changed the wrong path %q: content=%q, want %q", remotePath, content, expected)
+				}
+			}
+		})
+	}
+}
+
+func TestRemoteEditorLocksPreserveRemotePathWhitespace(test *testing.T) {
+	client := core.NewSSHClient()
+	client.Hostname = "memory.test"
+	plainKey := remoteEditorTargetKey(client, "/srv/report")
+	spacedKey := remoteEditorTargetKey(client, "/srv/report ")
+	if plainKey == spacedKey {
+		test.Fatal("different POSIX paths shared an editor lock key")
+	}
+	release, err := acquireRemoteEditorTargets(context.Background(), plainKey)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), memorySFTPTestTimeout)
+	defer cancel()
+	releaseSpaced, err := acquireRemoteEditorTargets(ctx, spacedKey)
+	if err != nil {
+		test.Fatalf("different POSIX paths shared an editor lock: %v", err)
+	}
+	releaseSpaced()
 }
 
 func (f testFileInfo) Name() string       { return f.name }

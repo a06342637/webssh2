@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 
@@ -12,6 +13,26 @@ var sshSlots = struct {
 	Total   int
 	Clients map[string]int
 }{Clients: make(map[string]int)}
+
+// Long-lived terminals must not exhaust the short-lived SSH work budget.
+var terminalSlots = struct {
+	sync.Mutex
+	Total   int
+	Clients map[string]int
+}{Clients: make(map[string]int)}
+
+func acquireTerminalSlot(client string) (func(), error) {
+	if runtimeShuttingDown.Load() {
+		return nil, errRuntimeShuttingDown
+	}
+	release, ok := tryAcquireClientSlot(client, &terminalSlots,
+		envPositiveInt("WEBSSH_MAX_TERMINALS", 64),
+		envPositiveInt("WEBSSH_MAX_TERMINALS_PER_CLIENT", 32))
+	if !ok {
+		return nil, errors.New("SSH 终端数量已达上限，请关闭不用的标签后重试，或联系管理员调整 WEBSSH_MAX_TERMINALS / WEBSSH_MAX_TERMINALS_PER_CLIENT")
+	}
+	return release, nil
+}
 
 var uploadSlots = struct {
 	sync.Mutex
@@ -52,12 +73,22 @@ func acquireClientSlot(c *gin.Context, slots *struct {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, ResponseBody{Msg: errRuntimeShuttingDown.Error()})
 		return nil, false
 	}
-	client := requestIP(c)
+	release, ok := tryAcquireClientSlot(requestIP(c), slots, globalLimit, clientLimit)
+	if !ok {
+		c.Header("Retry-After", "5")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, ResponseBody{Msg: message})
+	}
+	return release, ok
+}
+
+func tryAcquireClientSlot(client string, slots *struct {
+	sync.Mutex
+	Total   int
+	Clients map[string]int
+}, globalLimit, clientLimit int) (func(), bool) {
 	slots.Lock()
 	if slots.Total >= globalLimit || slots.Clients[client] >= clientLimit {
 		slots.Unlock()
-		c.Header("Retry-After", "5")
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, ResponseBody{Msg: message})
 		return nil, false
 	}
 	slots.Total++

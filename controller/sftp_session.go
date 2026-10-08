@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -21,13 +22,56 @@ type sftpSessionCloseRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
+type sftpSessionMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (mutex *sftpSessionMutex) channel() chan struct{} {
+	mutex.once.Do(func() { mutex.token = make(chan struct{}, 1) })
+	return mutex.token
+}
+
+func (mutex *sftpSessionMutex) Lock() {
+	mutex.channel() <- struct{}{}
+}
+
+func (mutex *sftpSessionMutex) LockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case mutex.channel() <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			mutex.Unlock()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (mutex *sftpSessionMutex) TryLock() bool {
+	select {
+	case mutex.channel() <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (mutex *sftpSessionMutex) Unlock() {
+	<-mutex.channel()
+}
+
 type sftpSessionEntry struct {
 	key        string
 	clientID   string
 	trustScope string
 	sessionID  string
 
-	opMu      sync.Mutex
+	opMu      sftpSessionMutex
 	client    *core.SSHClient
 	idleTimer *time.Timer
 	lastUsed  time.Time
@@ -205,13 +249,20 @@ func expireSFTPSessionEntry(entry *sftpSessionEntry) {
 }
 
 func newTransientSFTPSessionLease(c *gin.Context, decoded core.SSHClient) (*sftpSessionLease, error) {
+	if err := c.Request.Context().Err(); err != nil {
+		return nil, err
+	}
 	if runtimeShuttingDown.Load() {
 		return nil, errRuntimeShuttingDown
 	}
 	client, err := createSFTPSessionClient(cloneSFTPClientConfig(decoded))
+	if err == nil {
+		err = c.Request.Context().Err()
+	}
 	if err != nil {
 		if client != nil {
 			client.Close()
+			scrubSFTPSessionCredentials(client)
 		}
 		return nil, err
 	}
@@ -225,7 +276,27 @@ func newTransientSFTPSessionLease(c *gin.Context, decoded core.SSHClient) (*sftp
 	}, nil
 }
 
+func discardUnusedSFTPSessionEntry(entry *sftpSessionEntry) {
+	if !entry.opMu.TryLock() {
+		return
+	}
+	defer entry.opMu.Unlock()
+	if entry.client != nil || entry.closed {
+		return
+	}
+	entry.closed = true
+	if entry.idleTimer != nil {
+		entry.idleTimer.Stop()
+		entry.idleTimer = nil
+	}
+	removeSFTPSessionEntry(entry)
+}
+
 func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded core.SSHClient) (*sftpSessionLease, error) {
+	ctx := c.Request.Context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	normalizedID, err := normalizeSFTPSessionID(sessionID)
 	if err != nil {
 		return nil, err
@@ -236,6 +307,9 @@ func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded 
 	clientID := requestIP(c)
 	key := sftpSessionKey(decoded, clientID, normalizedID, sshInfo)
 	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entry, pooled, registryErr := getOrCreateSFTPSessionEntry(key, clientID, decoded.TrustScope, normalizedID)
 		if registryErr != nil {
 			return nil, registryErr
@@ -243,7 +317,10 @@ func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded 
 		if !pooled {
 			return newTransientSFTPSessionLease(c, decoded)
 		}
-		entry.opMu.Lock()
+		if err := entry.opMu.LockContext(ctx); err != nil {
+			discardUnusedSFTPSessionEntry(entry)
+			return nil, err
+		}
 		if entry.closed {
 			entry.opMu.Unlock()
 			continue
@@ -254,11 +331,15 @@ func acquireSFTPSessionLease(c *gin.Context, sessionID, sshInfo string, decoded 
 		}
 		if entry.client == nil {
 			client, createErr := createSFTPSessionClient(cloneSFTPClientConfig(decoded))
+			if createErr == nil {
+				createErr = ctx.Err()
+			}
 			if createErr != nil {
 				entry.closed = true
 				removeSFTPSessionEntry(entry)
 				if client != nil {
 					client.Close()
+					scrubSFTPSessionCredentials(client)
 				}
 				entry.opMu.Unlock()
 				return nil, createErr

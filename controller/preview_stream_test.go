@@ -1,12 +1,128 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 	"webssh/core"
+
+	"github.com/gin-gonic/gin"
+	"github.com/pkg/sftp"
 )
+
+func TestAuthorizeFilePreviewCancellationInterruptsMetadata(test *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, blockedMethod := range []string{"Lstat", "Readlink"} {
+		test.Run(blockedMethod, func(test *testing.T) {
+			resetPreviewGrantsForTest(test)
+			handlers := sftp.InMemHandler()
+			inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+			writeMemorySFTPTestFile(test, inspectionClient, "/srv/image.png ", "preview")
+			requestedPath := "/srv/image.png "
+			if blockedMethod == "Readlink" {
+				requestedPath = "/srv/link.png "
+				if err := inspectionClient.Symlink("image.png ", requestedPath); err != nil {
+					test.Fatal(err)
+				}
+			}
+			entered := make(chan struct{})
+			var connectionClosed <-chan struct{}
+			blockingHandlers := handlers
+			blockingHandlers.FileList = memorySFTPTestLister{FileLister: handlers.FileList, before: func(method, remotePath string) error {
+				if method == blockedMethod {
+					close(entered)
+					<-connectionClosed
+					return context.Canceled
+				}
+				return nil
+			}}
+			client, closed := newMemorySFTPTestClient(test, blockingHandlers)
+			connectionClosed = closed
+			originalFactory := createPreviewSFTPClient
+			test.Cleanup(func() { createPreviewSFTPClient = originalFactory })
+			createPreviewSFTPClient = func(configuration *core.SSHClient) error {
+				configuration.Sftp = client
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			requestContext, _ := memorySFTPTestRequest(test, "/file/preview/authorize", fileRequest{SSHInfo: sftpSessionTestSSHInfo(test), Path: requestedPath})
+			requestContext.Request = requestContext.Request.WithContext(ctx)
+			response := make(chan *ResponseBody, 1)
+			finished := make(chan struct{})
+			test.Cleanup(func() {
+				cancel()
+				_ = client.Close()
+				select {
+				case <-finished:
+				case <-time.After(memorySFTPTestTimeout):
+					test.Error("preview authorization did not finish")
+				}
+			})
+			go func() {
+				defer close(finished)
+				response <- AuthorizeFilePreview(requestContext)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatal("preview did not enter the blocked metadata operation")
+			}
+			cancel()
+			select {
+			case result := <-response:
+				if result.Msg == "success" || result.Data != nil {
+					test.Fatalf("cancelled preview was authorized: %#v", result)
+				}
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatalf("request cancellation did not interrupt SFTP %s", blockedMethod)
+			}
+			select {
+			case <-closed:
+			default:
+				test.Fatal("cancelled preview retained its transport")
+			}
+			previewGrants.Lock()
+			count := len(previewGrants.items)
+			previewGrants.Unlock()
+			if count != 0 {
+				test.Fatalf("cancelled preview retained %d grants", count)
+			}
+		})
+	}
+}
+
+func TestAuthorizeFilePreviewPreservesRemotePathWhitespace(test *testing.T) {
+	resetPreviewGrantsForTest(test)
+	handlers := sftp.InMemHandler()
+	inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+	writeMemorySFTPTestFile(test, inspectionClient, "/srv/image.png", "wrong")
+	writeMemorySFTPTestFile(test, inspectionClient, "/srv/image.png ", "requested preview")
+	if err := inspectionClient.Symlink("image.png ", "/srv/link.png "); err != nil {
+		test.Fatal(err)
+	}
+	originalFactory := createPreviewSFTPClient
+	test.Cleanup(func() { createPreviewSFTPClient = originalFactory })
+	createPreviewSFTPClient = func(configuration *core.SSHClient) error {
+		configuration.Sftp, _ = newMemorySFTPTestClient(test, handlers)
+		return nil
+	}
+	requestContext, _ := memorySFTPTestRequest(test, "/file/preview/authorize", fileRequest{
+		SSHInfo: sftpSessionTestSSHInfo(test), Path: "/srv/link.png ",
+	})
+	response := AuthorizeFilePreview(requestContext)
+	if response.Msg != "success" {
+		test.Fatal(response.Msg)
+	}
+	token := response.Data.(gin.H)["token"].(string)
+	previewGrants.Lock()
+	grant := previewGrants.items[token]
+	previewGrants.Unlock()
+	if grant == nil || grant.path != "/srv/link.png " || grant.targetPath != "/srv/image.png " || grant.size != int64(len("requested preview")) {
+		test.Fatal("preview authorization changed the requested or resolved POSIX path")
+	}
+}
 
 func resetPreviewGrantsForTest(t *testing.T) {
 	t.Helper()

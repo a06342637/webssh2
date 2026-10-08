@@ -95,6 +95,41 @@ func createTestShare(t *testing.T, sessionToken string, body map[string]any) (*h
 	return recorder, token
 }
 
+func TestShareResponsesIdentifyAuthenticatedOwner(test *testing.T) {
+	for _, loggedIn := range []bool{true, false} {
+		name := "guest"
+		if loggedIn {
+			name = "account:member1"
+		}
+		test.Run(name, func(test *testing.T) {
+			token := installTestShareStore(test)
+			if !loggedIn {
+				token = ""
+			}
+			created, _ := createTestShare(test, token, map[string]any{
+				"ciphertext": "Y2lwaGVydGV4dA",
+				"iv":         "aXYtdmFsdWU",
+				"expiresIn":  3600,
+			})
+			if created.Code != http.StatusOK {
+				test.Fatalf("create share returned %d: %s", created.Code, created.Body.String())
+			}
+			createdData := decodeShareBody(test, created)["data"].(map[string]any)
+			if createdData["historyScope"] != name {
+				test.Fatalf("created share scope = %v, want %s", createdData["historyScope"], name)
+			}
+			listed := performShareRequest(test, ListShares, http.MethodGet, "/api/shares", nil, token, nil)
+			if listed.Code != http.StatusOK {
+				test.Fatalf("list shares returned %d: %s", listed.Code, listed.Body.String())
+			}
+			listedData := decodeShareBody(test, listed)["data"].(map[string]any)
+			if listedData["historyScope"] != name {
+				test.Fatalf("listed share scope = %v, want %s", listedData["historyScope"], name)
+			}
+		})
+	}
+}
+
 func TestCreateShareStoresOnlyHashedTokenAndCiphertext(t *testing.T) {
 	sessionToken := installTestShareStore(t)
 	recorder, token := createTestShare(t, sessionToken, map[string]any{
@@ -469,6 +504,185 @@ func TestDeleteShareAlsoAcceptsTheRawToken(t *testing.T) {
 		gin.Params{{Key: "id", Value: token}})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("deleting by raw token failed: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeleteAccountRevokesSharesBeforeUsernameReuse(t *testing.T) {
+	adminToken := installTestAccountStore(t)
+	memberToken := createAccountSessionForTest(t, "member1")
+	shareTokens := make([]string, 0, 3)
+	for _, sessionToken := range []string{memberToken, adminToken, ""} {
+		created, token := createTestShare(t, sessionToken, map[string]any{
+			"ciphertext": "Y2lwaGVydGV4dA",
+			"iv":         "aXYtdmFsdWU",
+			"label":      "RDP 10.0.0.5:3389",
+			"kind":       "rdp",
+			"expiresIn":  3600,
+		})
+		if created.Code != http.StatusOK {
+			t.Fatalf("create share returned %d: %s", created.Code, created.Body.String())
+		}
+		shareTokens = append(shareTokens, token)
+	}
+	deleted := performAccountJSON(t, AdminDeleteAccount, http.MethodDelete, "/api/admin/accounts/member1", nil, adminToken)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete account returned %d: %s", deleted.Code, deleted.Body.String())
+	}
+	reloaded := &AccountStore{path: accountStore.path}
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := reloaded.db.Shares[shareStorageKey(shareTokens[0])]; found {
+		t.Fatal("deleted account's share remained on disk")
+	}
+	for _, token := range shareTokens[1:] {
+		if _, found := reloaded.db.Shares[shareStorageKey(token)]; !found {
+			t.Fatal("deleting an account removed another owner's share")
+		}
+	}
+	recreated := performAccountJSON(t, AdminCreateAccount, http.MethodPost, "/api/admin/accounts", map[string]any{
+		"username": "member1",
+		"password": "NewOwnerPass123!",
+	}, adminToken)
+	if recreated.Code != http.StatusOK {
+		t.Fatalf("recreate returned %d: %s", recreated.Code, recreated.Body.String())
+	}
+	newToken := createAccountSessionForTest(t, "member1")
+	listed := performShareRequest(t, ListShares, http.MethodGet, "/api/shares", nil, newToken, nil)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list returned %d: %s", listed.Code, listed.Body.String())
+	}
+	data, _ := decodeShareBody(t, listed)["data"].(map[string]any)
+	items, _ := data["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("recreated account inherited old shares: %s", listed.Body.String())
+	}
+	oldShareKey := shareStorageKey(shareTokens[0])
+	removed := performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+oldShareKey, nil, newToken, gin.Params{{Key: "id", Value: oldShareKey}})
+	if removed.Code != http.StatusNotFound {
+		t.Fatalf("recreated account managed an old share: %d", removed.Code)
+	}
+	gone := performShareRequest(t, GetShare, http.MethodGet, "/api/share/"+shareTokens[0], nil, "", gin.Params{{Key: "token", Value: shareTokens[0]}})
+	if gone.Code != http.StatusNotFound {
+		t.Fatalf("deleted account's share remained readable: %d", gone.Code)
+	}
+}
+
+func TestCreateShareRejectsDeletedAccountDuringRead(t *testing.T) {
+	for _, recreate := range []bool{false, true} {
+		name := "deleted"
+		if recreate {
+			name = "recreated"
+		}
+		t.Run(name, func(t *testing.T) {
+			adminToken := installTestAccountStore(t)
+			memberToken := createAccountSessionForTest(t, "member1")
+			payload, err := json.Marshal(map[string]any{
+				"ciphertext": "Y2lwaGVydGV4dA",
+				"iv":         "aXYtdmFsdWU",
+				"expiresIn":  3600,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var afterDeletion accountDB
+			body := &accountRequestHookReader{
+				reader: bytes.NewReader(payload),
+				hook: func() {
+					deleted := performAccountJSON(t, AdminDeleteAccount, http.MethodDelete, "/api/admin/accounts/member1", nil, adminToken)
+					if deleted.Code != http.StatusOK {
+						t.Fatalf("delete returned %d: %s", deleted.Code, deleted.Body.String())
+					}
+					if recreate {
+						recreated := performAccountJSON(t, AdminCreateAccount, http.MethodPost, "/api/admin/accounts", map[string]any{
+							"username": "member1",
+							"password": "NewOwnerPass123!",
+						}, adminToken)
+						if recreated.Code != http.StatusOK {
+							t.Fatalf("recreate returned %d: %s", recreated.Code, recreated.Body.String())
+						}
+					}
+					accountStore.mu.RLock()
+					afterDeletion = cloneAccountDB(accountStore.db)
+					accountStore.mu.RUnlock()
+				},
+			}
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodPost, "/api/share", body)
+			context.Request.Header.Set("Content-Type", "application/json")
+			context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: memberToken})
+			CreateShare(context)
+			if afterDeletion.Users == nil {
+				t.Fatal("request body was not read after initial authentication")
+			}
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("stale share creation returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			assertAccountDBEqual(t, afterDeletion)
+		})
+	}
+}
+
+func TestSharePersistenceFailureRollsBack(t *testing.T) {
+	for _, operation := range []string{"create", "burn", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			sessionToken := installTestShareStore(t)
+			body := map[string]any{
+				"ciphertext": "Y2lwaGVydGV4dA",
+				"iv":         "aXYtdmFsdWU",
+				"expiresIn":  3600,
+				"burn":       operation == "burn",
+			}
+			token := ""
+			if operation != "create" {
+				created, shareToken := createTestShare(t, sessionToken, body)
+				if created.Code != http.StatusOK {
+					t.Fatalf("create share returned %d: %s", created.Code, created.Body.String())
+				}
+				token = shareToken
+			}
+			attempt := func() *httptest.ResponseRecorder {
+				if operation == "burn" {
+					return performShareRequest(t, GetShare, http.MethodGet, "/api/share/"+token, nil, "", gin.Params{{Key: "token", Value: token}})
+				}
+				if operation == "delete" {
+					key := shareStorageKey(token)
+					return performShareRequest(t, DeleteShare, http.MethodDelete, "/api/shares/"+key, nil, sessionToken, gin.Params{{Key: "id", Value: key}})
+				}
+				return performShareRequest(t, CreateShare, http.MethodPost, "/api/share", body, sessionToken, nil)
+			}
+			before := cloneAccountDB(accountStore.db)
+			validPath := accountStore.path
+			makeAccountStorePersistenceFail(t)
+			first := attempt()
+			if first.Code != http.StatusInternalServerError {
+				t.Fatalf("failed %s returned %d: %s", operation, first.Code, first.Body.String())
+			}
+			assertAccountDBEqual(t, before)
+			accountStore.path = validPath
+			second := attempt()
+			if second.Code != http.StatusOK {
+				t.Fatalf("retry %s returned %d: %s", operation, second.Code, second.Body.String())
+			}
+			if operation == "create" {
+				data, _ := decodeShareBody(t, second)["data"].(map[string]any)
+				token, _ = data["token"].(string)
+			} else {
+				gone := performShareRequest(t, GetShare, http.MethodGet, "/api/share/"+token, nil, "", gin.Params{{Key: "token", Value: token}})
+				if gone.Code != http.StatusNotFound {
+					t.Fatalf("completed %s left share readable: %d", operation, gone.Code)
+				}
+			}
+			reloaded := &AccountStore{path: validPath}
+			if err := reloaded.load(); err != nil {
+				t.Fatal(err)
+			}
+			_, stored := reloaded.db.Shares[shareStorageKey(token)]
+			if stored != (operation == "create") {
+				t.Fatalf("retry %s was not persisted", operation)
+			}
+		})
 	}
 }
 

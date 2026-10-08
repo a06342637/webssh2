@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +39,17 @@ func installTestAccountStore(t *testing.T) string {
 	accountStore = store
 	t.Cleanup(func() { accountStore = original })
 	return adminToken
+}
+
+func createAccountSessionForTest(t *testing.T, username string) string {
+	t.Helper()
+	accountStore.mu.Lock()
+	token, _, err := createLoginSession(username)
+	accountStore.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 func performAccountJSON(t *testing.T, handler gin.HandlerFunc, method, target string, body any, token string) *httptest.ResponseRecorder {
@@ -76,6 +88,20 @@ func performAccountJSON(t *testing.T, handler gin.HandlerFunc, method, target st
 	}
 	handler(context)
 	return recorder
+}
+
+type accountRequestHookReader struct {
+	reader io.Reader
+	hook   func()
+}
+
+func (reader *accountRequestHookReader) Read(buffer []byte) (int, error) {
+	if reader.hook != nil {
+		hook := reader.hook
+		reader.hook = nil
+		hook()
+	}
+	return reader.reader.Read(buffer)
 }
 
 func TestSanitizeScriptCategoriesDeduplicatesAfterTruncation(t *testing.T) {
@@ -229,6 +255,83 @@ func TestSyncScriptBookmarksCleansOrphansAndFutureClock(t *testing.T) {
 	}
 	if stored.UpdatedAt > time.Now().Add(time.Second).UnixMilli() {
 		t.Fatalf("future timestamp remained in storage: %d", stored.UpdatedAt)
+	}
+}
+
+func TestSyncScriptBookmarksRevalidatesAccountSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, state := range []string{"deleted", "recreated", "revoked", "expired"} {
+		for _, mode := range []string{"push", "pull"} {
+			t.Run(state+"/"+mode, func(t *testing.T) {
+				adminToken := installTestAccountStore(t)
+				memberToken := createAccountSessionForTest(t, "member1")
+				payload, err := json.Marshal(map[string]any{
+					"account":      "member1",
+					"mode":         mode,
+					"baseRevision": 0,
+					"scripts":      []ScriptBookmark{{ID: "old-account-item", Name: "Private script", Cmd: "echo private-data"}},
+					"categories":   []ScriptCategory{},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var afterRevocation accountDB
+				body := &accountRequestHookReader{
+					reader: bytes.NewReader(payload),
+					hook: func() {
+						switch state {
+						case "deleted", "recreated":
+							deleted := performAccountJSON(t, AdminDeleteAccount, http.MethodDelete, "/api/admin/accounts/member1", nil, adminToken)
+							if deleted.Code != http.StatusOK {
+								t.Fatalf("delete returned %d: %s", deleted.Code, deleted.Body.String())
+							}
+							if state == "recreated" {
+								recreated := performAccountJSON(t, AdminCreateAccount, http.MethodPost, "/api/admin/accounts", map[string]any{
+									"username": "member1",
+									"password": "NewOwnerPass123!",
+								}, adminToken)
+								if recreated.Code != http.StatusOK {
+									t.Fatalf("recreate returned %d: %s", recreated.Code, recreated.Body.String())
+								}
+								accountStore.mu.Lock()
+								accountStore.db.Scripts["member1"] = StoredScripts{
+									Items:    []ScriptBookmark{{ID: "new-owner-item", Name: "New owner", Cmd: "echo new-owner-private-data"}},
+									Revision: 1,
+								}
+								accountStore.mu.Unlock()
+							}
+						case "revoked":
+							loggedOut := performAccountJSON(t, AuthLogout, http.MethodPost, "/api/auth/logout", nil, memberToken)
+							if loggedOut.Code != http.StatusOK {
+								t.Fatalf("logout returned %d: %s", loggedOut.Code, loggedOut.Body.String())
+							}
+						case "expired":
+							accountStore.mu.Lock()
+							session := accountStore.db.Sessions[sessionStorageKey(memberToken)]
+							session.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+							accountStore.db.Sessions[sessionStorageKey(memberToken)] = session
+							accountStore.mu.Unlock()
+						}
+						accountStore.mu.RLock()
+						afterRevocation = cloneAccountDB(accountStore.db)
+						accountStore.mu.RUnlock()
+					},
+				}
+				recorder := httptest.NewRecorder()
+				context, _ := gin.CreateTestContext(recorder)
+				context.Request = httptest.NewRequest(http.MethodPost, "/api/scripts/sync", body)
+				context.Request.Header.Set("Content-Type", "application/json")
+				context.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: memberToken})
+				SyncScriptBookmarks(context)
+				if afterRevocation.Users == nil {
+					t.Fatal("request body was not read after initial authentication")
+				}
+				if recorder.Code != http.StatusUnauthorized {
+					t.Fatalf("sync after %s returned %d: %s", state, recorder.Code, recorder.Body.String())
+				}
+				assertAccountDBEqual(t, afterRevocation)
+			})
+		}
 	}
 }
 
@@ -542,6 +645,7 @@ func TestFailedPersistenceRollsBackMutations(t *testing.T) {
 		token := installTestAccountStore(t)
 		accountStore.db.Sessions["member-old"] = StoredSession{Username: "member1", ExpiresAt: time.Now().Add(time.Hour).Unix()}
 		accountStore.db.Scripts["member1"] = StoredScripts{Items: []ScriptBookmark{{Name: "test", Cmd: "true"}}, UpdatedAt: 1}
+		accountStore.db.Shares[shareStorageKey("member-share-token")] = StoredShare{Version: shareSchemaVersion, Owner: "member1", ExpiresAt: time.Now().Add(time.Hour).Unix()}
 		before := cloneAccountDB(accountStore.db)
 		makeAccountStorePersistenceFail(t)
 		recorder := performAccountJSON(t, AdminDeleteAccount, http.MethodDelete, "/api/admin/accounts/member1", map[string]any{}, token)
@@ -713,20 +817,52 @@ func TestLoginSessionsAreStoredByHash(t *testing.T) {
 	}
 }
 
+func TestStoredSessionHashCannotAuthenticateOrLogout(t *testing.T) {
+	installTestAccountStore(t)
+	token := createAccountSessionForTest(t, "admin")
+	storedHash := sessionStorageKey(token)
+	recorder := performAccountJSON(t, AdminListAccounts, http.MethodGet, "/api/admin/accounts", nil, storedHash)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("stored session hash authenticated: %d %s", recorder.Code, recorder.Body.String())
+	}
+	logout := performAccountJSON(t, AuthLogout, http.MethodPost, "/api/auth/logout", nil, storedHash)
+	if logout.Code != http.StatusOK {
+		t.Fatalf("logout returned %d: %s", logout.Code, logout.Body.String())
+	}
+	accountStore.mu.RLock()
+	valid := accountStore.sessionMatchesAccountLocked(token, "admin")
+	accountStore.mu.RUnlock()
+	if !valid {
+		t.Fatal("stored session hash revoked the original session")
+	}
+}
+
 func TestSessionMigrationRemovesPlaintextKeys(t *testing.T) {
+	token := strings.Repeat("a", 64)
 	store := &AccountStore{db: accountDB{
 		Users: map[string]StoredUser{"member1": {Username: "member1"}},
 		Sessions: map[string]StoredSession{
-			"legacy-token": {Username: "member1", ExpiresAt: time.Now().Add(time.Hour).Unix()},
+			token: {Username: "member1", ExpiresAt: time.Now().Add(time.Hour).Unix()},
 		},
 		Scripts: map[string]StoredScripts{},
 	}}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !store.sessionMatchesAccountLocked(token, "member1") {
+		t.Fatal("legacy session did not authenticate before migration")
+	}
 	store.migrateSessionKeysLocked()
-	if _, exists := store.db.Sessions["legacy-token"]; exists {
+	if _, exists := store.db.Sessions[token]; exists {
 		t.Fatal("legacy plaintext session key remained after migration")
 	}
-	if _, exists := store.db.Sessions[sessionStorageKey("legacy-token")]; !exists {
+	if _, exists := store.db.Sessions[sessionStorageKey(token)]; !exists {
 		t.Fatal("migrated hashed session key was not created")
+	}
+	if !store.sessionMatchesAccountLocked(token, "member1") {
+		t.Fatal("legacy session did not authenticate after migration")
+	}
+	if store.sessionMatchesAccountLocked(sessionStorageKey(token), "member1") {
+		t.Fatal("migrated session hash authenticated without the original token")
 	}
 }
 

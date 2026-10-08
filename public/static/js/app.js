@@ -748,7 +748,9 @@ function keepActiveTabVisible() {
     function align() {
         var active = bar.querySelector('.ssh-tab.active');
         if (!active) return;
-        var isColumn = getComputedStyle(bar).flexDirection === 'column';
+        var barStyle = getComputedStyle(bar);
+        if (barStyle.flexWrap === 'wrap') return;
+        var isColumn = barStyle.flexDirection === 'column';
         if (isColumn) {
             active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
             return;
@@ -1216,6 +1218,11 @@ function connectSession(session) {
             if (!isCurrentConnection() || session.ws !== ws) return;
             var isText = typeof e.data === 'string';
             var controlMessage = isText ? parseTerminalControlMessage(e.data) : null;
+            if (controlMessage && controlMessage.type === 'connection-error') {
+                failedBeforeConnect = true;
+                showToast(session.hostname + ' 连接失败：' + controlMessage.message, 'error');
+                return;
+            }
             if (controlMessage && controlMessage.type === 'host-key-mismatch') {
                 failedBeforeConnect = true;
                 handleHostKeyMismatch(session, controlMessage);
@@ -3459,6 +3466,8 @@ function applyCurrentAccount(account) {
         refreshActiveScriptWorkspaceUI();
         // 分享历史按账号归集，登录/登出后列表内容会变，弹窗开着时要重画。
         if (typeof renderConnectionShareHistory === 'function') {
+            var shareUrl = document.getElementById('connectionShareUrl');
+            if (shareUrl) shareUrl.value = '';
             var shareModal = document.getElementById('connectionShareModal');
             if (shareModal && shareModal.classList.contains('show')) renderConnectionShareHistory();
         }
@@ -3896,6 +3905,11 @@ function syncScriptBookmarks(mode, silent, retryCount, conflictMerged) {
     var accountUsername = currentAccount.username;
     var requestGeneration = ++scriptSyncGeneration;
     var snapshot = captureScriptSyncSnapshot();
+    if (mode !== 'pull' && typeof isScriptStorageCorrupt === 'function' && isScriptStorageCorrupt()) {
+        setCloudStatus('本地书签数据损坏，已停止同步以避免覆盖云端', 'warn', 6000);
+        if (!silent) showToast('本地书签数据损坏，请先导出或清理后再同步', 'error');
+        return;
+    }
     var payload = {
         mode: mode,
         account: accountUsername,
@@ -5835,7 +5849,8 @@ function sftpLoad(path, session, options) {
 
 function sftpGo() {
     var session = getActiveSession();
-    if (session) sftpLoad(document.getElementById('sftpPath').value.trim() || '/', session, { force: true });
+    var path = document.getElementById('sftpPath').value;
+    if (session) sftpLoad(path.trim() ? path : '/', session, { force: true });
 }
 function sftpUp() {
     var session = getActiveSession();
@@ -6745,7 +6760,7 @@ function dismissSftpDownload(id) {
 }
 
 function normalizeSftpDir(path) {
-    path = String(path || '').trim();
+    path = String(path || '');
     if (!path) return '/';
     path = path.replace(/\\/g, '/').replace(/\/+/g, '/');
     if (path[0] !== '/') path = '/' + path;
@@ -6755,7 +6770,7 @@ function normalizeSftpDir(path) {
 
 // ==================== Remote File Editor ====================
 function normalizeRemoteFilePath(path) {
-    path = String(path || '').trim().replace(/\\/g, '/').replace(/\/+/g, '/');
+    path = String(path || '').replace(/\\/g, '/').replace(/\/+/g, '/');
     if (!path) return '';
     if (path.charAt(0) !== '/') path = '/' + path;
     return path.length > 1 ? path.replace(/\/+$/, '') : path;
@@ -7562,7 +7577,7 @@ function createRemoteEditorElement(editor) {
 
     editor.nameInput.addEventListener('input', function () {
         if (!editor.isNew) return;
-        editor.name = editor.nameInput.value.trim();
+        editor.name = editor.nameInput.value;
         editor.path = joinRemoteFilePath(editor.parentPath, editor.name);
         editor.targetPath = '';
         editor.subtitle.textContent = remoteEditorPathLabel(editor) || normalizeSftpDir(editor.parentPath);
@@ -8020,8 +8035,8 @@ function openRemoteEditor(path, session) {
 }
 
 function sanitizeRemoteFileName(name) {
-    name = String(name || '').trim();
-    if (!name || name === '.' || name === '..' || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || /[\u0000-\u001f\u007f]/.test(name)) return '';
+    name = String(name || '');
+    if (!name.trim() || name === '.' || name === '..' || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || /[\u0000-\u001f\u007f]/.test(name)) return '';
     if (utf8ByteLength(name) > 255) return '';
     return name;
 }
@@ -9370,17 +9385,9 @@ document.addEventListener('click', function (e) {
             connDrawer.classList.remove('open');
         }
     }
-    // Close script bookmark drawer
-    var scriptDrawer = document.getElementById('scriptDrawer');
+    // Script bookmarks stay open across terminal clicks and tab switches.
+    // Close them with their toggle/close button or when opening SFTP.
     var termEdge = document.getElementById('termEdgeBtns');
-    var startedInsideScriptDrawer = scriptDrawer && (scriptDrawer.contains(e.target) || eventPath.indexOf(scriptDrawer) !== -1);
-    if (scriptDrawer && scriptDrawer.classList.contains('open')) {
-        if (!startedInsideScriptDrawer && !(termEdge && termEdge.contains(e.target)) && !e.target.closest('.tb-btn')) {
-            scriptDrawer.classList.remove('open');
-            remoteEditorLayerWidth();
-            setTimeout(function () { if (activeIdx >= 0 && sessions[activeIdx]) syncTermSize(sessions[activeIdx]); }, 350);
-        }
-    }
     // Close SFTP panel
     var sftpPanel = document.getElementById('sftpPanel');
     if (sftpPanel && sftpPanel.classList.contains('open')) {

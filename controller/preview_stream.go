@@ -54,6 +54,10 @@ var previewGrants = struct {
 	items map[string]*previewGrant
 }{items: make(map[string]*previewGrant)}
 
+var createPreviewSFTPClient = func(client *core.SSHClient) error {
+	return client.CreateSftp()
+}
+
 func newPreviewGrantToken() (string, error) {
 	bytes := make([]byte, 24)
 	if _, err := rand.Read(bytes); err != nil {
@@ -229,14 +233,24 @@ func AuthorizeFilePreview(c *gin.Context) *ResponseBody {
 		responseBody.Msg = "SSH preview configuration is too large"
 		return &responseBody
 	}
-	if err := client.CreateSftp(); err != nil {
+	if err := c.Request.Context().Err(); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := createPreviewSFTPClient(&client); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	defer client.Close()
-	requestedPath := strings.TrimSpace(request.Path)
+	stopCancellation := closeSSHOnContextDone(c.Request.Context(), &client)
+	defer stopCancellation()
+	requestedPath := request.Path
 	info, targetPath, spec, err := resolveRemotePreviewTarget(client.Sftp, requestedPath, remotePreviewMaxBytes())
 	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	if err := c.Request.Context().Err(); err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}

@@ -190,7 +190,7 @@ function updateRdpQuickSummary() {
 
 function openRdpSettings() {
     var s = rdpSettings();
-    var relay = rdpRelayConfig();
+    var relay = rdpPendingRelay || rdpRelayConfig();
     document.getElementById('rdpResolution').value = s.resolution;
     document.getElementById('rdpCustomWidth').value = s.customWidth;
     document.getElementById('rdpCustomHeight').value = s.customHeight;
@@ -274,16 +274,15 @@ function saveRdpSettings() {
         port: parseInt(document.getElementById('rdpRelayPort').value, 10) || 1080,
         username: document.getElementById('rdpRelayUser').value.trim(),
         // 中转凭据只在用户明确勾选后才落盘，且始终只存在本地。
-        password: remember ? document.getElementById('rdpRelayPass').value : '',
-        privateKey: remember ? document.getElementById('rdpRelayKey').value : '',
+        password: document.getElementById('rdpRelayPass').value,
+        privateKey: document.getElementById('rdpRelayKey').value,
         remember: remember
     };
+    rdpPendingRelay = relay;
     if (remember) {
         safeStorageSet(RDP_RELAY_KEY, JSON.stringify(relay));
     } else {
         safeStorageRemove(RDP_RELAY_KEY);
-        // 不记住时仍要让本次连接用上，挂在内存里。
-        rdpPendingRelay = relay;
     }
     updateRdpQuickSummary();
     applyRdpToolbarMode();
@@ -305,9 +304,9 @@ function saveRdpSettings() {
 var rdpPendingRelay = null;
 
 function activeRdpRelay() {
+    if (rdpPendingRelay) return rdpPendingRelay.kind !== 'none' ? rdpPendingRelay : { kind: 'none' };
     var saved = rdpRelayConfig();
     if (saved.remember && saved.kind !== 'none') return saved;
-    if (rdpPendingRelay && rdpPendingRelay.kind !== 'none') return rdpPendingRelay;
     return { kind: 'none' };
 }
 
@@ -651,6 +650,8 @@ function createRdpSession(hostname, port, username, opts) {
         resizeObs: null,
         _connected: false,
         _closing: false,
+        _connectGeneration: 0,
+        _credentialController: null,
         _resizeTimer: null,
         _inputCleanup: null,
         _keyboardLocked: false,
@@ -694,22 +695,46 @@ function setRdpOverlay(session, text, kind) {
 
 // ==================== 连接 ====================
 
+function cancelRdpConnectionAttempt(session) {
+    session._connectGeneration = (session._connectGeneration || 0) + 1;
+    if (session._credentialController) {
+        try { session._credentialController.abort(); } catch (error) { }
+        session._credentialController = null;
+    }
+}
+
+function rdpConnectionIsCurrent(session, generation) {
+    return !!session && !session._closing && session._connectGeneration === generation && sessions.indexOf(session) >= 0;
+}
+
+function discardRdpClient(client) {
+    if (!client) return;
+    try { client.shutdown(); } catch (error) { }
+    if (typeof client.free === 'function') { try { client.free(); } catch (error) { } }
+}
+
 function connectRdpSession(session, afterStart) {
     var finish = function () { if (typeof afterStart === 'function') { afterStart(); afterStart = null; } };
-
+    if (!session || session._closing || sessions.indexOf(session) < 0) { finish(); return Promise.resolve(null); }
+    cancelRdpConnectionAttempt(session);
+    var generation = session._connectGeneration;
     setRdpOverlay(session, '正在加载远程桌面组件…');
 
-    loadRdpWasm().then(function (mod) {
+    return loadRdpWasm().then(function (mod) {
+        if (!rdpConnectionIsCurrent(session, generation)) return null;
         session.rdpModule = mod;
         setRdpOverlay(session, '正在申请短期连接凭证…');
         return requestRdpCredential(session);
     }).then(function (credentialInfo) {
+        if (!rdpConnectionIsCurrent(session, generation)) return null;
         setRdpOverlay(session, '正在连接 ' + session.hostname + '…');
-        return startRdpConnection(session, credentialInfo);
-    }).then(function () {
+        return startRdpConnection(session, credentialInfo, generation);
+    }).then(function (client) {
         finish();
+        return client;
     }).catch(function (err) {
         finish();
+        if (!rdpConnectionIsCurrent(session, generation)) return null;
         var message = rdpErrorText(session, err);
         setRdpOverlay(session, message, 'error');
         setStatus('error', '连接失败');
@@ -720,6 +745,8 @@ function connectRdpSession(session, afterStart) {
 }
 
 function requestRdpCredential(session) {
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    session._credentialController = controller;
     var relay = session.relay || { kind: 'none' };
     var payload = {
         hostname: session.hostname,
@@ -739,6 +766,7 @@ function requestRdpCredential(session) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
+        signal: controller ? controller.signal : undefined,
         body: JSON.stringify(payload)
     }).then(function (res) {
         return res.json().catch(function () { return { Msg: 'HTTP ' + res.status }; }).then(function (body) {
@@ -747,10 +775,13 @@ function requestRdpCredential(session) {
             }
             return body.Data || {};
         });
+    }).finally(function () {
+        if (session._credentialController === controller) session._credentialController = null;
     });
 }
 
-function startRdpConnection(session, credentialInfo) {
+function startRdpConnection(session, credentialInfo, generation) {
+    if (!rdpConnectionIsCurrent(session, generation)) return Promise.resolve(null);
     var mod = session.rdpModule;
     var s = session.rdpSettings;
     var size = rdpTargetSize(session);
@@ -772,9 +803,11 @@ function startRdpConnection(session, credentialInfo) {
 
     builder.setCursorStyleCallbackContext(session.canvas);
     builder.setCursorStyleCallback(function (style) {
+        if (!rdpConnectionIsCurrent(session, generation)) return;
         session.canvas.style.cursor = style || 'default';
     });
     builder.canvasResizedCallback(function () {
+        if (!rdpConnectionIsCurrent(session, generation)) return;
         try {
             var ds = session.rdpSession && session.rdpSession.desktopSize();
             if (ds) {
@@ -784,9 +817,10 @@ function startRdpConnection(session, credentialInfo) {
         } catch (e) { }
     });
 
-    if (s.clipboard) attachRdpClipboard(session, builder, mod);
+    if (s.clipboard) attachRdpClipboard(session, builder, mod, generation);
 
     return builder.connect().then(function (rdpSession) {
+        if (!rdpConnectionIsCurrent(session, generation)) { discardRdpClient(rdpSession); return null; }
         session.rdpSession = rdpSession;
         session._connected = true;
 
@@ -800,7 +834,9 @@ function startRdpConnection(session, credentialInfo) {
         if (s.dynamicResize && s.resolution === 'fit') {
             var want = rdpTargetSize(session);
             if (Math.abs(ds.width - want.width) > 2 || Math.abs(ds.height - want.height) > 2) {
-                setTimeout(function () { applyRdpResize(session, true); }, 350);
+                setTimeout(function () {
+                    if (rdpConnectionIsCurrent(session, generation) && session.rdpSession === rdpSession) applyRdpResize(session, true);
+                }, 350);
             }
         }
 
@@ -811,22 +847,29 @@ function startRdpConnection(session, credentialInfo) {
         session._inputCleanup = attachRdpInput(session, mod);
         session.canvas.focus();
 
-        if (s.startFullscreen) setTimeout(function () { toggleRdpFullscreen(session, true); }, 120);
+        if (s.startFullscreen) setTimeout(function () {
+            if (rdpConnectionIsCurrent(session, generation) && session.rdpSession === rdpSession) toggleRdpFullscreen(session, true);
+        }, 120);
 
         rdpSession.run().then(function (info) {
             var reason = '';
             try { reason = info.reason(); } catch (e) { }
-            handleRdpSessionEnd(session, reason || '会话已结束');
+            if (info && typeof info.free === 'function') { try { info.free(); } catch (error) { } }
+            handleRdpSessionEnd(session, reason || '会话已结束', rdpSession, generation);
         }).catch(function (err) {
-            handleRdpSessionEnd(session, rdpErrorText(session, err));
+            handleRdpSessionEnd(session, rdpErrorText(session, err), rdpSession, generation);
+        }).then(function () {
+            if (typeof rdpSession.free === 'function') { try { rdpSession.free(); } catch (error) { } }
         });
         return rdpSession;
     });
 }
 
-function handleRdpSessionEnd(session, reason) {
+function handleRdpSessionEnd(session, reason, client, generation) {
+    if (session.rdpSession !== client || session._connectGeneration !== generation) return;
     session._connected = false;
     session.rdpSession = null;
+    if (session._inputCleanup) { try { session._inputCleanup(); } catch (error) { } session._inputCleanup = null; }
     if (session._closing) return;
     setRdpOverlay(session, reason || '远程桌面连接已断开', 'error');
     // NLA 有时不是在握手阶段拒绝，而是连上后立刻断开并给出登录失败原因。
@@ -1257,11 +1300,12 @@ function rdpCopy(session) {
     });
 }
 
-function attachRdpClipboard(session, builder, mod) {
+function attachRdpClipboard(session, builder, mod, generation) {
     session._remoteClipboardText = '';
     session._remoteClipboardPending = false;
 
     builder.remoteClipboardChangedCallback(function (data) {
+        if (!rdpConnectionIsCurrent(session, generation)) return;
         var text = extractRdpClipboardText(data);
         if (typeof text !== 'string') return;
         session._remoteClipboardText = text;
@@ -1271,13 +1315,16 @@ function attachRdpClipboard(session, builder, mod) {
         }
         // 这里没有用户手势，多半会被拒；成功则用户无感，失败就挂起等按钮。
         navigator.clipboard.writeText(text).then(function () {
+            if (!rdpConnectionIsCurrent(session, generation)) return;
             setRdpClipboardPending(session, false);
         }).catch(function () {
+            if (!rdpConnectionIsCurrent(session, generation)) return;
             setRdpClipboardPending(session, true);
         });
     });
 
     builder.forceClipboardUpdateCallback(function () {
+        if (!rdpConnectionIsCurrent(session, generation)) return;
         pushLocalClipboardToRdp(session, { silent: true });
     });
 }
@@ -1462,11 +1509,13 @@ function reconnectRdpTab() {
     }
     session._connected = false;
     if (session._inputCleanup) { session._inputCleanup(); session._inputCleanup = null; }
-    connectRdpSession(session);
+    return connectRdpSession(session);
 }
 
 function closeRdpSession(session) {
     session._closing = true;
+    session._connected = false;
+    cancelRdpConnectionAttempt(session);
     if (session._resizeTimer) { clearTimeout(session._resizeTimer); session._resizeTimer = null; }
     if (session._inputCleanup) { try { session._inputCleanup(); } catch (e) { } session._inputCleanup = null; }
     if (session._keyboardLocked && navigator.keyboard && navigator.keyboard.unlock) {

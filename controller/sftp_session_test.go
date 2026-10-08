@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,219 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+type sftpSessionWaitTestContext struct {
+	context.Context
+	waiting chan struct{}
+	cancel  context.CancelFunc
+	once    sync.Once
+}
+
+func (ctx *sftpSessionWaitTestContext) Done() <-chan struct{} {
+	ctx.once.Do(func() {
+		if ctx.waiting != nil {
+			close(ctx.waiting)
+		}
+		if ctx.cancel != nil {
+			ctx.cancel()
+		}
+	})
+	return ctx.Context.Done()
+}
+
+func assertEmptySFTPSessionRegistry(test *testing.T) {
+	test.Helper()
+	sftpSessionRegistry.Lock()
+	defer sftpSessionRegistry.Unlock()
+	if len(sftpSessionRegistry.entries) != 0 || len(sftpSessionRegistry.clients) != 0 {
+		test.Fatalf("SFTP quota leaked: entries=%d clients=%v", len(sftpSessionRegistry.entries), sftpSessionRegistry.clients)
+	}
+}
+
+func TestSFTPSessionLeaseWaitHonorsCancellation(test *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		test.Run(mode, func(test *testing.T) {
+			resetSFTPSessionRegistryForTest()
+			test.Cleanup(resetSFTPSessionRegistryForTest)
+			originalFactory := createSFTPSessionClient
+			test.Cleanup(func() { createSFTPSessionClient = originalFactory })
+			var creates atomic.Int32
+			createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+				creates.Add(1)
+				return &configuration, nil
+			}
+			sshInfo := sftpSessionTestSSHInfo(test)
+			configuration, err := core.DecodedMsgToSSHClient(sshInfo)
+			if err != nil {
+				test.Fatal(err)
+			}
+			requestContext, _ := memorySFTPTestRequest(test, "/file/list", nil)
+			first, err := acquireSFTPSessionLease(requestContext, "queued-session", sshInfo, configuration)
+			if err != nil || !first.isPersistent {
+				test.Fatalf("first lease = %v, %v", first, err)
+			}
+			test.Cleanup(func() { first.Release(true) })
+			var waitContext context.Context
+			var cancel context.CancelFunc
+			if mode == "deadline" {
+				waitContext, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+			} else {
+				waitContext, cancel = context.WithCancel(context.Background())
+			}
+			waiting := make(chan struct{})
+			observed := &sftpSessionWaitTestContext{Context: waitContext, waiting: waiting}
+			secondContext, _ := memorySFTPTestRequest(test, "/file/list", nil)
+			secondContext.Request = secondContext.Request.WithContext(observed)
+			result := make(chan error, 1)
+			finished := make(chan struct{})
+			test.Cleanup(func() {
+				cancel()
+				first.Release(true)
+				select {
+				case <-finished:
+				case <-time.After(memorySFTPTestTimeout):
+					test.Error("SFTP waiter did not exit")
+				}
+			})
+			go func() {
+				defer close(finished)
+				lease, acquireErr := acquireSFTPSessionLease(secondContext, "queued-session", sshInfo, configuration)
+				if lease != nil {
+					lease.Release(true)
+				}
+				result <- acquireErr
+			}()
+			select {
+			case <-waiting:
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatal("second request did not enter the session lock wait")
+			}
+			if mode == "cancel" {
+				cancel()
+			}
+			select {
+			case acquireErr := <-result:
+				if !errors.Is(acquireErr, waitContext.Err()) || acquireErr == nil {
+					test.Fatalf("cancelled lock wait returned %v, want %v", acquireErr, waitContext.Err())
+				}
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatal("cancelled SFTP request stayed queued behind the active lease")
+			}
+			sftpSessionRegistry.Lock()
+			remaining := len(sftpSessionRegistry.entries)
+			clientQuota := sftpSessionRegistry.clients[first.entry.clientID]
+			sftpSessionRegistry.Unlock()
+			if remaining != 1 || clientQuota != 1 || first.entry.closed {
+				test.Fatalf("waiter cancellation damaged the active session: entries=%d quota=%d", remaining, clientQuota)
+			}
+			first.Release(false)
+			retryContext, stopRetry := context.WithTimeout(context.Background(), memorySFTPTestTimeout)
+			defer stopRetry()
+			requestContext.Request = requestContext.Request.WithContext(retryContext)
+			retry, err := acquireSFTPSessionLease(requestContext, "queued-session", sshInfo, configuration)
+			if err != nil {
+				test.Fatalf("session lock leaked after waiter cancellation: %v", err)
+			}
+			retry.Release(true)
+			if creates.Load() != 1 {
+				test.Fatalf("waiter cancellation reconnected the active session: creates=%d", creates.Load())
+			}
+			assertEmptySFTPSessionRegistry(test)
+		})
+	}
+}
+
+func TestSFTPSessionCancelledRequestDoesNotReserveQuota(test *testing.T) {
+	resetSFTPSessionRegistryForTest()
+	test.Cleanup(resetSFTPSessionRegistryForTest)
+	originalFactory := createSFTPSessionClient
+	test.Cleanup(func() { createSFTPSessionClient = originalFactory })
+	creates := 0
+	createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+		creates++
+		return &configuration, nil
+	}
+	for _, sessionID := range []string{"", "cancelled-session"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		requestContext, _ := memorySFTPTestRequest(test, "/file/list", nil)
+		requestContext.Request = requestContext.Request.WithContext(ctx)
+		lease, err := acquireSFTPSessionLease(requestContext, sessionID, "memory", core.NewSSHClient())
+		if lease != nil || !errors.Is(err, context.Canceled) {
+			if lease != nil {
+				lease.Release(true)
+			}
+			test.Fatalf("cancelled request acquired a lease: %v, %v", lease, err)
+		}
+	}
+	if creates != 0 {
+		test.Fatalf("cancelled requests created %d connections", creates)
+	}
+	assertEmptySFTPSessionRegistry(test)
+}
+
+func TestSFTPSessionCancellationAfterRegistrationReleasesQuota(test *testing.T) {
+	resetSFTPSessionRegistryForTest()
+	test.Cleanup(resetSFTPSessionRegistryForTest)
+	originalFactory := createSFTPSessionClient
+	test.Cleanup(func() { createSFTPSessionClient = originalFactory })
+	creates := 0
+	createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+		creates++
+		return &configuration, nil
+	}
+	for attempt := 0; attempt < 32; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		requestContext, _ := memorySFTPTestRequest(test, "/file/list", nil)
+		requestContext.Request = requestContext.Request.WithContext(&sftpSessionWaitTestContext{Context: ctx, cancel: cancel})
+		lease, err := acquireSFTPSessionLease(requestContext, "cancel-at-lock", "memory", core.NewSSHClient())
+		cancel()
+		if lease != nil || !errors.Is(err, context.Canceled) {
+			if lease != nil {
+				lease.Release(true)
+			}
+			test.Fatalf("registration cancellation = %v, %v", lease, err)
+		}
+		assertEmptySFTPSessionRegistry(test)
+	}
+	if creates != 0 {
+		test.Fatalf("cancelled empty sessions created %d connections", creates)
+	}
+}
+
+func TestSFTPSessionCancellationDuringCreationReleasesQuota(test *testing.T) {
+	for _, sessionID := range []string{"", "cancel-during-create"} {
+		test.Run("session="+sessionID, func(test *testing.T) {
+			resetSFTPSessionRegistryForTest()
+			test.Cleanup(resetSFTPSessionRegistryForTest)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			originalFactory := createSFTPSessionClient
+			test.Cleanup(func() { createSFTPSessionClient = originalFactory })
+			var created *core.SSHClient
+			createSFTPSessionClient = func(configuration core.SSHClient) (*core.SSHClient, error) {
+				created = &configuration
+				cancel()
+				return created, nil
+			}
+			requestContext, _ := memorySFTPTestRequest(test, "/file/list", nil)
+			requestContext.Request = requestContext.Request.WithContext(ctx)
+			configuration := core.NewSSHClient()
+			configuration.Password = "secret"
+			lease, err := acquireSFTPSessionLease(requestContext, sessionID, "memory", configuration)
+			if lease != nil || !errors.Is(err, context.Canceled) {
+				if lease != nil {
+					lease.Release(true)
+				}
+				test.Fatalf("creation cancellation = %v, %v", lease, err)
+			}
+			if created == nil || created.Password != "" {
+				test.Fatal("cancelled connection retained credentials")
+			}
+			assertEmptySFTPSessionRegistry(test)
+		})
+	}
+}
 
 func resetSFTPSessionRegistryForTest() {
 	sftpSessionRegistry.Lock()

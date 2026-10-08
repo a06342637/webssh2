@@ -143,6 +143,13 @@ func shareQuotaKeyFor(c *gin.Context, owner string, loggedIn bool) string {
 	return "scope:" + hex.EncodeToString(digest[:16])
 }
 
+func shareHistoryScope(owner string, loggedIn bool) string {
+	if loggedIn {
+		return "account:" + owner
+	}
+	return "guest"
+}
+
 func sanitizeShareLabel(raw string) string {
 	label := strings.TrimSpace(raw)
 	label = strings.Map(func(r rune) rune {
@@ -212,7 +219,13 @@ func CreateShare(c *gin.Context) {
 	}
 
 	now := time.Now().Unix()
+	sessionToken, _ := c.Cookie(sessionCookieName)
 	accountStore.mu.Lock()
+	if loggedIn && !accountStore.sessionMatchesAccountLocked(sessionToken, owner) {
+		accountStore.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录"})
+		return
+	}
 	accountStore.ensureMaps()
 	accountStore.cleanupExpiredSharesLocked(now)
 	if accountStore.shareCountForOwnerLocked(quotaKey) >= shareMaxPerOwner {
@@ -220,7 +233,8 @@ func CreateShare(c *gin.Context) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"ok": false, "msg": "未过期的分享链接过多，请先删除一些再试"})
 		return
 	}
-	accountStore.db.Shares[shareStorageKey(token)] = StoredShare{
+	key := shareStorageKey(token)
+	accountStore.db.Shares[key] = StoredShare{
 		Version:    shareSchemaVersion,
 		Ciphertext: req.Ciphertext,
 		IV:         req.IV,
@@ -232,6 +246,9 @@ func CreateShare(c *gin.Context) {
 		Burn:       req.Burn,
 	}
 	saveErr := accountStore.saveLocked()
+	if saveErr != nil {
+		delete(accountStore.db.Shares, key)
+	}
 	accountStore.mu.Unlock()
 
 	if saveErr != nil {
@@ -241,9 +258,10 @@ func CreateShare(c *gin.Context) {
 	// 同时给出存储键：浏览器把它记在本地，之后就能把本地保存的完整链接
 	// 和 ListShares 返回的记录对应起来。
 	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{
-		"token":     token,
-		"id":        shareStorageKey(token),
-		"expiresAt": now + ttl,
+		"token":        token,
+		"id":           shareStorageKey(token),
+		"expiresAt":    now + ttl,
+		"historyScope": shareHistoryScope(owner, loggedIn),
 	}})
 }
 
@@ -272,14 +290,13 @@ func GetShare(c *gin.Context) {
 		found = false
 	}
 	// 阅后即焚：读到就立刻删掉，保证同一条链接只能成功打开一次。
-	burned := false
+	var saveErr error
 	if found && share.Burn {
 		delete(accountStore.db.Shares, key)
-		burned = true
-	}
-	var saveErr error
-	if burned {
 		saveErr = accountStore.saveLocked()
+		if saveErr != nil {
+			accountStore.db.Shares[key] = share
+		}
 	}
 	accountStore.mu.Unlock()
 
@@ -313,7 +330,13 @@ func ListShares(c *gin.Context) {
 	quotaKey := shareQuotaKeyFor(c, owner, loggedIn)
 
 	now := time.Now().Unix()
+	sessionToken, _ := c.Cookie(sessionCookieName)
 	accountStore.mu.Lock()
+	if loggedIn && !accountStore.sessionMatchesAccountLocked(sessionToken, owner) {
+		accountStore.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录"})
+		return
+	}
 	accountStore.ensureMaps()
 	accountStore.cleanupExpiredSharesLocked(now)
 	items := make([]gin.H, 0, 8)
@@ -338,9 +361,10 @@ func ListShares(c *gin.Context) {
 		return items[i]["createdAt"].(int64) > items[j]["createdAt"].(int64)
 	})
 	c.JSON(http.StatusOK, gin.H{"ok": true, "data": gin.H{
-		"items":    items,
-		"loggedIn": loggedIn,
-		"maxTtl":   shareMaxTTL,
+		"items":        items,
+		"loggedIn":     loggedIn,
+		"maxTtl":       shareMaxTTL,
+		"historyScope": shareHistoryScope(owner, loggedIn),
 	}})
 }
 
@@ -369,7 +393,13 @@ func DeleteShare(c *gin.Context) {
 	}
 
 	now := time.Now().Unix()
+	sessionToken, _ := c.Cookie(sessionCookieName)
 	accountStore.mu.Lock()
+	if loggedIn && !accountStore.sessionMatchesAccountLocked(sessionToken, owner) {
+		accountStore.mu.Unlock()
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录"})
+		return
+	}
 	accountStore.ensureMaps()
 	accountStore.cleanupExpiredSharesLocked(now)
 	share, found := accountStore.db.Shares[key]
@@ -381,6 +411,9 @@ func DeleteShare(c *gin.Context) {
 	if found {
 		delete(accountStore.db.Shares, key)
 		saveErr = accountStore.saveLocked()
+		if saveErr != nil {
+			accountStore.db.Shares[key] = share
+		}
 	}
 	accountStore.mu.Unlock()
 

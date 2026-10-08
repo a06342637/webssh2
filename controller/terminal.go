@@ -69,13 +69,6 @@ func writeHostKeyMismatchMessage(wsConn interface {
 func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
 	defer TimeCost(time.Now(), &responseBody)
-	release, ok := acquireSSHSlot(c)
-	if !ok {
-		responseBody.Msg = "SSH 连接任务过多，请稍后重试"
-		return &responseBody
-	}
-	defer release()
-
 	cols := c.DefaultQuery("cols", "150")
 	rows := c.DefaultQuery("rows", "35")
 	closeTip := c.DefaultQuery("closeTip", "Connection timed out!")
@@ -90,6 +83,21 @@ func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	defer wsConn.Close()
+	release, err := acquireTerminalSlot(requestIP(c))
+	if err != nil {
+		// Browsers cannot read the body of a rejected WebSocket upgrade.
+		// Send an explicit control message so the limit is visible to the user.
+		payload, _ := json.Marshal(struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}{Type: "connection-error", Message: err.Error()})
+		_ = wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = wsConn.WriteMessage(websocket.TextMessage, append([]byte(terminalControlPrefix), payload...))
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	defer release()
 
 	wsConn.SetReadLimit(websocketInitLimit)
 	_ = wsConn.SetReadDeadline(time.Now().Add(websocketInitTimeout))

@@ -222,6 +222,8 @@ https://你的域名/s/<token>#k=<密钥>
 
 完整链接包含解密密钥，而服务端没有密钥，所以**只有生成它的那台浏览器**能再把链接拼出来。换设备后列表里会标注「本机没有链接副本」，只保留删除按钮。
 
+同一浏览器内，不同账号和游客身份的本地分享历史分别保存，切换身份不会清除其他身份的链接副本。管理员删除账号时，也会撤销该账号仍有效的分享；重新创建同名账号不会继承旧分享。
+
 创建和读取都**不需要登录**（接收方通常没有本站账号）。游客的分享归属到浏览器自带的一个随机、HttpOnly 的 cookie 上，而不是来源 IP——所以 NAT 后共用出口 IP 的一群人互相看不到、也删不掉对方的分享。清除浏览器 cookie 后，服务端就再也认不出这些分享属于你，只能等它们自然过期。游客创建按浏览器限额，防止接口被当成免费的匿名加密存储。
 
 ### 关于旧版明文分享
@@ -543,13 +545,32 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 - WebSocket 初始 SSH 配置限制为 128 KiB，并要求 15 秒内发送；握手完成后终端单帧输入上限切换为 4 MiB，避免大段粘贴沿用初始化限制而断线。
 - 默认普通请求体上限为 4 MiB，上传接口使用独立限制。
 - JSON 接口必须使用 `application/json`，拒绝未知字段、多个 JSON 值和超过 30 秒仍未读完的请求体；`/api` 响应统一 `no-store`。
-- 默认最多同时建立 64 个 SSH 任务、同一客户端 8 个；可用 `WEBSSH_MAX_CONCURRENT_SSH` 和 `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` 调整。
+- SSH 终端使用独立额度：默认全局 64 个、同一客户端 32 个，可用 `WEBSSH_MAX_TERMINALS` 和 `WEBSSH_MAX_TERMINALS_PER_CLIENT` 调整。达到上限时页面会明确提示，关闭不用的标签即可释放额度。
+- SFTP、连接检查和系统信息任务保留独立的全局 64 个、同一客户端 8 个额度，可用 `WEBSSH_MAX_CONCURRENT_SSH` 和 `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` 调整；打开多个终端不会挤占这些任务的额度。
 - SFTP 目录浏览默认复用空闲 120 秒的短期连接池，全局最多 32 条、同一客户端 4 条；可用 `WEBSSH_SFTP_SESSION_IDLE_SECONDS`、`WEBSSH_MAX_SFTP_SESSIONS` 和 `WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT` 调整。
 - 默认最多同时进行 4 个上传、同一客户端 2 个；可用 `WEBSSH_MAX_CONCURRENT_UPLOADS` 和 `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` 调整。
 - 系统信息命令最长执行 12 秒、输出最多 1 MiB；客户端断开时会关闭对应 SSH/SFTP 连接。
 - 服务端发送 `nosniff`、`SAMEORIGIN`、`no-referrer` 和权限策略响应头。
 
 ## 版本更新（页面或命令行）
+
+### v0.5.80 终端与多标签修复
+
+- 修复终端缩放后鼠标选中、复制内容偏到上一行的问题，同时校正链接和终端鼠标事件的坐标。
+- 脚本书签展开后，切换 SSH 标签、点击终端都保持展开；可通过书签按钮主动收起，打开文件管理时仍会互相切换。
+- 桌面端连接标签过多时自动换行，不再出现横向滚动条；手机和 iPad 保持原有布局。
+- SSH 终端与 SFTP/系统信息任务分开计数，默认支持同一客户端 32 个终端；连接数量达到上限时显示明确提示。
+- 同步包含下列 v0.5.79 安全与稳定性修复。
+
+### v0.5.79 安全与稳定性修复
+
+- 修复远端路径尾部空白被裁剪导致的错误文件操作，补齐 SFTP、预览及文件夹归档的取消与清理处理。
+- 修复 RDP 的 SSH 跳板握手、未勾选记住时的中转凭据，以及关闭标签后的异步连接清理。
+- 阻止会话哈希重放登录和已删除账号的在途同步，分享写入失败时恢复原状态。
+- 隔离不同身份的本地分享历史，在发送请求前阻止损坏书签覆盖云端，并修正虚拟化宿主机 CPU 统计。
+- 构建工具链升级为 Go 1.26.8，SSH 依赖升级为 `golang.org/x/crypto v0.56.0`，补充相应回归测试。
+
+### 更新方式
 
 普通 Compose 默认不具有 Docker socket 权限，页面更新也默认关闭。只有安装向导中明确输入 `y` 才会在 `.env` 写入：
 
@@ -664,8 +685,10 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com
 
 ## 从源码运行
 
+项目要求 Go 1.26.8 或更新版本；默认 Docker 构建使用 Go 1.26.8。启用 Go 自动工具链管理时，较旧的 Go 会按 `go.mod` 下载所需版本。
+
 ```bash
-# Go 1.25.12+
+# Go 1.26.8+
 go mod download
 go run .
 
@@ -675,6 +698,9 @@ go run . -p 3000
 # 页面 Basic Auth
 go run . -a admin:password
 ```
+
+回归检查：`go test ./...`、`go vet ./...` 和 `node --test test/*.test.js`。
+安装 Playwright 和 Chromium 后，可运行 `node test/terminal_browser.cjs` 验证终端缩放选区、标签换行和书签面板；使用 Edge 时设置 `WEBSSH_BROWSER=msedge`。
 
 ## 配置参数
 
@@ -695,7 +721,9 @@ go run . -a admin:password
 | `WEBSSH_MAX_ACCOUNTS` | 200 | 最大账号数 |
 | `WEBSSH_MAX_SESSIONS_PER_USER` | 20 | 每用户活动会话上限 |
 | `WEBSSH_REQUIRE_ACCOUNT` | false | 是否禁止游客使用 SSH/SFTP；设为 true 后要求书签账号会话或已通过页面 Basic Auth |
-| `WEBSSH_MAX_CONCURRENT_SSH` | 64 | 全局同时进行的终端、SFTP、检查和系统信息 SSH 任务上限 |
+| `WEBSSH_MAX_TERMINALS` | 64 | 全局 SSH 终端数量上限（独立于 SFTP/系统信息任务） |
+| `WEBSSH_MAX_TERMINALS_PER_CLIENT` | 32 | 同一来源客户端的 SSH 终端数量上限 |
+| `WEBSSH_MAX_CONCURRENT_SSH` | 64 | 全局同时进行的 SFTP、检查和系统信息 SSH 任务上限 |
 | `WEBSSH_MAX_CONCURRENT_SSH_PER_CLIENT` | 8 | 同一来源客户端的 SSH 任务上限 |
 | `WEBSSH_MAX_CONCURRENT_UPLOADS` | 4 | 全局并发上传任务上限 |
 | `WEBSSH_MAX_CONCURRENT_UPLOADS_PER_CLIENT` | 2 | 同一来源客户端的并发上传任务上限 |

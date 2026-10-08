@@ -5,19 +5,552 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"webssh/core"
 
 	"github.com/gin-gonic/gin"
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
+
+const memoryFolderArchiveTestPath = "/tmp/.webssh-folder-0123456789abcdef01234567.tar.gz"
+
+type folderArchiveTestReader func(request *sftp.Request) (io.ReaderAt, error)
+
+func (reader folderArchiveTestReader) Fileread(request *sftp.Request) (io.ReaderAt, error) {
+	return reader(request)
+}
+
+type folderArchiveBlockedTestReader struct {
+	entered chan struct{}
+	closed  <-chan struct{}
+	once    sync.Once
+}
+
+func (reader *folderArchiveBlockedTestReader) ReadAt(buffer []byte, offset int64) (int, error) {
+	reader.once.Do(func() { close(reader.entered) })
+	<-reader.closed
+	return 0, context.Canceled
+}
+
+func TestFolderArchiveCleanupDialCancelsStalledSFTPSetup(test *testing.T) {
+	test.Setenv("WEBSSH_HOST_KEY_POLICY", "insecure")
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		test.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		test.Fatal(err)
+	}
+	serverConfig := &ssh.ServerConfig{NoClientAuth: true}
+	serverConfig.AddHostKey(signer)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		test.Fatal(err)
+	}
+	entered := make(chan struct{})
+	accepted := make(chan net.Conn, 1)
+	serverDone := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), memorySFTPTestTimeout)
+	test.Cleanup(func() {
+		cancel()
+		_ = listener.Close()
+		select {
+		case connection := <-accepted:
+			_ = connection.Close()
+		default:
+		}
+	})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		accepted <- connection
+		defer connection.Close()
+		transport, channels, requests, handshakeErr := ssh.NewServerConn(connection, serverConfig)
+		if handshakeErr != nil {
+			serverDone <- handshakeErr
+			return
+		}
+		defer transport.Close()
+		go ssh.DiscardRequests(requests)
+		newChannel, open := <-channels
+		if !open {
+			serverDone <- errors.New("cleanup SSH transport closed before SFTP setup")
+			return
+		}
+		channel, channelRequests, channelErr := newChannel.Accept()
+		if channelErr != nil {
+			serverDone <- channelErr
+			return
+		}
+		defer channel.Close()
+		for request := range channelRequests {
+			if request.Type == "subsystem" {
+				close(entered)
+			}
+		}
+		serverDone <- nil
+	}()
+	configuration := core.NewSSHClient()
+	configuration.Username = "memory"
+	configuration.Hostname = "127.0.0.1"
+	configuration.Port = listener.Addr().(*net.TCPAddr).Port
+	result := make(chan error, 1)
+	go func() {
+		client, dialErr := dialFolderArchiveCleanupClient(ctx, configuration)
+		if client != nil {
+			client.Close()
+		}
+		result <- dialErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(memorySFTPTestTimeout):
+		test.Fatal("cleanup connection did not enter SFTP negotiation")
+	}
+	cancel()
+	select {
+	case dialErr := <-result:
+		if !errors.Is(dialErr, context.Canceled) {
+			test.Fatalf("cancelled cleanup dial = %v", dialErr)
+		}
+	case <-time.After(time.Second):
+		test.Fatal("cleanup dial ignored cancellation during SFTP negotiation")
+	}
+	select {
+	case serverErr := <-serverDone:
+		if serverErr != nil {
+			test.Fatal(serverErr)
+		}
+	case <-time.After(time.Second):
+		test.Fatal("cancelled cleanup dial retained its SSH transport")
+	}
+}
+
+func TestFolderArchivePreservesSourceWhitespaceAndCleansDownloadedArchive(test *testing.T) {
+	handlers := sftp.InMemHandler()
+	inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+	writeMemorySFTPTestFile(test, inspectionClient, "/srv/project/report.txt", "wrong directory")
+	writeMemorySFTPTestFile(test, inspectionClient, "/srv/project /report.txt", "requested directory")
+	if err := inspectionClient.MkdirAll("/tmp"); err != nil {
+		test.Fatal(err)
+	}
+	client, _ := newMemorySFTPTestClient(test, handlers)
+	originalFactory := createFileSFTPClient
+	test.Cleanup(func() { createFileSFTPClient = originalFactory })
+	createFileSFTPClient = func(configuration *core.SSHClient) error {
+		configuration.Sftp = client
+		return nil
+	}
+	originalCleanupFactory := createFolderArchiveCleanupClient
+	test.Cleanup(func() { createFolderArchiveCleanupClient = originalCleanupFactory })
+	createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+		return nil, errors.New("healthy archive download must reuse its cleanup transport")
+	}
+	jobID := testFolderArchiveID(test)
+	requestContext, recorder := memorySFTPTestRequest(test, "/file/archive/prepare", folderArchivePrepareRequest{
+		SSHInfo: sftpSessionTestSSHInfo(test), Path: "/srv/project ", JobID: jobID,
+	})
+	PrepareDirectoryArchive(requestContext)
+	if recorder.Code != http.StatusAccepted {
+		test.Fatalf("prepare status=%d body=%s", recorder.Code, recorder.Body)
+	}
+	job := findFolderArchiveJob(strings.Repeat("a", 32), jobID)
+	if job == nil {
+		test.Fatal("prepared archive job was not stored")
+	}
+	test.Cleanup(func() {
+		cancelFolderArchiveJob(job)
+		select {
+		case <-job.workDone:
+		case <-time.After(memorySFTPTestTimeout):
+			test.Error("archive worker did not finish")
+		}
+		job.cleanupResources()
+		deleteFolderArchiveJob(job)
+	})
+	select {
+	case <-job.workDone:
+	case <-time.After(memorySFTPTestTimeout):
+		test.Fatal("archive worker did not finish")
+	}
+	if snapshot := job.snapshot(); snapshot["status"] != "ready" || snapshot["path"] != "/srv/project " || snapshot["name"] != "project .tar.gz" {
+		test.Fatalf("prepared archive changed its source path: %#v", snapshot)
+	}
+	archivePath := job.archivePath
+	requestContext, recorder = memorySFTPTestRequest(test, "/file/archive/download", folderArchiveJobRequest{JobID: jobID})
+	DownloadPreparedDirectoryArchive(requestContext)
+	if recorder.Code != http.StatusOK {
+		test.Fatalf("archive download status=%d", recorder.Code)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(recorder.Body.Bytes()))
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	found := false
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			test.Fatal(err)
+		}
+		if header.Name == "project /report.txt" {
+			content, err := io.ReadAll(tarReader)
+			if err != nil || string(content) != "requested directory" {
+				test.Fatalf("archive content=%q error=%v", content, err)
+			}
+			found = true
+		}
+	}
+	if !found {
+		test.Fatal("archive omitted the whitespace-preserving directory")
+	}
+	if _, err := inspectionClient.Lstat(archivePath); !os.IsNotExist(err) {
+		test.Fatalf("downloaded archive remained on the server: %v", err)
+	}
+	if job.archivePath != "" || findFolderArchiveJob(strings.Repeat("a", 32), jobID) != nil {
+		test.Fatal("downloaded archive retained its job resources")
+	}
+}
+
+func TestFolderArchiveDownloadCancellationCleansTemporaryFile(test *testing.T) {
+	for _, phase := range []string{"open", "read"} {
+		test.Run(phase, func(test *testing.T) {
+			handlers := sftp.InMemHandler()
+			inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+			writeMemorySFTPTestFile(test, inspectionClient, memoryFolderArchiveTestPath, "archive")
+			entered := make(chan struct{})
+			var connectionClosed <-chan struct{}
+			activeHandlers := handlers
+			activeHandlers.FileGet = folderArchiveTestReader(func(request *sftp.Request) (io.ReaderAt, error) {
+				if phase == "open" {
+					close(entered)
+					<-connectionClosed
+					return nil, context.Canceled
+				}
+				return &folderArchiveBlockedTestReader{entered: entered, closed: connectionClosed}, nil
+			})
+			client, closed := newMemorySFTPTestClient(test, activeHandlers)
+			connectionClosed = closed
+			sshClient := memoryFolderArchiveTestClient(client)
+			cleanupSFTP, _ := newMemorySFTPTestClient(test, handlers)
+			originalFactory := createFolderArchiveCleanupClient
+			test.Cleanup(func() { createFolderArchiveCleanupClient = originalFactory })
+			createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+				configuration.Sftp = cleanupSFTP
+				return &configuration, nil
+			}
+			jobCtx, cancelJob := context.WithCancel(context.Background())
+			workDone := make(chan struct{})
+			close(workDone)
+			releases := 0
+			job := &folderArchiveJob{
+				id: testFolderArchiveID(test), owner: strings.Repeat("a", 32), status: "ready",
+				ctx: jobCtx, cancel: cancelJob, client: sshClient, workDone: workDone,
+				archivePath: memoryFolderArchiveTestPath, archiveSize: int64(len("archive")), downloadName: "folder.tar.gz",
+				release: func() { releases++ },
+			}
+			job.stopIOCancel = closeSSHOnContextDone(jobCtx, sshClient)
+			if result := storeFolderArchiveJob(job); result != folderArchiveStoreOK {
+				test.Fatalf("store archive job = %v", result)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			requestContext, _ := memorySFTPTestRequest(test, "/file/archive/download", folderArchiveJobRequest{JobID: job.id})
+			requestContext.Request = requestContext.Request.WithContext(ctx)
+			finished := make(chan struct{})
+			test.Cleanup(func() {
+				cancel()
+				cancelJob()
+				select {
+				case <-finished:
+				case <-time.After(memorySFTPTestTimeout):
+					test.Error("cancelled archive download did not stop")
+				}
+				job.cleanupResources()
+				deleteFolderArchiveJob(job)
+			})
+			go func() {
+				defer close(finished)
+				DownloadPreparedDirectoryArchive(requestContext)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatal("archive download did not enter the stalled operation")
+			}
+			cancel()
+			select {
+			case <-finished:
+			case <-time.After(memorySFTPTestTimeout):
+				test.Fatal("request cancellation did not stop archive download and cleanup")
+			}
+			if _, err := inspectionClient.Lstat(memoryFolderArchiveTestPath); !os.IsNotExist(err) {
+				test.Fatalf("cancelled archive download left its temporary file: %v", err)
+			}
+			if releases != 1 || job.status != "cancelled" || job.client != nil {
+				test.Fatalf("cancelled archive resources: releases=%d status=%s", releases, job.status)
+			}
+			assertArchiveCredentialsCleared(test, sshClient)
+		})
+	}
+}
+
+func memoryFolderArchiveTestClient(client *sftp.Client) *core.SSHClient {
+	configuration := core.NewSSHClient()
+	configuration.Sftp = client
+	configuration.Hostname = "memory.invalid"
+	configuration.Username = "archive-test"
+	configuration.Password = "password"
+	configuration.PrivateKey = "private-key"
+	configuration.Passphrase = "passphrase"
+	configuration.ProxyPass = "proxy-password"
+	configuration.TrustScope = strings.Repeat("a", 32)
+	return &configuration
+}
+
+func assertArchiveCredentialsCleared(test *testing.T, client *core.SSHClient) {
+	test.Helper()
+	if client == nil || client.Password != "" || client.PrivateKey != "" || client.Passphrase != "" || client.ProxyPass != "" {
+		test.Fatal("archive cleanup retained SSH credentials")
+	}
+}
+
+func TestFolderArchiveCancellationReconnectsAndRemovesTemporaryFile(test *testing.T) {
+	handlers := sftp.InMemHandler()
+	inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+	writeMemorySFTPTestFile(test, inspectionClient, memoryFolderArchiveTestPath, "archive")
+	client, connectionClosed := newMemorySFTPTestClient(test, handlers)
+	sshClient := memoryFolderArchiveTestClient(client)
+	cleanupSFTP, cleanupClosed := newMemorySFTPTestClient(test, handlers)
+	originalFactory := createFolderArchiveCleanupClient
+	test.Cleanup(func() { createFolderArchiveCleanupClient = originalFactory })
+	var cleanupClient *core.SSHClient
+	creates := 0
+	createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+		creates++
+		if ctx.Err() != nil {
+			test.Fatal("archive cleanup inherited the cancelled job context")
+		}
+		if _, bounded := ctx.Deadline(); !bounded {
+			test.Fatal("archive cleanup reconnect has no deadline")
+		}
+		if configuration.Password != "password" || configuration.PrivateKey != "private-key" || configuration.Passphrase != "passphrase" || configuration.ProxyPass != "proxy-password" || configuration.TrustScope != sshClient.TrustScope {
+			test.Fatal("archive cleanup lost its scoped connection configuration")
+		}
+		if configuration.Client != nil || configuration.Sftp != nil {
+			test.Fatal("archive cleanup copied a closed transport")
+		}
+		configuration.Sftp = cleanupSFTP
+		cleanupClient = &configuration
+		return cleanupClient, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	releases := 0
+	job := &folderArchiveJob{
+		ctx: ctx, cancel: cancel, status: "compressing", client: sshClient,
+		archivePath: memoryFolderArchiveTestPath, workDone: make(chan struct{}),
+		release: func() { releases++ },
+	}
+	job.stopIOCancel = closeSSHOnContextDone(ctx, sshClient)
+	test.Cleanup(job.cleanupResources)
+	cancelFolderArchiveJob(job)
+	select {
+	case <-connectionClosed:
+	case <-time.After(memorySFTPTestTimeout):
+		test.Fatal("archive cancellation did not close the active SFTP transport")
+	}
+	close(job.workDone)
+	job.cleanupResources()
+	job.cleanupResources()
+	cancelFolderArchiveJob(job)
+	if _, err := inspectionClient.Lstat(memoryFolderArchiveTestPath); !os.IsNotExist(err) {
+		test.Fatalf("cancelled archive remains after reconnect cleanup: %v", err)
+	}
+	if creates != 1 || releases != 1 || job.archivePath != "" || job.client != nil || job.release != nil {
+		test.Fatalf("archive cleanup was not idempotent: reconnects=%d releases=%d path=%q", creates, releases, job.archivePath)
+	}
+	assertArchiveCredentialsCleared(test, sshClient)
+	assertArchiveCredentialsCleared(test, cleanupClient)
+	select {
+	case <-cleanupClosed:
+	default:
+		test.Fatal("archive cleanup retained its reconnected transport")
+	}
+}
+
+func TestFolderArchiveCancellationRetainsFailedArchiveForCleanup(test *testing.T) {
+	for _, phase := range []string{"open", "reserve", "write", "verify"} {
+		test.Run(phase, func(test *testing.T) {
+			handlers := sftp.InMemHandler()
+			inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+			if err := inspectionClient.MkdirAll("/tmp"); err != nil {
+				test.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var connectionClosed <-chan struct{}
+			interrupt := func() error {
+				cancel()
+				<-connectionClosed
+				return context.Canceled
+			}
+			activeHandlers := handlers
+			activeHandlers.FileCmd = memorySFTPTestCommands{FileCmder: handlers.FileCmd, before: func(request *sftp.Request) error {
+				if phase == "reserve" && request.Method == "Setstat" {
+					return interrupt()
+				}
+				return nil
+			}}
+			activeHandlers.FilePut = memorySFTPTestWriter{FileWriter: handlers.FilePut, before: func(request *sftp.Request) error {
+				if phase == "open" && request.Pflags().Excl {
+					if _, err := handlers.FilePut.Filewrite(request); err != nil {
+						return err
+					}
+					return interrupt()
+				}
+				if phase == "write" && request.Pflags().Trunc {
+					return interrupt()
+				}
+				return nil
+			}}
+			activeHandlers.FileList = memorySFTPTestLister{FileLister: handlers.FileList, before: func(method, remotePath string) error {
+				if phase == "verify" && method == "Lstat" {
+					return interrupt()
+				}
+				return nil
+			}}
+			client, closed := newMemorySFTPTestClient(test, activeHandlers)
+			connectionClosed = closed
+			sshClient := memoryFolderArchiveTestClient(client)
+			cleanupSFTP, _ := newMemorySFTPTestClient(test, handlers)
+			originalFactory := createFolderArchiveCleanupClient
+			test.Cleanup(func() { createFolderArchiveCleanupClient = originalFactory })
+			createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+				configuration.Sftp = cleanupSFTP
+				return &configuration, nil
+			}
+			job := &folderArchiveJob{ctx: ctx, cancel: cancel, client: sshClient}
+			job.stopIOCancel = closeSSHOnContextDone(ctx, sshClient)
+			test.Cleanup(job.cleanupResources)
+			if _, _, err := prepareRemoteArchiveManifest(job, "/srv/source ", remoteArchiveManifest{}); err == nil {
+				test.Fatal("cancelled archive preparation succeeded")
+			}
+			archivePath := job.archivePath
+			if archivePath == "" {
+				test.Fatal("failed archive preparation forgot the reserved remote path")
+			}
+			if _, err := inspectionClient.Lstat(archivePath); err != nil {
+				test.Fatalf("test did not leave a reserved remote archive: %v", err)
+			}
+			job.cleanupResources()
+			if _, err := inspectionClient.Lstat(archivePath); !os.IsNotExist(err) {
+				test.Fatalf("partial archive remains after cancellation: %v", err)
+			}
+			assertArchiveCredentialsCleared(test, sshClient)
+		})
+	}
+}
+
+func TestFolderArchiveCleanupHonorsDeadline(test *testing.T) {
+	for _, phase := range []string{"active-remove", "reconnect", "reconnected-remove"} {
+		test.Run(phase, func(test *testing.T) {
+			handlers := sftp.InMemHandler()
+			inspectionClient, _ := newMemorySFTPTestClient(test, handlers)
+			writeMemorySFTPTestFile(test, inspectionClient, memoryFolderArchiveTestPath, "archive")
+			var blockedConnectionClosed <-chan struct{}
+			blockingHandlers := handlers
+			blockingHandlers.FileCmd = memorySFTPTestCommands{FileCmder: handlers.FileCmd, before: func(request *sftp.Request) error {
+				if request.Method == "Remove" {
+					<-blockedConnectionClosed
+					return context.DeadlineExceeded
+				}
+				return nil
+			}}
+			blockedClient, closed := newMemorySFTPTestClient(test, blockingHandlers)
+			blockedConnectionClosed = closed
+			client, _ := newMemorySFTPTestClient(test, handlers)
+			sshClient := memoryFolderArchiveTestClient(client)
+			if phase == "active-remove" {
+				sshClient.Sftp = blockedClient
+			} else {
+				sshClient.Close()
+			}
+			originalFactory := createFolderArchiveCleanupClient
+			test.Cleanup(func() { createFolderArchiveCleanupClient = originalFactory })
+			var cleanupClient *core.SSHClient
+			createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+				if phase == "reconnect" {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				configuration.Sftp = blockedClient
+				cleanupClient = &configuration
+				return cleanupClient, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			err := cleanupRemoteFolderArchive(ctx, sshClient, memoryFolderArchiveTestPath)
+			if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > time.Second {
+				test.Fatalf("cleanup was not bounded: error=%v duration=%s", err, time.Since(started))
+			}
+			if phase != "reconnect" {
+				select {
+				case <-closed:
+				default:
+					test.Fatal("cleanup deadline did not close the stalled SFTP transport")
+				}
+			}
+			if cleanupClient != nil {
+				assertArchiveCredentialsCleared(test, cleanupClient)
+			}
+		})
+	}
+}
+
+func TestFolderArchiveFailedCleanupReleasesCredentialsAndQuota(test *testing.T) {
+	handlers := sftp.InMemHandler()
+	client, _ := newMemorySFTPTestClient(test, handlers)
+	sshClient := memoryFolderArchiveTestClient(client)
+	sshClient.Close()
+	originalFactory := createFolderArchiveCleanupClient
+	test.Cleanup(func() { createFolderArchiveCleanupClient = originalFactory })
+	var failedClient *core.SSHClient
+	createFolderArchiveCleanupClient = func(ctx context.Context, configuration core.SSHClient) (*core.SSHClient, error) {
+		failedClient = &configuration
+		return failedClient, errors.New("cleanup connection unavailable")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	releases := 0
+	job := &folderArchiveJob{ctx: ctx, cancel: cancel, client: sshClient, archivePath: memoryFolderArchiveTestPath, release: func() { releases++ }}
+	job.cleanupResources()
+	job.cleanupResources()
+	if releases != 1 || job.client != nil || job.cancel != nil || job.archivePath != memoryFolderArchiveTestPath {
+		test.Fatal("failed cleanup leaked quota or discarded the unresolved archive path")
+	}
+	assertArchiveCredentialsCleared(test, sshClient)
+	assertArchiveCredentialsCleared(test, failedClient)
+}
 
 func testFolderArchiveID(t *testing.T) string {
 	t.Helper()

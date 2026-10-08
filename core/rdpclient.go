@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -253,20 +254,29 @@ func PerformRDPHandshake(ctx context.Context, dialer *RDPDialer, host string, po
 		return nil, err
 	}
 
-	cleanup := func() {
-		_ = conn.Close()
+	handshakeContext, cancelHandshake := context.WithTimeout(ctx, rdpHandshakeTimeout)
+	defer cancelHandshake()
+	cleanup := sync.OnceFunc(func() {
 		release()
-	}
-
-	deadline := time.Now().Add(rdpHandshakeTimeout)
-	if err := conn.SetDeadline(deadline); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("设置握手超时失败: %w", err)
+		_ = conn.Close()
+	})
+	stopCleanup := context.AfterFunc(handshakeContext, cleanup)
+	defer stopCleanup()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			cleanup()
+		}
+	}()
+	handshakeError := func(err error) error {
+		if contextError := handshakeContext.Err(); contextError != nil {
+			return contextError
+		}
+		return err
 	}
 
 	if err := writeAll(conn, x224Request); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("发送 X.224 连接请求失败: %w", err)
+		return nil, fmt.Errorf("发送 X.224 连接请求失败: %w", handshakeError(err))
 	}
 
 	// TCP is a byte stream: one Read is not guaranteed to contain the full
@@ -274,8 +284,7 @@ func PerformRDPHandshake(ctx context.Context, dialer *RDPDialer, host string, po
 	// declared length, then read the remainder exactly.
 	x224Response, err := readRDPX224Response(conn)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, handshakeError(err)
 	}
 
 	// RDP 服务端基本都用自签名证书，这里不做校验；证书链会原样交给
@@ -290,14 +299,12 @@ func PerformRDPHandshake(ctx context.Context, dialer *RDPDialer, host string, po
 		MinVersion:         tls.VersionTLS10,
 		MaxVersion:         tls.VersionTLS12,
 	})
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("TLS 握手失败: %w", err)
+	if err := tlsConn.HandshakeContext(handshakeContext); err != nil {
+		return nil, fmt.Errorf("TLS 握手失败: %w", handshakeError(err))
 	}
-	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
-		_ = tlsConn.Close()
-		release()
-		return nil, fmt.Errorf("清除握手超时失败: %w", err)
+	stopCleanup()
+	if err := handshakeContext.Err(); err != nil {
+		return nil, err
 	}
 
 	certChain := make([][]byte, 0, 4)
@@ -305,14 +312,15 @@ func PerformRDPHandshake(ctx context.Context, dialer *RDPDialer, host string, po
 		certChain = append(certChain, cert.Raw)
 	}
 
+	succeeded = true
 	return &RDPHandshake{
 		X224Response: x224Response,
 		CertChain:    certChain,
 		Conn:         tlsConn,
 		ServerAddr:   net.JoinHostPort(host, strconv.Itoa(port)),
 		Release: func() {
+			cleanup()
 			_ = tlsConn.Close()
-			release()
 		},
 	}, nil
 }

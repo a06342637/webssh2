@@ -368,12 +368,8 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 
 	defer func() {
 		_ = ws.Close()
-		_ = stdinPipe.Close()
-		_ = session.Close()
-		// Closing both transports unblocks ReadMessage, writes to stdin and
-		// Session.Wait. Join the workers before niling the SSHClient fields.
-		workers.Wait()
 		sclient.Close()
+		workers.Wait()
 		if err := recover(); err != nil {
 			log.Println(err)
 		}
@@ -392,6 +388,7 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 		// The timeout path must not wait behind a stalled terminal-output write.
 		// The notice is best effort; closing the socket below is authoritative.
 		if writeMu.TryLock() {
+			_ = ws.SetWriteDeadline(time.Now().Add(time.Second))
 			_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\033[33m%s\033[0m", closeTip)))
 			writeMu.Unlock()
 		}

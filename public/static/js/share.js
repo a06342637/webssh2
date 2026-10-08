@@ -221,11 +221,43 @@ function connectionShareOrigin() {
 var CONNECTION_SHARE_HISTORY_KEY = 'webssh_share_history';
 var CONNECTION_SHARE_MAX_TTL = 24 * 60 * 60 * 1000;
 var connectionShareHistoryOpen = false;
+var connectionShareHistoryGeneration = 0;
 
-function readConnectionShareHistory() {
+function connectionShareHistoryScope() {
+    var account = typeof currentAccount === 'undefined' ? null : currentAccount;
+    var username = account && account.username ? String(account.username).trim().toLowerCase() : '';
+    return username ? 'account:' + username : 'guest';
+}
+
+function connectionShareIdentitySnapshot() {
+    return {
+        scope: connectionShareHistoryScope(),
+        generation: typeof authStateGeneration === 'undefined' ? 0 : authStateGeneration
+    };
+}
+
+function connectionShareIdentityIsCurrent(snapshot) {
+    var current = connectionShareIdentitySnapshot();
+    return snapshot.scope === current.scope && snapshot.generation === current.generation;
+}
+
+function connectionShareResponseScope(data, fallbackScope) {
+    if (!data || !Object.prototype.hasOwnProperty.call(data, 'historyScope')) return fallbackScope;
+    var scope = data.historyScope;
+    if (typeof scope !== 'string' || (scope !== 'guest' && !/^account:[^\s:]+$/.test(scope))) {
+        throw new Error('服务器返回的分享归属无效');
+    }
+    return scope;
+}
+
+function connectionShareHistoryStorageKey(scope) {
+    return CONNECTION_SHARE_HISTORY_KEY + '::' + encodeURIComponent(scope || connectionShareHistoryScope());
+}
+
+function readConnectionShareHistoryItems(storageKey) {
     var raw = [];
     try {
-        raw = JSON.parse(safeStorageGet(CONNECTION_SHARE_HISTORY_KEY) || '[]');
+        raw = JSON.parse(safeStorageGet(storageKey) || '[]');
     } catch (e) {
         raw = [];
     }
@@ -238,22 +270,26 @@ function readConnectionShareHistory() {
     });
 }
 
-function writeConnectionShareHistory(items) {
+function readConnectionShareHistory(scope) {
+    return readConnectionShareHistoryItems(connectionShareHistoryStorageKey(scope));
+}
+
+function writeConnectionShareHistory(items, scope) {
     try {
-        safeStorageSet(CONNECTION_SHARE_HISTORY_KEY, JSON.stringify(items.slice(0, 50)));
-    } catch (e) { }
+        return safeStorageSet(connectionShareHistoryStorageKey(scope), JSON.stringify(items.slice(0, 50)));
+    } catch (error) { return false; }
 }
 
-function rememberConnectionShare(entry) {
-    var items = readConnectionShareHistory();
+function rememberConnectionShare(entry, scope) {
+    var items = readConnectionShareHistory(scope).filter(function (item) { return item.token !== entry.token; });
     items.unshift(entry);
-    writeConnectionShareHistory(items);
+    return writeConnectionShareHistory(items, scope);
 }
 
-function forgetConnectionShare(token) {
-    writeConnectionShareHistory(readConnectionShareHistory().filter(function (item) {
+function forgetConnectionShare(token, scope) {
+    return writeConnectionShareHistory(readConnectionShareHistory(scope).filter(function (item) {
         return item.token !== token;
-    }));
+    }), scope);
 }
 
 function connectionShareRelativeTime(ts) {
@@ -292,6 +328,7 @@ function encryptConnectionSharePayload(payload) {
 
 function generateConnectionShareLink() {
     if (connectionShareBusy) return;
+    var identity = connectionShareIdentitySnapshot();
     var session = connectionShareActiveSession();
     var payload = session ? buildConnectionSharePayload(session) : null;
     if (!payload) {
@@ -313,7 +350,8 @@ function generateConnectionShareLink() {
     var label = connectionShareSummaryText(session);
 
     connectionShareSetBusy(true, '加密中…');
-    encryptConnectionSharePayload(payload).then(function (encrypted) {
+    return encryptConnectionSharePayload(payload).then(function (encrypted) {
+        if (!connectionShareIdentityIsCurrent(identity)) throw new Error('账号已切换，请重新生成分享链接');
         connectionShareSetBusy(true, '上传中…');
         return fetch('/api/share', {
             method: 'POST',
@@ -335,9 +373,9 @@ function generateConnectionShareLink() {
                 return body.data;
             });
         }).then(function (data) {
+            var responseScope = connectionShareResponseScope(data, identity.scope);
             var link = connectionShareOrigin() + CONNECTION_SHARE_PATH_PREFIX + data.token + '#k=' + encrypted.key;
-            if (output) output.value = link;
-            rememberConnectionShare({
+            var remembered = rememberConnectionShare({
                 token: data.token,
                 id: data.id || '',
                 link: link,
@@ -346,7 +384,13 @@ function generateConnectionShareLink() {
                 burn: burn,
                 createdAt: Date.now(),
                 expiresAt: (data.expiresAt ? data.expiresAt * 1000 : Date.now() + expiresIn * 1000)
-            });
+            }, responseScope);
+            if (responseScope !== identity.scope || !connectionShareIdentityIsCurrent(identity)) {
+                if (typeof refreshAccountState === 'function') refreshAccountState();
+                showToast(remembered ? '分享链接已保留在所属身份的本地历史中' : '分享已生成，但本地历史保存失败', remembered ? 'info' : 'error');
+                return;
+            }
+            if (output) output.value = link;
             renderConnectionShareHistory();
             showToast('分享链接已生成', 'success');
         });
@@ -408,7 +452,11 @@ function renderConnectionShareHistory() {
     var count = document.getElementById('connectionShareHistoryCount');
     var hint = document.getElementById('connectionShareHistoryHint');
     if (!list) return;
-    var local = readConnectionShareHistory();
+    var identity = connectionShareIdentitySnapshot();
+    var requestGeneration = ++connectionShareHistoryGeneration;
+    var local = readConnectionShareHistory(identity.scope);
+    var originalTokens = Object.create(null);
+    local.forEach(function (item) { originalTokens[item.token] = true; });
 
     function paint(items, loggedIn, serverAware) {
         if (count) count.textContent = items.length ? String(items.length) : '';
@@ -443,10 +491,34 @@ function renderConnectionShareHistory() {
 
     paint(local, false, false);
 
-    fetch('/api/shares', { credentials: 'same-origin' })
+    return fetch('/api/shares', { credentials: 'same-origin' })
         .then(function (r) { return r.json(); })
         .then(function (body) {
+            if (requestGeneration !== connectionShareHistoryGeneration || !connectionShareIdentityIsCurrent(identity)) return;
             if (!body || body.ok !== true || !body.data) throw new Error('bad response');
+            var responseScope = connectionShareResponseScope(body.data, identity.scope);
+            if (responseScope !== identity.scope || (body.data.loggedIn === true) !== (responseScope !== 'guest')) {
+                if (typeof refreshAccountState === 'function') refreshAccountState();
+                return;
+            }
+            var alive = Object.create(null);
+            (body.data.items || []).forEach(function (entry) { alive[entry.id] = true; });
+            local = readConnectionShareHistory(identity.scope);
+            var localTokens = Object.create(null);
+            local.forEach(function (item) { localTokens[item.token] = true; });
+            var legacy = readConnectionShareHistoryItems(CONNECTION_SHARE_HISTORY_KEY);
+            var migrated = legacy.filter(function (item) { return item.id && alive[item.id] && !localTokens[item.token]; });
+            if (migrated.length) {
+                var combined = local.concat(migrated).slice(0, 50);
+                if (writeConnectionShareHistory(combined, identity.scope)) {
+                    local = combined;
+                    var copiedTokens = Object.create(null);
+                    combined.forEach(function (item) { copiedTokens[item.token] = true; });
+                    safeStorageSet(CONNECTION_SHARE_HISTORY_KEY, JSON.stringify(legacy.filter(function (item) {
+                        return !alive[item.id] || !copiedTokens[item.token];
+                    })));
+                }
+            }
             var merged = (body.data.items || []).map(function (entry) {
                 // 服务端只认存储键；本地记录里存了同一个键，用它反查完整链接。
                 var match = null;
@@ -467,10 +539,8 @@ function renderConnectionShareHistory() {
             // 服务端是权威：阅后即焚被对方打开烧掉、在别的设备上删除、或已过期，
             // 服务端都不再返回。本地记录跟着清掉，否则生成端历史里会一直挂着
             // 一条死链，点复制还会复制出去。
-            var alive = {};
-            (body.data.items || []).forEach(function (entry) { alive[entry.id] = true; });
-            var pruned = local.filter(function (item) { return !item.id || alive[item.id]; });
-            if (pruned.length !== local.length) writeConnectionShareHistory(pruned);
+            var pruned = local.filter(function (item) { return !item.id || alive[item.id] || !originalTokens[item.token]; });
+            if (pruned.length !== local.length) writeConnectionShareHistory(pruned, identity.scope);
         })
         .catch(function () { /* 服务端不可用时保留本地渲染 */ });
 }
@@ -488,19 +558,25 @@ function copyConnectionShareHistoryLink(token) {
 
 function deleteConnectionShare(id, token) {
     if (!id) return;
-    fetch('/api/shares/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' })
+    var identity = connectionShareIdentitySnapshot();
+    return fetch('/api/shares/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' })
         .then(function (r) {
             return r.json().catch(function () { return null; }).then(function (body) {
-                // 404 说明服务端本来就没有了，本地记录照样要清掉。
                 if (!r.ok && r.status !== 404) {
                     throw new Error((body && body.msg) || '删除失败');
+                }
+                var responseScope = connectionShareResponseScope(body && body.data, '');
+                if (responseScope !== identity.scope) {
+                    if (typeof refreshAccountState === 'function') refreshAccountState();
+                    return false;
                 }
                 return true;
             });
         })
-        .then(function () {
-            if (token) forgetConnectionShare(token);
-            renderConnectionShareHistory();
+        .then(function (deleted) {
+            if (!deleted) return;
+            if (token) forgetConnectionShare(token, identity.scope);
+            if (connectionShareIdentityIsCurrent(identity)) renderConnectionShareHistory();
             showToast('分享链接已删除', 'success');
         })
         .catch(function (err) {
