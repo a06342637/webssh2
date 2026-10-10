@@ -1355,9 +1355,28 @@ test('remote editor identity is scoped to the SSH session and normalized path', 
         },
     );
 
-    assert.equal(sandbox.normalizeRemoteFilePath('\\etc\\app.conf/'), '/etc/app.conf');
+    assert.equal(sandbox.normalizeRemoteFilePath('etc//app.conf/'), '/etc/app.conf');
     assert.equal(sandbox.remoteEditorFor(first, '//etc//app.conf/').sessionId, 'first');
     assert.equal(sandbox.remoteEditorFor(second, '/etc/app.conf').sessionId, 'second');
+});
+
+test('remote paths preserve literal backslashes and distinguish them from directories', () => {
+    const session = { id: 'first' };
+    const literal = { sessionId: session.id, path: '/tmp/a\\b.txt' };
+    const nested = { sessionId: session.id, path: '/tmp/a/b.txt' };
+    const sandbox = loadFunctions(
+        ['normalizeSftpDir', 'normalizeRemoteFilePath', 'remoteEditorFor', 'remotePathIsWithin', 'replaceRemotePathPrefix'],
+        { remoteEditors: [literal, nested] },
+    );
+    for (const value of ['/tmp/a\\b.txt', '/tmp/dir\\name/file.txt', '/tmp/ file ', '/tmp/目录\\文件']) {
+        assert.equal(sandbox.normalizeRemoteFilePath(value), value);
+        assert.equal(sandbox.normalizeSftpDir(value), value);
+    }
+    assert.equal(sandbox.remoteEditorFor(session, literal.path), literal);
+    assert.equal(sandbox.remoteEditorFor(session, nested.path), nested);
+    assert.equal(sandbox.remotePathIsWithin(literal.path, '/tmp/a'), false);
+    assert.equal(sandbox.replaceRemotePathPrefix('/tmp/a\\b/file.txt', '/tmp/a\\b', '/tmp/c'), '/tmp/c/file.txt');
+    assert.equal(sandbox.replaceRemotePathPrefix(nested.path, '/tmp/a\\b', '/tmp/c'), nested.path);
 });
 
 test('text and media views of the same remote path use separate document identities', () => {

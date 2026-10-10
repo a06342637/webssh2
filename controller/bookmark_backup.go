@@ -75,6 +75,10 @@ func AdminExportScriptBookmarks(c *gin.Context) {
 	}
 
 	accountStore.mu.RLock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.RUnlock()
+		return
+	}
 	type rawWorkspace struct {
 		username string
 		scripts  StoredScripts
@@ -253,6 +257,10 @@ func AdminRestoreScriptBookmarks(c *gin.Context) {
 	backup.Users = nil
 
 	accountStore.mu.Lock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.Unlock()
+		return
+	}
 	matched := make([]siteScriptBackupUser, 0, len(validated))
 	missingUsers := make([]string, 0)
 	for _, user := range validated {

@@ -18,6 +18,70 @@ const root=path.resolve(__dirname,'../public');
    await page.waitForTimeout(300);
    return page;
   }
+  const editorPage=await pageFor();
+  await editorPage.evaluate(()=>{sessions[0]._connected=true;openNewRemoteFile();});
+  for(const zoom of [200,50,100,125,150]) {
+   for(const panelId of ['scriptDrawer','sftpPanel',null]) {
+    await editorPage.evaluate(({zoom,panelId})=>{
+     document.getElementById('scriptDrawer').classList.toggle('open',panelId==='scriptDrawer');
+     document.getElementById('sftpPanel').classList.toggle('open',panelId==='sftpPanel');
+     applyPageZoom(zoom);
+    },{zoom,panelId});
+    await editorPage.waitForTimeout(400);
+    const bounds=await editorPage.evaluate(panelId=>{
+     const layer=document.getElementById('remoteEditorLayer');
+     const rect=layer.getBoundingClientRect();
+     const parent=layer.offsetParent.getBoundingClientRect();
+     const panel=panelId?document.getElementById(panelId).getBoundingClientRect():null;
+     const bar=document.querySelector('.cmd-bar').getBoundingClientRect();
+     const dock=document.getElementById('remoteEditorDock').getBoundingClientRect();
+     const editor=sessions[0]._remoteEditorWorkspace.el.getBoundingClientRect();
+     return {right:rect.right,expectedRight:panel?panel.left:parent.right,bottom:rect.bottom,expectedBottom:bar.top,dockRight:dock.right,editorRight:editor.right,editorBottom:editor.bottom};
+    },panelId);
+    assert.ok(Math.abs(bounds.right-bounds.expectedRight)<3,JSON.stringify({zoom,panelId,bounds}));
+    assert.ok(Math.abs(bounds.bottom-bounds.expectedBottom)<3,JSON.stringify({zoom,panelId,bounds}));
+    assert.ok(Math.abs(bounds.dockRight-bounds.expectedRight)<3,JSON.stringify({zoom,panelId,bounds}));
+    assert.ok(bounds.editorRight<=bounds.right+3 && bounds.editorBottom<=bounds.bottom+3,JSON.stringify({zoom,panelId,bounds}));
+   }
+   // Real pointer movement must move the editor by the same displayed distance.
+   const start=await editorPage.evaluate(()=>{
+    const workspace=sessions[0]._remoteEditorWorkspace;
+    Object.assign(workspace.el.style,{left:'10px',top:'10px',width:'400px',height:'280px'});
+    const rect=workspace.el.getBoundingClientRect(),header=workspace.header.getBoundingClientRect();
+    return {left:rect.left,top:rect.top,x:header.left+20,y:header.top+20};
+   });
+   await editorPage.mouse.move(start.x,start.y);
+   await editorPage.mouse.down();
+   await editorPage.mouse.move(start.x+80,start.y+40,{steps:4});
+   await editorPage.mouse.up();
+   const end=await editorPage.evaluate(()=>{const r=sessions[0]._remoteEditorWorkspace.el.getBoundingClientRect();return {left:r.left,top:r.top};});
+   assert.ok(Math.abs(end.left-start.left-80)<3,JSON.stringify({zoom,start,end}));
+   assert.ok(Math.abs(end.top-start.top-40)<3,JSON.stringify({zoom,start,end}));
+  }
+  await editorPage.setViewportSize({width:1280,height:600});
+  await editorPage.evaluate(()=>{document.getElementById('sftpPanel').classList.add('open');applyPageZoom(200);});
+  await editorPage.waitForTimeout(400);
+  const narrow=await editorPage.evaluate(()=>{
+   const layer=document.getElementById('remoteEditorLayer').getBoundingClientRect();
+   const editor=sessions[0]._remoteEditorWorkspace.el.getBoundingClientRect();
+   return {layerWidth:layer.width,layerHeight:layer.height,editorWidth:editor.width,editorHeight:editor.height};
+  });
+  assert.ok(narrow.editorWidth<=narrow.layerWidth+3 && narrow.editorHeight<=narrow.layerHeight+3,JSON.stringify(narrow));
+  await editorPage.evaluate(()=>remoteEditors.slice().forEach(destroyRemoteEditor));
+  const paths=await editorPage.evaluate(()=>{
+   const path='/tmp/dir\\name/a\\b.txt';
+   requestSftpDelete(path);
+   const deletion={path:sftpDeleteConfirmRequest.path,parent:sftpDeleteConfirmRequest.parentPath};
+   hideSftpDeleteConfirm();
+   requestSftpRename(path,false);
+   const rename={path:sftpRenameConfirmRequest.path,parent:sftpRenameConfirmRequest.parentPath};
+   hideSftpRenameConfirm();
+   sftpDownload(path,10,false);
+   return {deletion,rename,download:sftpDownloadConfirmRequest.path};
+  });
+  const literalPath='/tmp/dir\\name/a\\b.txt';
+  assert.deepEqual(paths,{deletion:{path:literalPath,parent:'/tmp/dir\\name'},rename:{path:literalPath,parent:'/tmp/dir\\name'},download:literalPath});
+  await editorPage.close();
   const page=await pageFor();
   await page.evaluate(()=>{
    window.auditSent=[];
@@ -90,6 +154,6 @@ const root=path.resolve(__dirname,'../public');
   await shared.waitForTimeout(700);
   assert.deepEqual(await shared.evaluate(()=>({proxy:auditReconnected.proxyHost||'',key:auditReconnected.privateKey,phrase:auditReconnected.passphrase,remember:document.getElementById('rememberProxy').checked,unchanged:safeStorageGet(PROXY_KEY)===auditSavedProxy})),{proxy:'',key:'audit key',phrase:'audit phrase',remember:false,unchanged:true});
   await shared.close();
-  console.log('Boundary browser checks passed: clipboard isolation and fallback, shared proxy/password/key routes, many tabs at 200% zoom.');
+  console.log('Boundary browser checks passed: literal SFTP paths, editor bounds and dragging at 5 zoom levels, clipboard isolation and fallback, shared proxy/password/key routes, many tabs at 200% zoom.');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -762,13 +762,27 @@ func requireAdmin(c *gin.Context) (string, bool) {
 		return "", false
 	}
 	accountStore.mu.RLock()
-	user := accountStore.db.Users[username]
-	accountStore.mu.RUnlock()
-	if !user.IsAdmin {
-		c.JSON(http.StatusForbidden, gin.H{"ok": false, "msg": "请登录管理员账号后使用"})
+	defer accountStore.mu.RUnlock()
+	if !requireAdminLocked(c, username) {
 		return "", false
 	}
 	return username, true
+}
+
+// Call while holding accountStore.mu through the protected read or mutation.
+// Admission alone is insufficient: body reads and password hashing can outlive
+// a demotion, logout, account deletion, or password reset in another request.
+func requireAdminLocked(c *gin.Context, username string) bool {
+	token, _ := c.Cookie(sessionCookieName)
+	if !accountStore.sessionMatchesAccountLocked(token, username) {
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "msg": "请先登录"})
+		return false
+	}
+	if !accountStore.db.Users[username].IsAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "msg": "请登录管理员账号后使用"})
+		return false
+	}
+	return true
 }
 
 func createLoginSession(username string) (string, time.Time, error) {
@@ -1037,6 +1051,10 @@ func AdminListAccounts(c *gin.Context) {
 		return
 	}
 	accountStore.mu.RLock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.RUnlock()
+		return
+	}
 	users := accountStore.accountSummariesLocked(adminUsername)
 	adminCount := accountStore.adminCountLocked()
 	accountStore.mu.RUnlock()
@@ -1069,6 +1087,10 @@ func AdminCreateAccount(c *gin.Context) {
 	}
 
 	accountStore.mu.Lock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.Unlock()
+		return
+	}
 	if _, exists := accountStore.db.Users[username]; exists {
 		accountStore.mu.Unlock()
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "msg": "用户名已存在"})
@@ -1136,6 +1158,10 @@ func AdminUpdateAccount(c *gin.Context) {
 	currentToken, _ := c.Cookie(sessionCookieName)
 
 	accountStore.mu.Lock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.Unlock()
+		return
+	}
 	user, exists := accountStore.db.Users[username]
 	if !exists {
 		accountStore.mu.Unlock()
@@ -1180,6 +1206,10 @@ func AdminDeleteAccount(c *gin.Context) {
 	}
 
 	accountStore.mu.Lock()
+	if !requireAdminLocked(c, adminUsername) {
+		accountStore.mu.Unlock()
+		return
+	}
 	user, exists := accountStore.db.Users[username]
 	if !exists {
 		accountStore.mu.Unlock()

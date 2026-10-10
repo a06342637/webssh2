@@ -6772,7 +6772,8 @@ function dismissSftpDownload(id) {
 function normalizeSftpDir(path) {
     path = String(path || '');
     if (!path) return '/';
-    path = path.replace(/\\/g, '/').replace(/\/+/g, '/');
+    // SFTP paths use POSIX separators; a backslash is a literal filename byte.
+    path = path.replace(/\/+/g, '/');
     if (path[0] !== '/') path = '/' + path;
     if (path.length > 1) path = path.replace(/\/+$/, '');
     return path || '/';
@@ -6780,7 +6781,7 @@ function normalizeSftpDir(path) {
 
 // ==================== Remote File Editor ====================
 function normalizeRemoteFilePath(path) {
-    path = String(path || '').replace(/\\/g, '/').replace(/\/+/g, '/');
+    path = String(path || '').replace(/\/+/g, '/');
     if (!path) return '';
     if (path.charAt(0) !== '/') path = '/' + path;
     return path.length > 1 ? path.replace(/\/+$/, '') : path;
@@ -7665,6 +7666,18 @@ function createRemoteEditorElement(editor) {
     return true;
 }
 
+// Bounding rectangles and pointer events use displayed pixels. Editor styles
+// and offsets use the containing block's coordinates, before CSS zoom.
+function remoteEditorCoordinateScale(layer) {
+    var parent = layer && layer.offsetParent;
+    if (!parent) return { x: 1, y: 1 };
+    var rect = parent.getBoundingClientRect();
+    return {
+        x: parent.offsetWidth > 0 && rect.width > 0 ? rect.width / parent.offsetWidth : 1,
+        y: parent.offsetHeight > 0 && rect.height > 0 ? rect.height / parent.offsetHeight : 1
+    };
+}
+
 function setupRemoteEditorDragging(workspace) {
     if (!workspace || !workspace.header) return;
     var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
@@ -7680,10 +7693,11 @@ function setupRemoteEditorDragging(workspace) {
         if (!dragging || workspace.maximized) return;
         var layer = document.getElementById('remoteEditorLayer');
         if (!layer) return;
+        var scale = remoteEditorCoordinateScale(layer);
         var maxLeft = Math.max(0, layer.clientWidth - workspace.el.offsetWidth);
         var maxTop = Math.max(0, layer.clientHeight - workspace.el.offsetHeight);
-        workspace.el.style.left = Math.max(0, Math.min(maxLeft, startLeft + event.clientX - startX)) + 'px';
-        workspace.el.style.top = Math.max(0, Math.min(maxTop, startTop + event.clientY - startY)) + 'px';
+        workspace.el.style.left = Math.max(0, Math.min(maxLeft, startLeft + (event.clientX - startX) / scale.x)) + 'px';
+        workspace.el.style.top = Math.max(0, Math.min(maxTop, startTop + (event.clientY - startY) / scale.y)) + 'px';
     });
     workspace.header.addEventListener('pointerup', function () { dragging = false; });
     workspace.header.addEventListener('pointercancel', function () { dragging = false; });
@@ -7745,16 +7759,17 @@ function remoteEditorLayerWidth() {
     var panel = document.getElementById('sftpPanel');
     var scriptDrawer = document.getElementById('scriptDrawer');
     if (!layer) return;
+    var scale = remoteEditorCoordinateScale(layer);
     var sftpRight = panel && panel.classList.contains('open') ? panel.getBoundingClientRect().width : 0;
     var scriptRight = scriptDrawer && scriptDrawer.classList.contains('open') ? scriptDrawer.getBoundingClientRect().width : 0;
-    var right = Math.max(sftpRight, scriptRight);
+    var right = Math.max(sftpRight, scriptRight) / scale.x;
     var commandBar = document.querySelector('.cmd-bar');
-    var bottom = commandBar ? commandBar.getBoundingClientRect().height : 0;
-    layer.style.right = Math.max(0, Math.round(right)) + 'px';
-    layer.style.bottom = Math.max(0, Math.round(bottom)) + 'px';
+    var bottom = commandBar ? commandBar.getBoundingClientRect().height / scale.y : 0;
+    layer.style.right = Math.max(0, right) + 'px';
+    layer.style.bottom = Math.max(0, bottom) + 'px';
     if (dock) {
-        dock.style.right = Math.max(0, Math.round(right)) + 'px';
-        dock.style.bottom = Math.max(7, Math.round(bottom) + 7) + 'px';
+        dock.style.right = Math.max(0, right) + 'px';
+        dock.style.bottom = Math.max(7, bottom + 7) + 'px';
     }
     var seenWorkspaces = {};
     remoteEditors.forEach(function (editor) {
@@ -9545,6 +9560,7 @@ function applyPageZoom(val) {
 
     // CSS zoom does not reliably emit resize, so fit live SSH/RDP sessions explicitly.
     requestAnimationFrame(function () {
+        remoteEditorLayerWidth();
         var session = activeIdx >= 0 ? sessions[activeIdx] : null;
         if (!session) return;
         if (session.kind === 'rdp') {
