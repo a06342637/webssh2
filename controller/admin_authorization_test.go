@@ -38,6 +38,7 @@ func TestAdminWritesRejectRevokedAuthorityDuringBodyRead(t *testing.T) {
 	}{
 		{"create", AdminCreateAccount, gin.H{"username": "newadmin", "password": "NewPass123!", "isAdmin": true}},
 		{"update", AdminUpdateAccount, gin.H{"username": "admin", "isAdmin": true, "password": "NewPass123!"}},
+		{"registration-setting", AdminSetRegistration, gin.H{"allowRegistration": false}},
 		{"restore", AdminRestoreScriptBookmarks, validSiteScriptBackup(siteScriptBackupUser{
 			Username: "member1", Scripts: []ScriptBookmark{{ID: "new", Name: "new", Cmd: "whoami"}},
 		})},

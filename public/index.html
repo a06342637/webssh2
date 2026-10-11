@@ -1384,7 +1384,7 @@
                 <div id="authLoggedOut">
                     <div class="auth-tabs auth-mode-tabs">
                         <button type="button" class="auth-tab active" id="authLoginTab" onclick="switchAuthMode('login')">登录</button>
-                        <button type="button" class="auth-tab" id="authRegisterTab" onclick="switchAuthMode('register')">注册</button>
+                        <button type="button" class="auth-tab" id="authRegisterTab" onclick="switchAuthMode('register')" style="display:none">注册</button>
                     </div>
                     <div class="input-field">
                         <label>用户名</label>
@@ -1395,6 +1395,7 @@
                         <input type="password" id="authPassword" class="script-input" placeholder="至少 7 个字符，最多 72 UTF-8 字节" autocomplete="current-password">
                     </div>
                     <div class="auth-hint" id="authHint">登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。</div>
+                    <div class="auth-hint" id="authRegistrationStatus" aria-live="polite">正在读取注册设置…</div>
                     <button class="drawer-add auth-submit-btn" type="button" onclick="submitAuthForm()">登录</button>
                     <button class="forgot-password-toggle" id="forgotPasswordToggle" type="button" onclick="toggleForgotPasswordHelp()" aria-expanded="false">忘记密码？</button>
                     <div class="forgot-password-help" id="forgotPasswordHelp">
@@ -1459,6 +1460,18 @@
             </div>
             <div class="modal-body account-admin-body">
                 <div class="auth-hint account-admin-hint">仅管理员可查看、新增、修改、重置密码和删除服务器账号；密码始终不会以明文显示。普通用户忘记密码时，可在这里为其设置新密码。</div>
+                <div class="account-create-card account-registration-card">
+                    <div class="auth-section-title">注册设置</div>
+                    <div class="account-create-actions">
+                        <label class="checkbox-field" for="managedAllowRegistration" style="padding:0">
+                            <input type="checkbox" id="managedAllowRegistration" disabled>
+                            <span class="checkbox-custom"></span>
+                            <span>允许游客注册账号</span>
+                        </label>
+                        <button class="script-tool-btn primary" id="saveRegistrationSettings" type="button" onclick="saveRegistrationSettings()" disabled>保存设置</button>
+                    </div>
+                    <div class="auth-hint" id="registrationSettingsStatus" aria-live="polite">正在读取注册设置…</div>
+                </div>
                 <div class="account-create-card">
                     <div class="auth-section-title">新增账号</div>
                     <div class="input-row">

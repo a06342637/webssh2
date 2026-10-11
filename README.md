@@ -297,13 +297,17 @@ docker compose up -d --force-recreate
 
 ### 注册、账号和会话限制
 
-公开注册默认关闭；用户由管理员创建。确需开放时：
+公开注册默认允许，游客可在“账号同步”窗口点击“注册”，创建普通账号并登录。管理员可在“账号管理 → 注册设置”中勾选或取消“允许游客注册账号”，点击“保存设置”后立即生效，无需重启。关闭注册不影响已有账号登录，也不影响管理员创建账号。
+
+设置保存在账号数据库中，重启和升级后保留。尚未通过页面保存设置时，可使用环境变量指定初始状态；例如关闭默认注册：
 
 ```env
-WEBSSH_ALLOW_REGISTRATION=true
+WEBSSH_ALLOW_REGISTRATION=false
 ```
 
 相关限制：
+
+- 页面保存的注册设置优先于环境变量；已有显式环境变量配置会继续作为未保存设置时的初始状态。
 
 - 注册：每个来源 IP 每小时最多 5 次。
 - 登录：每个来源 IP 每分钟最多 30 次。
@@ -554,6 +558,12 @@ WEBSSH_ALLOWED_ORIGINS=https://webssh.example.com,https://admin.example.com
 
 ## 版本更新（页面或命令行）
 
+### v0.5.85 游客注册与管理员注册开关
+
+- 默认开放游客自助注册，新注册账号均为普通用户；管理员可在账号管理中保存“允许游客注册账号”开关，设置持久化并即时生效。
+- 关闭注册时后端拒绝未完成的注册请求；设置修改需要当前有效管理员权限，并保留注册频率和账号总量限制。
+- 新建 SSH 连接每次默认选择密码登录，密码内容仍默认隐藏。
+
 ### v0.5.84 新建连接密码显示开关
 
 - SSH 连接后的“新建 SSH 连接”弹窗在密码框右侧增加小眼睛按钮，默认隐藏密码，点击可显示或再次隐藏。
@@ -742,7 +752,7 @@ go run . -a admin:password
 | `WEBSSH_ADMIN_USER` | admin | 书签管理员用户名 |
 | `WEBSSH_ADMIN_PASSWORD` | 首次随机 | 书签管理员初始/重置密码；7 个字符起，最多 72 UTF-8 字节 |
 | `WEBSSH_ADMIN_RESET` | false | 与管理员密码一起用于一次性重置 |
-| `WEBSSH_ALLOW_REGISTRATION` | false | 是否开放自助注册 |
+| `WEBSSH_ALLOW_REGISTRATION` | true | 注册开关未在页面保存时的初始状态；页面设置优先 |
 | `WEBSSH_MAX_ACCOUNTS` | 200 | 最大账号数 |
 | `WEBSSH_MAX_SESSIONS_PER_USER` | 20 | 每用户活动会话上限 |
 | `WEBSSH_REQUIRE_ACCOUNT` | false | 是否禁止游客使用 SSH/SFTP；设为 true 后要求书签账号会话或已通过页面 Basic Auth |

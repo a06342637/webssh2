@@ -734,8 +734,8 @@ func TestAccountStoreRecoversBackupAndReplacesExistingFile(t *testing.T) {
 	}
 }
 
-func TestRegistrationDisabledByDefault(t *testing.T) {
-	t.Setenv("WEBSSH_ALLOW_REGISTRATION", "")
+func TestRegistrationDisabledByEnvironment(t *testing.T) {
+	t.Setenv("WEBSSH_ALLOW_REGISTRATION", "false")
 	installTestAccountStore(t)
 	recorder := performAccountJSON(t, AuthRegister, http.MethodPost, "/api/auth/register", map[string]any{
 		"username": "newuser",

@@ -1485,6 +1485,7 @@ function showAddTab() {
     if (!ensureGatewayAccount()) return;
     toggleAddTabPassword(false);
     var active = activeIdx >= 0 ? sessions[activeIdx] : null;
+    switchAddTabAuth('password');
     // The + button is locked to the active session protocol; no cross-protocol choice is shown.
     configureAddTabProtocol(sessionConnectionProtocol(active));
     document.getElementById('addTabModal').classList.add('show');
@@ -2632,6 +2633,9 @@ var EMOJI_OPTIONS = ['🛠️','⚙️','🔧','🔨','🧰','💻','🖥️','�
 var currentAccount = null;
 var authMode = 'login';
 var allowRegistration = false;
+var registrationPolicyLoaded = false;
+var registrationPolicyGeneration = 0;
+var registrationSettingsSaving = false;
 var allowLegacyPathLogin = false;
 // Guest SSH/SFTP access is the server default. /config can explicitly require
 // a bookmark account for deployments that want to disable guest connections.
@@ -3362,6 +3366,7 @@ function openAuthModal(mode) {
     if (mode) switchAuthMode(mode);
     updateAccountUI();
     document.getElementById('authModal').classList.add('show');
+    refreshRegistrationPolicy();
     setTimeout(function () {
         var u = document.getElementById('authUsername');
         if (u && (!currentAccount || !currentAccount.username)) u.focus();
@@ -3381,12 +3386,82 @@ function switchAuthMode(mode) {
     var submit = document.querySelector('.auth-submit-btn');
     var hint = document.getElementById('authHint');
     var forgotToggle = document.getElementById('forgotPasswordToggle');
+    var password = document.getElementById('authPassword');
+    if (password) password.autocomplete = authMode === 'register' ? 'new-password' : 'current-password';
     if (loginTab) loginTab.classList.toggle('active', authMode === 'login');
     if (registerTab) registerTab.classList.toggle('active', authMode === 'register');
     if (submit) submit.textContent = authMode === 'register' ? '注册并登录' : '登录';
     if (hint) hint.textContent = authMode === 'register' ? '用户名只能用字母或数字，用户名大于 4 位；密码至少 7 个字符且不超过 72 个 UTF-8 字节。' : '登录后会自动同步脚本书签；未登录时仍保存在本地浏览器。';
     if (forgotToggle) forgotToggle.style.display = authMode === 'login' ? '' : 'none';
     if (authMode !== 'login') setForgotPasswordHelp(false);
+}
+
+function applyRegistrationPolicy(allowed) {
+    allowRegistration = allowed === true;
+    var tab = document.getElementById('authRegisterTab');
+    var notice = document.getElementById('authRegistrationStatus');
+    var input = document.getElementById('managedAllowRegistration');
+    var status = document.getElementById('registrationSettingsStatus');
+    if (tab) tab.style.display = allowRegistration ? '' : 'none';
+    if (notice) {
+        notice.textContent = allowRegistration ? '游客可点击“注册”创建普通账号。' : '当前不允许注册，请联系管理员创建账号。';
+    }
+    if (input) input.checked = allowRegistration;
+    if (status) status.textContent = allowRegistration ? '已允许：游客可以自行注册普通账号。' : '已关闭：仅管理员可以创建账号，已有账号仍可登录。';
+    if (!allowRegistration && authMode === 'register') switchAuthMode('login');
+}
+
+function setRegistrationControlsDisabled(disabled) {
+    ['managedAllowRegistration', 'saveRegistrationSettings'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = disabled;
+    });
+}
+
+function refreshRegistrationPolicy() {
+    if (registrationSettingsSaving) return Promise.resolve();
+    var generation = ++registrationPolicyGeneration;
+    setRegistrationControlsDisabled(true);
+    return apiJSON('/api/auth/registration')
+        .then(function (res) {
+            if (generation !== registrationPolicyGeneration) return;
+            if (!res.data || typeof res.data.allowRegistration !== 'boolean') throw new Error('invalid registration policy');
+            registrationPolicyLoaded = true;
+            applyRegistrationPolicy(res.data.allowRegistration);
+            setRegistrationControlsDisabled(false);
+        })
+        .catch(function () {
+            if (generation !== registrationPolicyGeneration) return;
+            var status = document.getElementById('registrationSettingsStatus');
+            if (status) status.textContent = '注册设置读取失败，请点击刷新后重试。';
+        });
+}
+
+function saveRegistrationSettings() {
+    if (!requireAdminAccountAccess() || registrationSettingsSaving) return;
+    var input = document.getElementById('managedAllowRegistration');
+    if (!input || input.disabled) return;
+    var allowed = input.checked;
+    var generation = ++registrationPolicyGeneration;
+    registrationSettingsSaving = true;
+    setRegistrationControlsDisabled(true);
+    return apiJSON('/api/admin/registration', { method: 'PUT', body: { allowRegistration: allowed } })
+        .then(function (res) {
+            if (generation !== registrationPolicyGeneration) return;
+            registrationPolicyLoaded = true;
+            applyRegistrationPolicy(res.data.allowRegistration);
+            showToast(res.msg || '注册设置已保存', 'success');
+        })
+        .catch(function (err) {
+            if (generation !== registrationPolicyGeneration) return;
+            applyRegistrationPolicy(allowRegistration);
+            showToast(err.msg || '注册设置保存失败', 'error');
+            if (err.status === 401 || err.status === 403) refreshAccountState();
+        })
+        .finally(function () {
+            registrationSettingsSaving = false;
+            if (generation === registrationPolicyGeneration) setRegistrationControlsDisabled(false);
+        });
 }
 
 function getAdminResetCommand() {
@@ -3555,7 +3630,8 @@ function submitAuthForm() {
     var password = document.getElementById('authPassword').value;
     if (!/^[A-Za-z0-9]{5,32}$/.test(username)) { showToast('用户名只能使用 5-32 位字母或数字', 'error'); return; }
     if (!validateAccountPasswordInput(password, '密码')) return;
-    var path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+    var requestedMode = authMode;
+    var path = requestedMode === 'register' ? '/api/auth/register' : '/api/auth/login';
     apiJSON(path, { method: 'POST', body: { username: username, password: password } })
         .then(function (res) {
             authStateGeneration++;
@@ -3566,10 +3642,16 @@ function submitAuthForm() {
             accountAutoSynced = currentAccount.username;
             broadcastAuthStateChange();
             hideAuthModal();
-            showToast((authMode === 'register' ? '注册成功' : '登录成功') + '，正在同步书签...', 'success');
+            showToast((requestedMode === 'register' ? '注册成功' : '登录成功') + '，正在同步书签...', 'success');
             syncScriptBookmarks('auto');
         })
-        .catch(function (err) { showToast(err.msg || '登录失败', 'error'); });
+        .catch(function (err) {
+            if (err.code === 'registration_closed') {
+                registrationPolicyLoaded = true;
+                applyRegistrationPolicy(false);
+            }
+            showToast(err.msg || (requestedMode === 'register' ? '注册失败' : '登录失败'), 'error');
+        });
 }
 
 function logoutAccount() {
@@ -3674,6 +3756,7 @@ function updateManagedAccounts(data, focusUsername) {
 
 function loadManagedAccounts() {
     if (!requireAdminAccountAccess()) return;
+    refreshRegistrationPolicy();
     var list = document.getElementById('managedAccountList');
     if (list) list.innerHTML = '<div class="auth-hint">正在读取账号列表...</div>';
     apiJSON('/api/admin/accounts')
@@ -10352,7 +10435,7 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
         if (cfg && cfg.appVersion) {
             applyRunningAppVersion(cfg.appVersion);
         }
-        allowRegistration = !!(cfg && cfg.allowRegistration);
+        if (!registrationPolicyLoaded) applyRegistrationPolicy(!!(cfg && cfg.allowRegistration));
         allowLegacyPathLogin = !!(cfg && cfg.allowLegacyPathLogin === true);
         requireGatewayAccount = !!(cfg && cfg.requireAccount === true);
         var configuredEditorLimit = parseInt(cfg && cfg.remoteEditorMaxBytes, 10);
@@ -10360,9 +10443,6 @@ if (categoryNameEl) categoryNameEl.addEventListener('keydown', function (e) {
         var configuredPreviewLimit = parseInt(cfg && cfg.remotePreviewMaxBytes, 10);
         if (configuredPreviewLimit >= 1024 * 1024) remotePreviewDefaultMaxBytes = configuredPreviewLimit;
         applyPasswordStoragePolicy(!!(cfg && cfg.savePass === true));
-        var registerTab = document.getElementById('authRegisterTab');
-        if (registerTab) registerTab.style.display = allowRegistration ? '' : 'none';
-        if (!allowRegistration && authMode === 'register') switchAuthMode('login');
         if (cfg && cfg.showFooter === false) {
             var footer = document.querySelector('.global-footer');
             if (footer) footer.classList.add('server-hidden');

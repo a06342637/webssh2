@@ -32,11 +32,6 @@ func envPositiveInt(name string, fallback int) int {
 	return value
 }
 
-func AllowRegistration() bool {
-	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("WEBSSH_ALLOW_REGISTRATION")))
-	return err == nil && value
-}
-
 func maxAccountCount() int   { return envPositiveInt("WEBSSH_MAX_ACCOUNTS", 200) }
 func maxActiveSessions() int { return envPositiveInt("WEBSSH_MAX_SESSIONS_PER_USER", 20) }
 

@@ -104,10 +104,11 @@ type accountSummary struct {
 }
 
 type accountDB struct {
-	Users    map[string]StoredUser    `json:"users"`
-	Sessions map[string]StoredSession `json:"sessions"`
-	Scripts  map[string]StoredScripts `json:"scripts"`
-	Shares   map[string]StoredShare   `json:"shares,omitempty"`
+	AllowRegistration *bool                    `json:"allowRegistration,omitempty"`
+	Users             map[string]StoredUser    `json:"users"`
+	Sessions          map[string]StoredSession `json:"sessions"`
+	Scripts           map[string]StoredScripts `json:"scripts"`
+	Shares            map[string]StoredShare   `json:"shares,omitempty"`
 }
 
 type AccountStore struct {
@@ -232,6 +233,10 @@ func cloneAccountDB(db accountDB) accountDB {
 		Sessions: make(map[string]StoredSession, len(db.Sessions)),
 		Scripts:  make(map[string]StoredScripts, len(db.Scripts)),
 		Shares:   make(map[string]StoredShare, len(db.Shares)),
+	}
+	if db.AllowRegistration != nil {
+		value := *db.AllowRegistration
+		cloned.AllowRegistration = &value
 	}
 	for username, user := range db.Users {
 		cloned.Users[username] = user
@@ -816,7 +821,7 @@ func createLoginSession(username string) (string, time.Time, error) {
 
 func AuthRegister(c *gin.Context) {
 	if !AllowRegistration() {
-		c.JSON(http.StatusForbidden, gin.H{"ok": false, "msg": "公开注册已关闭，请联系管理员创建账号"})
+		registrationClosed(c)
 		return
 	}
 	if !allowAuthAttempt(c, "register", 5, time.Hour) {
@@ -846,6 +851,10 @@ func AuthRegister(c *gin.Context) {
 	}
 	accountStore.mu.Lock()
 	defer accountStore.mu.Unlock()
+	if !accountStore.allowRegistrationLocked() {
+		registrationClosed(c)
+		return
+	}
 	if _, exists := accountStore.db.Users[username]; exists {
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "msg": "用户名已存在"})
 		return

@@ -232,6 +232,7 @@ func main() {
 	api.Use(noStoreResponses())
 	{
 		api.GET("/auth/me", controller.AuthMe)
+		api.GET("/auth/registration", controller.RegistrationPolicy)
 		api.GET("/scripts", controller.GetScriptBookmarks)
 		api.GET("/admin/accounts", controller.AdminListAccounts)
 		api.GET("/admin/bookmarks/backup", controller.AdminExportScriptBookmarks)
@@ -253,6 +254,7 @@ func main() {
 		accountWrites.DELETE("/shares/:id", controller.DeleteShare)
 		accountWrites.POST("/admin/accounts", controller.AdminCreateAccount)
 		accountWrites.PUT("/admin/accounts", controller.AdminUpdateAccount)
+		accountWrites.PUT("/admin/registration", controller.AdminSetRegistration)
 		accountWrites.DELETE("/admin/accounts/:username", controller.AdminDeleteAccount)
 		accountWrites.POST("/admin/bookmarks/restore", controller.AdminRestoreScriptBookmarks)
 		accountWrites.POST("/admin/update", controller.AdminUpdate)
