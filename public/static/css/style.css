@@ -2202,6 +2202,12 @@ body.has-live-sessions .back-to-sessions { display: inline-flex; }
 }
 
 .add-tab-body .input-wrapper { min-width: 0; }
+.add-tab-body #newTabPass { padding-right: 34px; }
+#newTabPassToggle { right: 4px; width: 28px; height: 28px; justify-content: center; }
+#newTabPassToggle:focus-visible { outline: 2px solid var(--c1); outline-offset: -2px; border-radius: 5px; }
+#newTabPassToggle[aria-pressed="true"] { color: var(--c1); }
+#newTabPassToggle .password-eye-slash { display: none; }
+#newTabPassToggle[aria-pressed="true"] .password-eye-slash { display: block; }
 .add-tab-body .input-wrapper input {
     min-width: 0;
     height: 28px;

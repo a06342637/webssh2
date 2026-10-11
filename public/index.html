@@ -815,10 +815,13 @@
                 </div>
                 <div id="newTabPasswordPane" class="auth-panel active">
                     <div class="input-field">
-                        <label>密码</label>
+                        <label for="newTabPass">密码</label>
                         <div class="input-wrapper">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
                             <input type="password" id="newTabPass" placeholder="输入密码">
+                            <button type="button" class="toggle-pwd" id="newTabPassToggle" onclick="toggleAddTabPassword()" aria-label="显示密码" title="显示密码" aria-controls="newTabPass" aria-pressed="false">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/><line class="password-eye-slash" x1="3" y1="3" x2="21" y2="21"/></svg>
+                            </button>
                         </div>
                     </div>
                 </div>

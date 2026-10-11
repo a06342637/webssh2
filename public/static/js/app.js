@@ -1483,6 +1483,7 @@ function sessionConnectionProtocol(session) {
 
 function showAddTab() {
     if (!ensureGatewayAccount()) return;
+    toggleAddTabPassword(false);
     var active = activeIdx >= 0 ? sessions[activeIdx] : null;
     // The + button is locked to the active session protocol; no cross-protocol choice is shown.
     configureAddTabProtocol(sessionConnectionProtocol(active));
@@ -1494,7 +1495,19 @@ function showAddTab() {
 }
 
 function hideAddTab() {
+    toggleAddTabPassword(false);
     document.getElementById('addTabModal').classList.remove('show');
+}
+
+function toggleAddTabPassword(visible) {
+    var input = document.getElementById('newTabPass');
+    var button = document.getElementById('newTabPassToggle');
+    if (!input || !button) return;
+    if (typeof visible !== 'boolean') visible = input.type === 'password';
+    input.type = visible ? 'text' : 'password';
+    button.setAttribute('aria-pressed', String(visible));
+    button.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+    button.title = visible ? '隐藏密码' : '显示密码';
 }
 
 function configureAddTabProtocol(proto) {
@@ -1530,6 +1543,7 @@ function configureAddTabProtocol(proto) {
 }
 
 function switchAddTabAuth(tab) {
+    toggleAddTabPassword(false);
     addTabAuth = tab === 'key' ? 'key' : 'password';
     document.querySelectorAll('.add-tab-body .auth-tab').forEach(function (btn) {
         btn.classList.toggle('active', btn.dataset.attab === addTabAuth);
