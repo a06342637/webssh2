@@ -389,20 +389,22 @@
             <div class="conn-drawer" id="connDrawer">
                 <div class="drawer-body glass-card">
                     <div class="drawer-hd">
-                        <span class="conn-bm-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>连接书签</span>
+                        <div class="conn-bm-heading">
+                            <span class="conn-bm-heading-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" width="20" height="20" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg></span>
+                            <div><h2>连接书签</h2><p>常用主机，随时连接</p></div>
+                        </div>
                         <button class="settings-close" type="button" onclick="toggleConnDrawer()" aria-label="关闭连接书签"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
                     </div>
-                    <div class="conn-security-note">SSH / RDP 书签仅保存在本地浏览器，不会同步到云端。</div>
                     <div class="conn-bm-toolbar">
                         <div class="input-wrapper conn-bm-search">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="input-icon" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M16 16l5 5"/></svg>
-                            <input type="search" id="connBookmarkSearch" oninput="renderConnBookmarks()" placeholder="主机、账号或备注" aria-label="搜索连接书签" autocomplete="off" spellcheck="false">
+                            <input type="search" id="connBookmarkSearch" oninput="renderConnBookmarks()" placeholder="搜索主机、账号或备注…" aria-label="搜索连接书签" autocomplete="off" spellcheck="false">
                         </div>
-                        <p class="conn-bm-order-hint" id="connBookmarkSortHint">按 SSH / RDP 分组 · 拖拽手柄排序</p>
-                        <p class="conn-bm-connect-hint">已存密码时点击即连；未存凭据需先补填。可跨协议连接，顺序仅手动调整。</p>
+                        <p class="conn-bm-order-hint" id="connBookmarkSortHint"><span>点击书签连接</span><span>拖动手柄排序</span></p>
                     </div>
                     <div class="drawer-list" id="connBookmarkList" role="region" aria-label="SSH 和 RDP 连接书签" aria-describedby="connBookmarkSortHint"></div>
                     <div class="conn-bm-footer">
+                        <p class="conn-bm-local-note"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" width="14" height="14" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg>仅保存在此浏览器，不会同步到云端</p>
                         <button class="drawer-add" type="button" onclick="saveConnBookmark()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>保存当前</button>
                         <button class="drawer-add primary-action" type="button" onclick="openConnBookmarkModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新增书签</button>
                     </div>

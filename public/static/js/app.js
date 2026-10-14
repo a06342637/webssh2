@@ -217,6 +217,8 @@ document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
         var connBookmarkModal = document.getElementById('connBookmarkModal');
         if (connBookmarkModal && connBookmarkModal.classList.contains('show')) { closeConnBookmarkModal(); return; }
+        var connBookmarkMenu = document.querySelector('.conn-bm-menu[open]');
+        if (connBookmarkMenu) { connBookmarkMenu.open = false; connBookmarkMenu.querySelector('summary').focus(); return; }
         var serverInfoDetailModal = document.getElementById('serverInfoDetailModal');
         if (serverInfoDetailModal && serverInfoDetailModal.classList.contains('show')) { hideServerInfoDetailModal(); return; }
         var sshAuthRetryModal = document.getElementById('sshAuthRetryModal');
@@ -4543,7 +4545,11 @@ function moveConnBookmarkStep(bookmarkId, direction) {
     var group = bookmarks.filter(function (entry) { return bookmarkProtocol(entry) === bookmarkProtocol(bookmark); });
     var index = group.findIndex(function (entry) { return entry.id === bookmarkId; });
     var target = group[index + direction];
-    if (target) moveConnBookmark(bookmarkId, target.id, direction < 0 ? 'before' : 'after');
+    if (target && moveConnBookmark(bookmarkId, target.id, direction < 0 ? 'before' : 'after')) {
+        document.querySelectorAll('.conn-bm-menu').forEach(function (menu) {
+            if (menu.closest('.conn-bm-item').dataset.bookmarkId === bookmarkId) menu.querySelector('summary').focus();
+        });
+    }
 }
 
 function clearConnBookmarkDragMarkers() {
@@ -4614,13 +4620,33 @@ function renderConnBookmarks() {
         var visible = group.filter(function (bookmark) { return connBookmarkMatches(bookmark, query); });
         var count = (query ? visible.length + ' / ' : '') + group.length;
         return '<section class="conn-bm-group" data-protocol="' + protocol + '" aria-label="' + protocol.toUpperCase() + ' 连接书签">' +
-            '<div class="conn-bm-group-header"><span>' + protocol.toUpperCase() + '</span><span>' + count + '</span></div>' +
+            '<div class="conn-bm-group-header"><span class="conn-bm-group-label">' + protocol.toUpperCase() + '<span>' + (protocol === 'rdp' ? '远程桌面' : '终端连接') + '</span></span><span>' + count + '</span></div>' +
             (visible.length ? visible.map(function (bookmark) {
                 var index = group.findIndex(function (entry) { return entry.id === bookmark.id; });
                 return connBookmarkItemHtml(bookmark, index, group.length);
-            }).join('') : '<div class="bm-empty">' + (query ? '没有匹配的书签' : '暂无 ' + protocol.toUpperCase() + ' 书签') + '</div>') + '</section>';
+            }).join('') : '<div class="bm-empty">' + connBookmarkIcon(protocol) + '<span>' + (query ? '没有匹配的书签' : '暂无 ' + protocol.toUpperCase() + ' 书签') + '</span><small>' + (query ? '试试其他主机、账号或备注' : '点击下方「新增书签」添加连接') + '</small></div>') + '</section>';
     }).join('');
 }
+
+function connBookmarkIcon(name) {
+    var paths = {
+        ssh: '<path d="m5 6 6 6-6 6m8 0h6"/>',
+        rdp: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+        grip: '<path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" stroke-width="3"/>',
+        more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+        edit: '<path d="m16 3 5 5-12 12-6 1 1-6L16 3Zm-3 3 5 5"/>',
+        trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
+        up: '<path d="m6 10 6-6 6 6m-6-6v16"/>',
+        down: '<path d="m6 14 6 6 6-6m-6 6V4"/>'
+    };
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true">' + (paths[name] || paths.ssh) + '</svg>';
+}
+
+document.addEventListener('click', function (event) {
+    document.querySelectorAll('.conn-bm-menu[open]').forEach(function (menu) {
+        if (!menu.contains(event.target) || event.target.closest('.conn-bm-action')) menu.open = false;
+    });
+});
 
 function connBookmarkItemHtml(bookmark, index, count) {
     var protocol = bookmarkProtocol(bookmark);
@@ -4631,18 +4657,19 @@ function connBookmarkItemHtml(bookmark, index, count) {
     var sourceId = "this.closest('.conn-bm-item').dataset.bookmarkId";
     return '<div class="bm-item conn-bm-item" data-bookmark-id="' + escAttr(bookmark.id) + '" data-protocol="' + protocol + '" ' +
         'ondragover="dragOverConnBookmark(event,this)" ondragleave="leaveConnBookmarkDrag(event,this)" ondrop="dropConnBookmark(event,this)">' +
-        '<button type="button" class="conn-bm-drag" draggable="true" aria-label="拖拽排序" title="拖拽调整组内顺序" ondragstart="startConnBookmarkDrag(event,this)" ondragend="endConnBookmarkDrag()">⠿</button>' +
+        '<button type="button" class="conn-bm-drag" draggable="true" aria-label="拖拽排序" title="拖拽调整组内顺序" ondragstart="startConnBookmarkDrag(event,this)" ondragend="endConnBookmarkDrag()">' + connBookmarkIcon('grip') + '</button>' +
         '<button type="button" class="conn-bm-connect bm-item-info" onclick="applyConn(' + sourceId + ')" title="' + escAttr(credentialHint ? '填入书签，补充凭据后连接' : '一键连接 ' + target) + '">' +
+        '<span class="conn-bm-protocol-icon">' + connBookmarkIcon(protocol) + '</span><span class="conn-bm-copy">' +
         '<span class="bm-item-name">' + esc(target) + '</span>' +
-        '<span class="bm-item-host">:' + esc(String(bookmark.port || (protocol === 'rdp' ? 3389 : 22))) +
-        (credentialHint ? '<span class="bm-item-nopass">' + credentialHint + '</span>' : '') + '</span>' +
-        (bookmark.note ? '<span class="conn-bm-note">' + esc(bookmark.note) + '</span>' : '') + '</button>' +
-        '<div class="conn-bm-actions">' +
-        '<button type="button" class="conn-bm-action" title="编辑书签" aria-label="编辑书签" onclick="openConnBookmarkModal(' + sourceId + ')">✎</button>' +
-        '<button type="button" class="conn-bm-action" title="删除书签" aria-label="删除书签" onclick="delConn(' + sourceId + ')">×</button>' +
-        '<button type="button" class="conn-bm-action" title="上移书签" aria-label="上移书签"' + (index === 0 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',-1)">↑</button>' +
-        '<button type="button" class="conn-bm-action" title="下移书签" aria-label="下移书签"' + (index === count - 1 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',1)">↓</button>' +
-        '</div></div>';
+        '<span class="conn-bm-meta"><span class="bm-item-host">端口 ' + esc(String(bookmark.port || (protocol === 'rdp' ? 3389 : 22))) + '</span>' +
+        '<span class="conn-bm-credential' + (credentialHint ? ' needs-credential' : '') + '">' + (credentialHint || '一键连接') + '</span></span>' +
+        (bookmark.note ? '<span class="conn-bm-note">' + esc(bookmark.note) + '</span>' : '') + '</span></button>' +
+        '<details class="conn-bm-menu" name="conn-bookmark-actions"><summary title="更多操作" aria-label="更多操作：' + escAttr(target) + '">' + connBookmarkIcon('more') + '</summary><div class="conn-bm-actions">' +
+        '<button type="button" class="conn-bm-action" title="编辑书签" aria-label="编辑书签" onclick="openConnBookmarkModal(' + sourceId + ')">' + connBookmarkIcon('edit') + '编辑书签</button>' +
+        '<button type="button" class="conn-bm-action is-danger" title="删除书签" aria-label="删除书签" onclick="delConn(' + sourceId + ')">' + connBookmarkIcon('trash') + '删除书签</button>' +
+        '<button type="button" class="conn-bm-action" title="上移书签" aria-label="上移书签"' + (index === 0 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',-1)">' + connBookmarkIcon('up') + '向上移动</button>' +
+        '<button type="button" class="conn-bm-action" title="下移书签" aria-label="下移书签"' + (index === count - 1 ? ' disabled' : '') + ' onclick="moveConnBookmarkStep(' + sourceId + ',1)">' + connBookmarkIcon('down') + '向下移动</button>' +
+        '</div></details></div>';
 }
 
 function saveConnBookmark() {
@@ -9518,7 +9545,8 @@ document.addEventListener('click', function (e) {
     var connDrawer = document.getElementById('connDrawer');
     var edgeBtns = document.getElementById('edgeBtns');
     if (connDrawer && connDrawer.classList.contains('open')) {
-        if (!connDrawer.contains(e.target) && !edgeBtns.contains(e.target)) {
+        // Reordering redraws the clicked row before this listener runs.
+        if (!eventPath.includes(connDrawer) && !connDrawer.contains(e.target) && !(edgeBtns && edgeBtns.contains(e.target))) {
             connDrawer.classList.remove('open');
         }
     }
