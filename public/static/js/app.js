@@ -4620,11 +4620,11 @@ function renderConnBookmarks() {
         var visible = group.filter(function (bookmark) { return connBookmarkMatches(bookmark, query); });
         var count = (query ? visible.length + ' / ' : '') + group.length;
         return '<section class="conn-bm-group" data-protocol="' + protocol + '" aria-label="' + protocol.toUpperCase() + ' 连接书签">' +
-            '<div class="conn-bm-group-header"><span class="conn-bm-group-label">' + protocol.toUpperCase() + '<span>' + (protocol === 'rdp' ? '远程桌面' : '终端连接') + '</span></span><span>' + count + '</span></div>' +
+            '<div class="conn-bm-group-header"><span class="conn-bm-group-label">' + protocol.toUpperCase() + '</span><span>' + count + '</span></div>' +
             (visible.length ? visible.map(function (bookmark) {
                 var index = group.findIndex(function (entry) { return entry.id === bookmark.id; });
                 return connBookmarkItemHtml(bookmark, index, group.length);
-            }).join('') : '<div class="bm-empty">' + connBookmarkIcon(protocol) + '<span>' + (query ? '没有匹配的书签' : '暂无 ' + protocol.toUpperCase() + ' 书签') + '</span><small>' + (query ? '试试其他主机、账号或备注' : '点击下方「新增书签」添加连接') + '</small></div>') + '</section>';
+            }).join('') : '<div class="bm-empty">' + (query ? '没有匹配的书签' : '暂无书签') + '</div>') + '</section>';
     }).join('');
 }
 
@@ -4659,11 +4659,10 @@ function connBookmarkItemHtml(bookmark, index, count) {
         'ondragover="dragOverConnBookmark(event,this)" ondragleave="leaveConnBookmarkDrag(event,this)" ondrop="dropConnBookmark(event,this)">' +
         '<button type="button" class="conn-bm-drag" draggable="true" aria-label="拖拽排序" title="拖拽调整组内顺序" ondragstart="startConnBookmarkDrag(event,this)" ondragend="endConnBookmarkDrag()">' + connBookmarkIcon('grip') + '</button>' +
         '<button type="button" class="conn-bm-connect bm-item-info" onclick="applyConn(' + sourceId + ')" title="' + escAttr(credentialHint ? '填入书签，补充凭据后连接' : '一键连接 ' + target) + '">' +
-        '<span class="conn-bm-protocol-icon">' + connBookmarkIcon(protocol) + '</span><span class="conn-bm-copy">' +
-        '<span class="bm-item-name">' + esc(target) + '</span>' +
+        '<span class="conn-bm-copy"><span class="bm-item-name" title="' + escAttr(target) + '">' + esc(target) + '</span>' +
         '<span class="conn-bm-meta"><span class="bm-item-host">端口 ' + esc(String(bookmark.port || (protocol === 'rdp' ? 3389 : 22))) + '</span>' +
-        '<span class="conn-bm-credential' + (credentialHint ? ' needs-credential' : '') + '">' + (credentialHint || '一键连接') + '</span></span>' +
-        (bookmark.note ? '<span class="conn-bm-note">' + esc(bookmark.note) + '</span>' : '') + '</span></button>' +
+        '<span class="conn-bm-credential' + (credentialHint ? ' needs-credential' : '') + '">' + (credentialHint || '一键连接') + '</span>' +
+        (bookmark.note ? '<span class="conn-bm-note" title="' + escAttr(bookmark.note) + '">' + esc(bookmark.note) + '</span>' : '') + '</span></span></button>' +
         '<details class="conn-bm-menu" name="conn-bookmark-actions"><summary title="更多操作" aria-label="更多操作：' + escAttr(target) + '">' + connBookmarkIcon('more') + '</summary><div class="conn-bm-actions">' +
         '<button type="button" class="conn-bm-action" title="编辑书签" aria-label="编辑书签" onclick="openConnBookmarkModal(' + sourceId + ')">' + connBookmarkIcon('edit') + '编辑书签</button>' +
         '<button type="button" class="conn-bm-action is-danger" title="删除书签" aria-label="删除书签" onclick="delConn(' + sourceId + ')">' + connBookmarkIcon('trash') + '删除书签</button>' +

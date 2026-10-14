@@ -49,12 +49,13 @@ const entries = [
       const bounds = await page.locator('#connDrawer').evaluate(drawer => {
         const list = drawer.querySelector('.drawer-list');
         const footer = drawer.querySelector('.conn-bm-footer');
-        return { drawer: drawer.getBoundingClientRect().toJSON(), footer: footer.getBoundingClientRect().toJSON(), overflow: list.scrollWidth - list.clientWidth, listHeight: list.clientHeight, viewport: { width: innerWidth, height: innerHeight } };
+        return { drawer: drawer.getBoundingClientRect().toJSON(), footer: footer.getBoundingClientRect().toJSON(), overflow: list.scrollWidth - list.clientWidth, listHeight: list.clientHeight, rowHeights: [...list.querySelectorAll('.conn-bm-connect')].map(row => row.getBoundingClientRect().height), viewport: { width: innerWidth, height: innerHeight } };
       });
       assert.ok(bounds.drawer.left >= 0 && bounds.drawer.right <= bounds.viewport.width, JSON.stringify(bounds));
       assert.ok(bounds.footer.bottom <= bounds.viewport.height && bounds.footer.top > 0, JSON.stringify(bounds));
       assert.equal(bounds.overflow, 0);
       assert.ok(bounds.listHeight > 80);
+      assert.ok(bounds.rowHeights.every(height => height >= 44 && height <= 52), 'bookmark rows stay compact even with long hosts and notes');
     }
     const page = await openPage();
     const drawer = page.locator('#connDrawer');
@@ -95,7 +96,7 @@ const entries = [
     assert.equal(await drawer.locator('.conn-bm-note').first().textContent(), '更新后的开发环境');
     await page.evaluate(() => applyTheme('light'));
     await screenshot(page, 'bookmarks-light');
-    assert.equal(await drawer.locator('.conn-bm-item').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(255, 255, 255)');
+    assert.equal(await drawer.locator('.drawer-body').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(247, 248, 250)');
 
     const mobile = await openPage({ viewport: { width: 375, height: 667 }, isMobile: true, hasTouch: true });
     assert.equal(await mobile.locator('.conn-bm-drag').first().isVisible(), false);
@@ -115,6 +116,7 @@ const entries = [
       renderConnBookmarks();
     });
     await mobile.setViewportSize({ width: 320, height: 568 });
+    await mobile.locator('#connBookmarkList').evaluate(el => { el.scrollTop = 0; });
     await checkBounds(mobile);
     await screenshot(mobile, 'bookmarks-long-host');
     await mobile.locator('.conn-bm-menu summary').click();
