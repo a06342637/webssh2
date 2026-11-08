@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestSysInfoProcessCount(t *testing.T) {
+	info := parseSysInfo("===CPU_CORES===\n2\n===PROCESS_COUNT===\n89\n===PROCESSES===\n123|root|100|1.0|sshd|/usr/sbin/sshd\n===END===")
+	if info["processCount"] != "89" {
+		t.Fatalf("process count = %v, want 89", info["processCount"])
+	}
+	if len(info["processes"].([]map[string]string)) != 1 {
+		t.Fatal("total process count must remain independent of the sampled process list")
+	}
+	if empty := parseSysInfo(""); empty["processCount"] != "0" {
+		t.Fatalf("missing process count = %v, want 0", empty["processCount"])
+	}
+}
+
 func TestBoundedSSHOutputCapsData(t *testing.T) {
 	output := newBoundedSSHOutput(8)
 	if _, err := output.Write([]byte("12345678")); err != nil {

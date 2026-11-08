@@ -154,6 +154,8 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`cpu_model=$( (awk -F: '/^(model name|Hardware|Processor|cpu model|Model)[[:space:]]*:/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); if($2!=""){print $2; found=1; exit}} END{if(!found) exit 1}' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || lscpu | awk -F: '/Model name|Architecture/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); if($2!=""){print $2; exit}}') 2>/dev/null | head -n1 ); if [ -n "$cpu_model" ]; then echo "$cpu_model"; else arch=$(uname -m 2>/dev/null); case "$arch" in aarch64|arm64|armv*) echo "ARM $arch";; *) echo unknown;; esac; fi`,
 		`echo "===CPU_CORES==="`,
 		`nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1`,
+		`echo "===PROCESS_COUNT==="`,
+		`ps -e --no-headers 2>/dev/null | awk 'END{print NR+0}'`,
 		`echo "===MEM==="`,
 		`free -b 2>/dev/null | awk '/^Mem:/{print $2" "$3" "$4" "$7}' || echo "0 0 0 0"`,
 		`echo "===SWAP==="`,
@@ -416,6 +418,7 @@ func parseSysInfo(raw string) map[string]interface{} {
 		"hostname":      "unknown",
 		"cpuModel":      "unknown",
 		"cpuCores":      "0",
+		"processCount":  "0",
 		"memTotal":      "0",
 		"memUsed":       "0",
 		"memFree":       "0",
@@ -476,6 +479,7 @@ func parseSysInfo(raw string) map[string]interface{} {
 	copyString(info, sections, "hostname")
 	copyString(info, sections, "cpuModel")
 	copyString(info, sections, "cpuCores")
+	copyString(info, sections, "processCount")
 	copyString(info, sections, "load")
 	copyString(info, sections, "uptime")
 
@@ -672,6 +676,8 @@ func markerKey(line string) string {
 		return "cpuModel"
 	case "CPU_CORES":
 		return "cpuCores"
+	case "PROCESS_COUNT":
+		return "processCount"
 	case "MEM":
 		return "mem"
 	case "SWAP":

@@ -3291,3 +3291,105 @@ body.active-rdp:has(#connectionShareModal.show) .rdp-bar-hotzone { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
     #connectionSettingsMenu.connection-settings-menu.show { animation: none; }
 }
+
+/* Machine dashboard: grouped facts, resource charts and persistent tables. */
+.server-info-card-modal { width: min(960px, 78vw); max-width: 78vw; }
+.server-info-body:has(.monitor-dashboard) { padding: 16px; }
+.monitor-dashboard { display: flex; flex-direction: column; gap: 16px; }
+.monitor-info-grid, .monitor-table-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.monitor-dashboard .monitor-card { grid-column: auto; padding: 14px; border: 1px solid var(--probe-border); border-radius: 12px; background: var(--probe-card) !important; box-shadow: none; }
+.monitor-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.monitor-dashboard .monitor-card-head h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.monitor-dashboard .monitor-card-head h4::before { display: none; }
+.monitor-detail-button { flex-shrink: 0; padding: 3px 7px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--probe-muted); font-family: inherit; font-size: 11px; cursor: pointer; }
+.monitor-detail-button:hover, .monitor-detail-button:focus-visible { color: var(--probe-cyan); border-color: var(--probe-border); background: var(--probe-card-soft); }
+.monitor-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.monitor-facts.storage-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.server-fact { min-width: 0; padding: 9px 10px; border-radius: 7px; background: var(--probe-card-soft); }
+.server-fact.full { grid-column: 1 / -1; }
+.server-fact span { display: block; color: var(--probe-muted); font-size: 11px; margin-bottom: 5px; }
+.server-fact b { display: block; font-size: 12px; line-height: 1.6; font-weight: 500; overflow-wrap: anywhere; }
+.monitor-section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.monitor-section-head b { font-size: 14px; font-weight: 600; }
+.monitor-section-head span { display: block; margin-top: 4px; font-size: 10px; color: var(--probe-muted); }
+.monitor-resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.monitor-resource { --resource-color: #34d399; }
+.monitor-resource.cpu { --resource-color: #f59e0b; }
+.monitor-resource.mem { --resource-color: #fb7185; }
+.monitor-resource.disk { --resource-color: #2dd4bf; }
+.monitor-resource.conn { --resource-color: #60a5fa; }
+.monitor-resource.processes { --resource-color: #a78bfa; }
+.monitor-resource.load { --resource-color: #fbbf24; }
+.monitor-resource-value { color: var(--probe-text); font-size: 25px; line-height: 1.2; font-weight: 600; font-variant-numeric: tabular-nums; }
+.monitor-resource-note { min-height: 28px; margin: 6px 0 9px; color: var(--probe-muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.monitor-usage-bar { height: 7px; overflow: hidden; border-radius: 4px; background: var(--probe-grid-soft); }
+.monitor-usage-bar i { display: block; height: 100%; border-radius: inherit; background: var(--resource-color); }
+.server-resource-chart { position: relative; width: 100%; min-width: 0; margin-top: 12px; }
+.server-resource-chart svg { display: block; width: 100%; height: auto; }
+.resource-chart-grid { stroke: var(--probe-grid-soft); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
+.resource-axis-label { fill: var(--probe-muted); font-family: inherit; font-size: 10px; }
+.resource-chart-line { fill: none; stroke: var(--resource-color, var(--probe-cyan)); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.resource-chart-area { fill: var(--resource-color, var(--probe-cyan)); opacity: .08; }
+.resource-chart-line.series-udp { stroke: #2dd4bf; }
+.resource-chart-area.series-udp { fill: #2dd4bf; }
+.resource-chart-wait { position: absolute; top: 42%; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--probe-muted); }
+.monitor-network-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 12px; }
+.monitor-network-controls .server-iface-select { margin-left: auto; max-width: 220px; font-size: 11px; }
+.monitor-dashboard .server-net-pair { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.monitor-dashboard .server-net-pair div { padding: 10px; background: var(--probe-card-soft) !important; border-color: var(--probe-border); border-radius: 8px; }
+.monitor-dashboard .server-net-pair b { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.monitor-dashboard .server-net-pair span, .monitor-dashboard .server-net-pair small { color: var(--probe-muted); }
+.monitor-dashboard .net-stat.rx b { color: var(--probe-cyan); }
+.monitor-dashboard .net-stat.tx b { color: var(--probe-yellow); }
+.monitor-dashboard .server-net-chart { padding: 12px !important; border-radius: 8px; }
+.monitor-dashboard .server-net-canvas { height: auto; min-height: 0; aspect-ratio: 760 / 220; border: none; border-radius: 4px; }
+.server-net-chart.chart-style-lines .net-line { display: block; stroke-width: 1.6; stroke-dasharray: none; }
+.server-net-chart.chart-style-lines .net-area { display: block; opacity: .06; }
+.server-net-chart.chart-style-lines .net-area.rx { fill: var(--probe-cyan); }
+.server-net-chart.chart-style-lines .net-area.tx { fill: var(--probe-yellow); }
+.monitor-dashboard .server-net-chart-head b { font-size: 12px !important; font-weight: 600; }
+.monitor-dashboard .server-net-chart-head span { font-size: 10px !important; }
+.monitor-dashboard .server-net-peak, .monitor-dashboard .server-net-legend span { font-size: 10px; font-weight: 500; }
+.monitor-dashboard .server-net-unit-toggle button { padding: 5px 9px; font-size: 11px; }
+.monitor-dashboard .server-table-wrap { max-height: 240px; border: 1px solid var(--probe-border); border-radius: 7px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.server-table-wrap { overflow-anchor: none; }
+.server-table-wrap:focus-visible { outline: 1px solid var(--probe-cyan); outline-offset: 2px; }
+.monitor-dashboard .server-table { min-width: 520px; font-size: 11px; }
+.monitor-dashboard .server-table th, .monitor-dashboard .server-table td { padding: 9px 10px; font-weight: 400; }
+.monitor-dashboard .server-table th { background: var(--probe-card-soft); font-weight: 600; }
+.monitor-dashboard .server-table td { border-color: var(--probe-grid-soft); font-variant-numeric: tabular-nums; }
+.server-fs-usage { display: flex; align-items: center; gap: 8px; min-width: 100px; }
+.server-fs-usage span { min-width: 34px; }
+.server-fs-usage i { display: block; width: 64px; height: 5px; border-radius: 3px; background: var(--probe-grid-soft); overflow: hidden; }
+.server-fs-usage em { display: block; height: 100%; background: var(--probe-cyan); }
+.monitor-table-note, .monitor-footnote { font-size: 10px; line-height: 1.5; color: var(--probe-muted); margin: 10px 0 0; }
+.monitor-footnote { margin: 0; text-align: center; }
+.monitor-refresh-error { padding: 8px 10px; margin-bottom: 12px; border: 1px solid var(--probe-yellow); border-radius: 7px; font-size: 11px; color: var(--probe-yellow); }
+.server-detail-pop-body .server-resource-chart { max-width: 780px; margin-left: auto; margin-right: auto; }
+.server-detail-pop-body .server-summary-grid .server-resource-chart { display: block; grid-area: chart; padding: 0; border: none; }
+.server-detail-pop-body .detail-table { max-height: 65dvh; overscroll-behavior: contain; }
+@media (max-width: 860px) {
+    .server-info-card-modal { width: 94vw; max-width: 94vw; }
+    .monitor-resource-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .monitor-dashboard .monitor-card { padding: 12px; }
+}
+@media (max-width: 520px) {
+    .server-info-card-modal { width: 100%; max-width: 100%; }
+    .server-info-body:has(.monitor-dashboard) { padding: 10px; }
+    .monitor-dashboard { gap: 12px; }
+    .monitor-info-grid, .monitor-table-grid { grid-template-columns: 1fr; }
+    .monitor-section-head { flex-wrap: wrap; }
+    .monitor-section-head span { font-size: 9px; }
+    .monitor-resource-grid { gap: 8px; }
+    .monitor-resource-value { font-size: 22px; }
+    .monitor-dashboard .monitor-resource { padding: 10px; }
+    .monitor-resource-note { font-size: 9px; min-height: 30px; }
+    .monitor-card-head { gap: 6px; }
+    .monitor-detail-button { font-size: 10px; padding: 3px; }
+    .monitor-network-controls { justify-content: flex-start; }
+    .monitor-network-controls .server-iface-select { max-width: 100%; width: 100%; }
+    .monitor-dashboard .server-net-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .monitor-dashboard .server-net-pair b { font-size: 14px; }
+    .monitor-dashboard .server-net-canvas { aspect-ratio: auto; height: 150px; }
+    .monitor-dashboard .server-net-chart-head { flex-wrap: wrap; gap: 8px; }
+}

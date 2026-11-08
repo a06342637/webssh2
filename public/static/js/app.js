@@ -34,6 +34,8 @@ var SERVER_INFO_NET_REFRESH_MS = 1000;
 var SERVER_INFO_REFRESH_MS = 5000;
 var SERVER_INFO_CHART_MINUTES = 3;
 var SERVER_INFO_DETAIL_CHART_MINUTES = 10;
+var serverInfoChartMinutes = 3;
+var serverInfoChartStyle = 'bars';
 var serverInfoNetUnit = (function () {
     try { return safeStorageGet(NET_UNIT_KEY) === 'bits' ? 'bits' : 'bytes'; } catch (e) { return 'bytes'; }
 })();
@@ -1836,8 +1838,13 @@ function recordNetworkSample(session, d) {
     function push(name, rx, tx) {
         name = name || '__main__';
         if (!session._netHistory[name]) session._netHistory[name] = [];
-        session._netHistory[name].push({ t: now, rx: Math.max(0, parseFloat(rx) || 0), tx: Math.max(0, parseFloat(tx) || 0) });
-        if (session._netHistory[name].length > 1800) session._netHistory[name].shift();
+        var history = session._netHistory[name];
+        var sample = { t: now, rx: Math.max(0, parseFloat(rx) || 0), tx: Math.max(0, parseFloat(tx) || 0) };
+        // HTTP and the stream can report the same second; keep one sample per second.
+        if (history.length && Math.floor(history[history.length - 1].t / 1000) === Math.floor(now / 1000)) history[history.length - 1] = sample;
+        else history.push(sample);
+        while (history.length && history[0].t < now - 30 * 60 * 1000) history.shift();
+        if (history.length > 1801) history.shift();
     }
     if (ifaces.length) {
         ifaces.forEach(function (n) { push(n.name, n.rxRate, n.txRate); });
@@ -1856,8 +1863,15 @@ function recordResourceSample(session, d) {
         cpu: Math.max(0, parseFloat(d.cpuUsage) || 0),
         mem: percentOf(d.memUsed, d.memTotal),
         disk: percentOf(d.diskUsed, d.diskTotal),
+        swap: percentOf(d.swapUsed, d.swapTotal),
+        load: Math.max(0, parseFloat(d.load) || 0),
+        tcp: Math.max(0, parseInt(d.tcpCount) || 0),
+        udp: Math.max(0, parseInt(d.udpCount) || 0),
+        processes: Math.max(0, parseInt(d.processCount) || 0),
         conn: Math.max(0, connTotal)
     });
+    session._lastResourceUpdatedAt = now;
+    while (session._resourceHistory.length && session._resourceHistory[0].t < now - 30 * 60 * 1000) session._resourceHistory.shift();
     if (session._resourceHistory.length > 600) session._resourceHistory.shift();
 }
 
@@ -1865,53 +1879,100 @@ function getResourceHistory(session) {
     return session && Array.isArray(session._resourceHistory) ? session._resourceHistory : [];
 }
 
-function resourcePointX(idx, history, width, pad) {
-    var plotW = Math.max(1, width - pad * 2);
-    var maxSpan = 179;
-    var offsetFromLatest = Math.max(0, history.length - 1 - idx);
-    return width - pad - Math.min(1, offsetFromLatest / maxSpan) * plotW;
+function serverResourceChartHtml(session, key, fixedMax) {
+    var history = getResourceHistory(session);
+    var end = history.length ? history[history.length - 1].t : Date.now();
+    var start = end - serverInfoChartMinutes * 60000;
+    history = history.filter(function (sample) { return sample.t >= start; });
+    var width = 360, height = 150, pad = { top: 12, right: 10, bottom: 24, left: 40 };
+    var keys = key === 'conn' ? ['tcp', 'udp'] : [key];
+    var max = fixedMax || 1;
+    if (!fixedMax) history.forEach(function (sample) { keys.forEach(function (k) { max = Math.max(max, Number(sample[k]) || 0); }); });
+    if (!fixedMax) max *= 1.15;
+    var grid = '';
+    for (var i = 0; i <= 4; i++) {
+        var y = pad.top + i * (height - pad.top - pad.bottom) / 4;
+        var tick = max * (1 - i / 4);
+        var tickLabel = fixedMax === 100 ? Math.round(tick) + '%' : (max < 2 ? tick.toFixed(2) : Math.round(tick));
+        grid += '<line class="resource-chart-grid" x1="' + pad.left + '" x2="' + (width - pad.right) + '" y1="' + y + '" y2="' + y + '"/>' +
+            '<text class="resource-axis-label" x="' + (pad.left - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + tickLabel + '</text>';
+    }
+    var paths = keys.map(function (k) {
+        var path = buildNetPath(history, k, max, width, height, pad, start, end);
+        return '<path class="resource-chart-area series-' + k + '" d="' + buildNetArea(path, history, width, height, pad, start, end) + '"/><path class="resource-chart-line series-' + k + '" d="' + path + '"/>';
+    }).join('');
+    var hover = history.map(function (sample, index) {
+        var x = netPointX(sample, index, history, width, pad, start, end);
+        var previousX = index ? netPointX(history[index - 1], index - 1, history, width, pad, start, end) : x;
+        var nextX = index < history.length - 1 ? netPointX(history[index + 1], index + 1, history, width, pad, start, end) : x;
+        var left = index ? (previousX + x) / 2 : x - 3;
+        var right = index < history.length - 1 ? (nextX + x) / 2 : x + 3;
+        var value = key === 'conn' ? 'TCP ' + sample.tcp + ' · UDP ' + sample.udp :
+            (Number(sample[key]) || 0).toFixed(key === 'load' ? 2 : 1) + (fixedMax === 100 ? '%' : '');
+        return '<g class="chart-hover resource-hover"><rect class="chart-hover-hit" x="' + Math.max(pad.left, left).toFixed(1) + '" y="' + pad.top + '" width="' + Math.max(1, Math.min(width - pad.right, right) - Math.max(pad.left, left)).toFixed(1) + '" height="' + (height - pad.top - pad.bottom) + '"/>' +
+            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" x2="' + x.toFixed(1) + '" y1="' + pad.top + '" y2="' + (height - pad.bottom) + '"/>' +
+            '<g class="chart-hover-tip" transform="translate(' + Math.max(pad.left, Math.min(width - 142, x + 6)).toFixed(1) + ' 14)"><rect width="132" height="40" rx="5"/><text x="7" y="14">' + formatBeijingMinute(sample.t) + '</text><text x="7" y="30">' + esc(value) + '</text></g></g>';
+    }).join('');
+    return '<div class="server-resource-chart"><svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + escAttr(key + ' 最近 ' + serverInfoChartMinutes + ' 分钟趋势') + '">' + grid + paths + hover +
+        '<text class="resource-axis-label" x="' + pad.left + '" y="' + (height - 5) + '">' + formatBeijingMinute(start) + '</text>' +
+        '<text class="resource-axis-label" x="' + (width - pad.right) + '" y="' + (height - 5) + '" text-anchor="end">' + formatBeijingMinute(end) + '</text></svg>' +
+        (history.length < 2 ? '<span class="resource-chart-wait">等待资源采样</span>' : '') + '</div>';
 }
 
-function resourceWavePath(points) {
-    if (!points.length) return '';
-    var ordered = points.slice().reverse();
-    var d = 'M' + ordered[0].x.toFixed(1) + ' ' + ordered[0].y.toFixed(1);
-    for (var i = 1; i < ordered.length; i++) {
-        var prev = ordered[i - 1], cur = ordered[i];
-        var midX = (prev.x + cur.x) / 2;
-        d += ' C' + midX.toFixed(1) + ' ' + prev.y.toFixed(1) + ' ' + midX.toFixed(1) + ' ' + cur.y.toFixed(1) + ' ' + cur.x.toFixed(1) + ' ' + cur.y.toFixed(1);
+// Reconcile only changed nodes. Scroll containers, focused controls and tables
+// keep their identity across HTTP refreshes and one-second network messages.
+function patchServerInfoContent(root, html, context) {
+    var template = document.createElement('template');
+    template.innerHTML = html;
+    if (root.dataset.serverContext !== context) {
+        root.replaceChildren(template.content);
+        root.dataset.serverContext = context;
+        root.scrollTop = 0;
+        root.scrollLeft = 0;
+        return;
     }
-    return d;
-}
-
-function resourceSparklineHtml(session, key, fixedMax, cls) {
-    var history = getResourceHistory(session).slice(-180);
-    if (!history.length) return '<div class="server-summary-sparkline empty"><span>-</span></div>';
-    if (history.length === 1) history = [history[0], history[0]];
-    var width = 160, height = 42, pad = 4;
-    var max = parseFloat(fixedMax) || 0;
-    if (!max) {
-        history.forEach(function (p) { max = Math.max(max, parseFloat(p[key]) || 0); });
-        max = Math.max(1, max);
-    }
-    var points = history.map(function (p, idx) {
-        var value = Math.max(0, parseFloat(p[key]) || 0);
-        var x = resourcePointX(idx, history, width, pad);
-        var y = height - pad - Math.min(1, value / max) * (height - pad * 2);
-        return { x: x, y: y };
+    var scrollPositions = [root].concat(Array.from(root.querySelectorAll('.server-table-wrap'))).map(function (element) {
+        return { element: element, top: element.scrollTop, left: element.scrollLeft };
     });
-    var path = resourceWavePath(points);
-    var first = points[points.length - 1];
-    var last = points[0];
-    var area = path + ' L' + last.x.toFixed(1) + ' ' + (height - pad) + ' L' + first.x.toFixed(1) + ' ' + (height - pad) + ' Z';
-    var hover = buildResourceHoverOverlay(history, key, max, width, height, pad);
-    return '<div class="server-summary-sparkline ' + esc(cls || key) + '">' +
-        '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
-        '<line class="summary-spark-base" x1="' + pad + '" y1="' + (height - pad) + '" x2="' + (width - pad) + '" y2="' + (height - pad) + '"/>' +
-        '<path class="summary-spark-area" d="' + area + '"/>' +
-        '<path class="summary-spark-line" d="' + path + '"/>' +
-        hover +
-        '</svg></div>';
+    function key(node) { return node.nodeType === 1 ? node.getAttribute('data-server-key') : null; }
+    function update(target, source) {
+        if (target.isEqualNode(source)) return;
+        if (target.nodeType === 3) { target.nodeValue = source.nodeValue; return; }
+        if (target.nodeType !== 1 && target !== root) return;
+        if (target.tagName === 'SELECT' && target === document.activeElement) return;
+        if (target !== root) {
+            Array.from(target.attributes).forEach(function (attr) { if (!source.hasAttribute(attr.name)) target.removeAttribute(attr.name); });
+            Array.from(source.attributes).forEach(function (attr) { if (target.getAttribute(attr.name) !== attr.value) target.setAttribute(attr.name, attr.value); });
+        }
+        var keyed = new Map();
+        Array.from(target.childNodes).forEach(function (node) { if (key(node)) keyed.set(key(node), node); });
+        var cursor = target.firstChild;
+        Array.from(source.childNodes).forEach(function (node) {
+            var match = key(node) ? keyed.get(key(node)) : cursor;
+            if (match && (match.nodeType !== node.nodeType || match.nodeName !== node.nodeName || key(match) !== key(node))) match = null;
+            if (!match) { match = node.cloneNode(true); target.insertBefore(match, cursor); }
+            else { if (match !== cursor) target.insertBefore(match, cursor); update(match, node); }
+            cursor = match.nextSibling;
+        });
+        while (cursor) { var next = cursor.nextSibling; target.removeChild(cursor); cursor = next; }
+    }
+    update(root, template.content);
+    scrollPositions.forEach(function (position) {
+        if (position.element.isConnected) { position.element.scrollTop = position.top; position.element.scrollLeft = position.left; }
+    });
+}
+
+function serverInfoFactHtml(label, value, wide) {
+    return '<div class="server-fact' + (wide ? ' full' : '') + '"><span>' + esc(label) + '</span><b title="' + escAttr(value) + '">' + esc(value) + '</b></div>';
+}
+
+function serverInfoTableRows(items, type, full) {
+    return items.map(function (item) {
+        if (type === 'processes') return '<tr data-server-key="pid-' + escAttr(item.pid) + '"><td>' + esc(item.pid) + '</td><td>' + esc(item.user) + '</td><td>' + fmtKb(item.rss) + '</td><td>' + fmtPct(item.cpu) + '</td><td title="' + escAttr(item.cmd || item.name) + '">' + esc((full ? item.cmd : item.name) || item.cmd || '-') + '</td></tr>';
+        var percent = Math.max(0, Math.min(100, parseFloat(item.pct) || 0));
+        return '<tr data-server-key="fs-' + escAttr(item.name + ':' + item.mount) + '"><td title="' + escAttr(item.name) + '">' + esc(item.mount || item.name) + '</td><td>' + fmtB(item.used) + ' / ' + fmtB(item.size) + '</td>' +
+            (full ? '<td>' + fmtB(item.avail) + '</td>' : '') + '<td><div class="server-fs-usage"><span>' + esc(item.pct || '0%') + '</span><i><em style="width:' + percent + '%"></em></i></div></td></tr>';
+    }).join('') || '<tr><td colspan="5">暂无数据</td></tr>';
 }
 
 function resourceOverviewHtml(session, items, cls) {
@@ -1919,40 +1980,9 @@ function resourceOverviewHtml(session, items, cls) {
         return '<div class="resource-overview-tile ' + esc(item.cls || item.key || '') + '">' +
             '<div class="resource-overview-main"><span>' + esc(item.label) + '</span><b>' + esc(item.value) + '</b></div>' +
             (item.detail ? '<small>' + esc(item.detail) + '</small>' : '') +
-            resourceSparklineHtml(session, item.key, item.max, item.cls) +
+            serverResourceChartHtml(session, item.key, item.max) +
             '</div>';
     }).join('') + '</div>';
-}
-
-function formatResourceSparkValue(key, value) {
-    value = Math.max(0, parseFloat(value) || 0);
-    if (key === 'conn') return Math.round(value) + '';
-    return value.toFixed(value >= 10 ? 0 : 1) + '%';
-}
-
-function buildResourceHoverOverlay(history, key, max, width, height, pad) {
-    if (!history.length) return '';
-    var labelMap = { cpu: 'CPU', mem: '内存', disk: '磁盘', conn: '连接' };
-    return history.map(function (p, idx) {
-        var value = Math.max(0, parseFloat(p[key]) || 0);
-        var x = resourcePointX(idx, history, width, pad);
-        var prevX = idx > 0 ? resourcePointX(idx - 1, history, width, pad) : pad;
-        var nextX = idx < history.length - 1 ? resourcePointX(idx + 1, history, width, pad) : width - pad;
-        var hitX = idx === 0 ? 0 : Math.min(prevX, x) + Math.abs(x - prevX) / 2;
-        var hitEnd = idx === history.length - 1 ? width : (x + nextX) / 2;
-        var hitW = hitEnd - hitX;
-        var tipW = 74, tipH = 27;
-        var tipX = Math.max(3, Math.min(width - tipW - 3, x + 6));
-        var tipY = 3;
-        return '<g class="chart-hover summary-hover">' +
-            '<rect class="chart-hover-hit" x="' + hitX.toFixed(1) + '" y="0" width="' + Math.max(3, hitW).toFixed(1) + '" height="' + height + '"/>' +
-            '<line class="chart-hover-line" x1="' + x.toFixed(1) + '" y1="' + pad + '" x2="' + x.toFixed(1) + '" y2="' + (height - pad) + '"/>' +
-            '<g class="chart-hover-tip" transform="translate(' + tipX.toFixed(1) + ' ' + tipY + ')">' +
-            '<rect width="' + tipW + '" height="' + tipH + '" rx="5"/>' +
-            '<text x="6" y="11">' + esc(formatBeijingMinute(p.t || Date.now())) + '</text>' +
-            '<text x="6" y="22">' + esc(labelMap[key] || key) + ' ' + esc(formatResourceSparkValue(key, value)) + '</text>' +
-            '</g></g>';
-    }).join('');
 }
 
 function getNetworkHistory(session, ifaceName) {
@@ -2015,20 +2045,44 @@ function buildNetBars(items, max, width, height, pad, domainStart, domainEnd) {
         var x = netPointX(item, idx, items, width, pad, domainStart, domainEnd);
         var prevX = idx > 0 ? netPointX(items[idx - 1], idx - 1, items, width, pad, domainStart, domainEnd) : p.left;
         var nextX = idx < items.length - 1 ? netPointX(items[idx + 1], idx + 1, items, width, pad, domainStart, domainEnd) : width - p.right;
-        var slotW = Math.max(3, Math.min(nextX - prevX, (width - p.left - p.right) / Math.max(1, items.length - 1)));
-        var barW = Math.max(2.2, Math.min(9, slotW * 0.72));
-        var halfW = Math.max(1.1, barW / 2 - 0.4);
+        var slotW = Math.max(1, Math.min(nextX - prevX, (width - p.left - p.right) / Math.max(1, items.length - 1)));
+        var barW = Math.min(10, slotW * 0.8);
+        var halfW = Math.max(0.3, barW / 2 - 0.25);
         var rx = Math.max(0, parseFloat(item.rx) || 0);
         var tx = Math.max(0, parseFloat(item.tx) || 0);
         var rxH = Math.max(rx > 0 ? 1 : 0, (rx / max) * plotH);
         var txH = Math.max(tx > 0 ? 1 : 0, (tx / max) * plotH);
-        var rxX = x - barW / 2;
-        var txX = x + 0.4;
+        var rxX = Math.max(p.left, Math.min(width - p.right - halfW * 2 - 0.5, x - barW / 2));
+        var txX = rxX + halfW + 0.5;
         return '<g class="net-bar-pair">' +
             (rxH ? '<rect class="net-bar rx" x="' + rxX.toFixed(1) + '" y="' + (baseY - rxH).toFixed(1) + '" width="' + halfW.toFixed(1) + '" height="' + rxH.toFixed(1) + '" rx="1.2"/>' : '') +
             (txH ? '<rect class="net-bar tx" x="' + txX.toFixed(1) + '" y="' + (baseY - txH).toFixed(1) + '" width="' + halfW.toFixed(1) + '" height="' + txH.toFixed(1) + '" rx="1.2"/>' : '') +
             '</g>';
     }).join('');
+}
+
+function changeServerInfoChart(minutes, style) {
+    if ([3, 10, 30].indexOf(Number(minutes)) !== -1) serverInfoChartMinutes = Number(minutes);
+    if (style === 'bars' || style === 'lines') serverInfoChartStyle = style;
+    var session = sessions[serverInfoModalIdx];
+    if (session && session._lastMetrics) renderServerInfo(session._lastMetrics, session);
+}
+
+function aggregateNetworkHistory(history, domain) {
+    var step = Math.max(1000, Math.ceil(domain.span / 180000) * 1000);
+    var buckets = new Map();
+    history.forEach(function (sample) {
+        var key = Math.floor(sample.t / step) * step;
+        var bucket = buckets.get(key) || { t: sample.t, rx: 0, tx: 0, count: 0 };
+        bucket.rx += sample.rx;
+        bucket.tx += sample.tx;
+        bucket.t = sample.t;
+        bucket.count++;
+        buckets.set(key, bucket);
+    });
+    return Array.from(buckets.values()).map(function (bucket) {
+        return { t: bucket.t, rx: bucket.rx / bucket.count, tx: bucket.tx / bucket.count };
+    });
 }
 
 function buildNetLabels(items, key, max, width, height, pad, domainStart, domainEnd, cls) {
@@ -2174,12 +2228,10 @@ function buildNetYAxis(max, width, height, pad) {
 function networkChartHtml(session, ifaceName, minutes) {
     var history = getNetworkHistory(session, ifaceName).slice(-1800);
     var chartMinutes = minutes || SERVER_INFO_CHART_MINUTES;
-    var isDetail = chartMinutes >= SERVER_INFO_DETAIL_CHART_MINUTES;
     var domain = networkDomain(history, chartMinutes);
     history = history.filter(function (p) { return !p.t || (p.t >= domain.start && p.t <= domain.end); });
-    var width = isDetail ? 900 : 760;
-    var height = isDetail ? 300 : 220;
-    var pad = isDetail ? { top: 28, right: 28, bottom: 32, left: 84 } : { top: 24, right: 24, bottom: 26, left: 74 };
+    var width = 760, height = 220;
+    var pad = { top: 24, right: 24, bottom: 26, left: 74 };
     var max = 1;
     var rxPeak = 0, txPeak = 0;
     history.forEach(function (p) {
@@ -2189,7 +2241,16 @@ function networkChartHtml(session, ifaceName, minutes) {
         txPeak = Math.max(txPeak, tx);
         max = Math.max(max, rx, tx);
     });
+    var sampleCount = history.length;
+    history = aggregateNetworkHistory(history, domain);
+    max *= 1.08;
     var netBars = buildNetBars(history, max, width, height, pad, domain.start, domain.end);
+    if (serverInfoChartStyle === 'lines') {
+        netBars = ['rx', 'tx'].map(function (key) {
+            var path = buildNetPath(history, key, max, width, height, pad, domain.start, domain.end);
+            return '<path class="net-area ' + key + '" d="' + buildNetArea(path, history, width, height, pad, domain.start, domain.end) + '"/><path class="net-line ' + key + '" d="' + path + '"/>';
+        }).join('');
+    }
     var hoverOverlay = buildNetHoverOverlay(history, max, width, height, pad, domain.start, domain.end);
     var empty = history.length < 2 ? '<div class="server-net-empty">等待下一次刷新后生成实时流量图</div>' : '';
     var grid = '';
@@ -2202,8 +2263,8 @@ function networkChartHtml(session, ifaceName, minutes) {
         var x = chartPad.left + gx * ((width - chartPad.left - chartPad.right) / 6);
         grid += '<line class="net-grid-v" x1="' + x.toFixed(1) + '" y1="' + chartPad.top + '" x2="' + x.toFixed(1) + '" y2="' + (height - chartPad.bottom) + '"/>';
     }
-    return '<div class="server-net-chart' + (isDetail ? ' detail-net-chart' : '') + '">' +
-        '<div class="server-net-chart-head"><div><b>实时网络流量</b><span>最近 ' + networkSpanText(domain.span) + ' · 北京时间 · 当前单位：' + (serverInfoNetUnit === 'bits' ? 'bits/s' : 'B/s') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
+    return '<div class="server-net-chart chart-style-' + serverInfoChartStyle + '">' +
+        '<div class="server-net-chart-head"><div><b>实时网络流量</b><span>最近 ' + networkSpanText(domain.span) + ' · 北京时间 · ' + sampleCount + ' 个采样' + (chartMinutes > 3 ? ' · 按区间均值绘制' : '') + '</span></div><div class="server-net-legend"><span class="rx">接收</span><span class="tx">发送</span></div></div>' +
         '<div class="server-net-peaks"><span class="server-net-peak rx"><em>接收峰值</em><b>' + fmtNetRate(rxPeak) + '</b></span><span class="server-net-peak tx"><em>发送峰值</em><b>' + fmtNetRate(txPeak) + '</b></span></div>' +
         '<div class="server-net-canvas">' + empty +
         '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none" aria-hidden="true">' +
@@ -2305,12 +2366,6 @@ function percentOf(used, total) {
     return Math.max(0, Math.min(100, pct(used, total)));
 }
 
-function meterHtml(label, used, total, color) {
-    var p = percentOf(used, total);
-    return '<div class="srv-meter"><div class="srv-meter-top"><span>' + esc(label) + '</span><b>' + p + '%</b></div>' +
-        '<div class="srv-meter-bar"><i style="width:' + p + '%;background:' + color + '"></i></div></div>';
-}
-
 function getSelectedInterface(d) {
     var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
     var current = serverInfoSelectedIface[(sessions[serverInfoModalIdx] || {}).id] || d.mainIface || '';
@@ -2322,6 +2377,7 @@ function openServerInfoModal(idx) {
     if (idx < 0 || idx >= sessions.length) return;
     if (serverInfoModalIdx >= 0 && serverInfoModalIdx !== idx && sessions[serverInfoModalIdx]) {
         stopServerInfoNetStream(sessions[serverInfoModalIdx]);
+        hideServerInfoDetailModal();
     }
     serverInfoModalIdx = idx;
     var s = sessions[idx];
@@ -2342,7 +2398,7 @@ function openServerInfoModal(idx) {
                 liveBadge = document.createElement('span');
                 liveBadge.id = 'serverInfoHeaderLive';
                 liveBadge.className = 'server-info-live server-info-live-inline';
-                liveBadge.innerHTML = '<span></span>每 ' + getServerInfoRefreshSeconds() + ' 秒刷新';
+                liveBadge.innerHTML = '<span></span>网络 1 秒 · 资源 5 秒';
             }
             titleRow.appendChild(liveBadge);
         }
@@ -2405,6 +2461,12 @@ function changeServerInfoIface(name) {
 function renderServerInfoError(message) {
     var body = document.getElementById('serverInfoBody');
     if (!body) return;
+    if (body.querySelector('.monitor-dashboard')) {
+        var notice = body.querySelector('.monitor-refresh-error');
+        if (!notice) { notice = document.createElement('div'); notice.className = 'monitor-refresh-error'; notice.setAttribute('role', 'status'); body.prepend(notice); }
+        notice.textContent = (message || '服务器信息暂时不可用') + '，正在重试。';
+        return;
+    }
     body.innerHTML = '<div class="server-info-error"><b>读取失败</b><span>' + esc(message || '服务器信息暂时不可用') + '</span></div>';
 }
 
@@ -2428,6 +2490,7 @@ function renderServerInfoDetail(type, d, session) {
     var body = document.getElementById('serverInfoDetailBody');
     var title = document.getElementById('serverInfoDetailTitle');
     if (!body || !title || (modal && !modal.classList.contains('show') && serverInfoDetailType !== type)) return;
+    var html = '';
     var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
     var selectedIface = getSelectedInterface(d);
     var ifaceName = selectedIface ? selectedIface.name : (d.mainIface || '-');
@@ -2444,52 +2507,48 @@ function renderServerInfoDetail(type, d, session) {
     var diskRemainPct = fmtRemainPct(diskPct);
     var memAvail = d.memAvailable || d.memFree;
     var cb = d.cpuBreakdown || {};
-    var procRows = (Array.isArray(d.processes) ? d.processes : []).map(function (p) {
-        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + escAttr(p.cmd || p.name) + '">' + esc(p.cmd || p.name || '-') + '</td></tr>';
-    }).join('') || '<tr><td colspan="5">暂无进程数据</td></tr>';
-    var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).map(function (fs) {
-        return '<tr><td title="' + escAttr(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + ' / ' + esc(fmtB(fs.size)) + '</td><td>' + esc(fmtB(fs.avail)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
-    }).join('') || '<tr><td colspan="4">暂无文件系统数据</td></tr>';
+    var procRows = serverInfoTableRows(Array.isArray(d.processes) ? d.processes : [], 'processes', true);
+    var fsRows = serverInfoTableRows(Array.isArray(d.filesystems) ? d.filesystems : [], 'filesystems', true);
     var titles = { network: '网络详情', processes: '进程详情', filesystems: '文件系统详情', facts: '基础信息', summary: '资源概览', cpu: 'CPU 详情', memory: '内存详情', disk: '硬盘详情', os: '操作系统详情' };
     title.textContent = titles[type] || '服务器详情';
     if (type === 'network') {
-        body.innerHTML = '<div class="server-detail-section">' +
+        html = '<div class="server-detail-section">' +
             '<div class="server-detail-kv"><div><span>当前网卡</span><b>' + esc(ifaceName) + '</b></div><div><span>接收速度</span><b>↓ ' + fmtNetRate(rxRate) + '</b><small>' + fmtNetRateAlt(rxRate) + '</small></div><div><span>发送速度</span><b>↑ ' + fmtNetRate(txRate) + '</b><small>' + fmtNetRateAlt(txRate) + '</small></div><div><span>总接收</span><b>' + fmtB(rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(txTotal) + '</b></div><div><span>网卡数量</span><b>' + esc(ifaces.length || 1) + '</b></div></div>' +
             networkChartHtml(session, ifaceName, SERVER_INFO_DETAIL_CHART_MINUTES) + '</div>';
     } else if (type === 'processes') {
-        body.innerHTML = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>完整命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div>';
+        html = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>完整命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div>';
     } else if (type === 'filesystems') {
-        body.innerHTML = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>可用</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div>';
+        html = '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>可用</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div>';
     } else if (type === 'cpu') {
-        body.innerHTML = '<div class="server-detail-section">' +
+        html = '<div class="server-detail-section">' +
             '<div class="server-detail-kv"><div><span>CPU 型号</span><b>' + esc(d.cpuModel || '-') + '</b></div><div><span>CPU 核心</span><b>' + esc(d.cpuCores || '-') + '</b></div>' +
             '<div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div><div><span>当前使用率</span><b>' + cpu.toFixed(1) + '%</b></div>' +
             '<div><span>用户态</span><b>' + esc(cb.user || '0') + '%</b></div><div><span>系统态</span><b>' + esc(cb.system || '0') + '%</b></div>' +
             '<div><span>IO 等待</span><b>' + esc(cb.iowait || '0') + '%</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div></div>' +
-            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>CPU 曲线</span><b>' + cpu.toFixed(1) + '%</b><small>用户 ' + esc(cb.user || '0') + '% · 系统 ' + esc(cb.system || '0') + '% · IO ' + esc(cb.iowait || '0') + '%</small>' + resourceSparklineHtml(session, 'cpu', 100, 'cpu') + '</div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>CPU 曲线</span><b>' + cpu.toFixed(1) + '%</b><small>用户 ' + esc(cb.user || '0') + '% · 系统 ' + esc(cb.system || '0') + '% · IO ' + esc(cb.iowait || '0') + '%</small>' + serverResourceChartHtml(session, 'cpu', 100) + '</div></div>' +
             '</div>';
     } else if (type === 'memory') {
-        body.innerHTML = '<div class="server-detail-section">' +
+        html = '<div class="server-detail-section">' +
             '<div class="server-detail-kv"><div><span>内存总量</span><b>' + fmtB(d.memTotal) + '</b></div><div><span>已用内存</span><b>' + fmtB(d.memUsed) + '</b></div>' +
             '<div><span>可用内存</span><b>' + fmtB(d.memAvailable || d.memFree) + '</b></div><div><span>使用率</span><b>' + memPct + '%</b></div>' +
             '<div><span>Swap 总量</span><b>' + fmtB(d.swapTotal) + '</b></div><div><span>Swap 已用</span><b>' + fmtB(d.swapUsed) + '</b></div></div>' +
-            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>内存曲线</span><b>' + memPct + '%</b><small>' + fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal) + '，可用 ' + fmtB(d.memAvailable || d.memFree) + '</small>' + resourceSparklineHtml(session, 'mem', 100, 'mem') + '</div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>内存曲线</span><b>' + memPct + '%</b><small>' + fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal) + '，可用 ' + fmtB(d.memAvailable || d.memFree) + '</small>' + serverResourceChartHtml(session, 'mem', 100) + '</div></div>' +
             '</div>';
     } else if (type === 'disk') {
-        body.innerHTML = '<div class="server-detail-section">' +
+        html = '<div class="server-detail-section">' +
             '<div class="server-detail-kv"><div><span>硬盘总量</span><b>' + fmtB(d.diskTotal) + '</b></div><div><span>已用空间</span><b>' + fmtB(d.diskUsed) + '</b></div>' +
             '<div><span>剩余空间</span><b>' + fmtB(d.diskFree) + '</b></div><div><span>使用率</span><b>' + diskPct + '%</b></div></div>' +
-            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>硬盘曲线</span><b>' + diskPct + '%</b><small>' + fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal) + '，剩余 ' + fmtB(d.diskFree) + '</small>' + resourceSparklineHtml(session, 'disk', 100, 'disk') + '</div></div>' +
+            '<div class="server-summary-grid detail-summary single-detail-chart"><div><span>硬盘曲线</span><b>' + diskPct + '%</b><small>' + fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal) + '，剩余 ' + fmtB(d.diskFree) + '</small>' + serverResourceChartHtml(session, 'disk', 100) + '</div></div>' +
             '<div class="server-table-wrap detail-table"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>可用</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div>' +
             '</div>';
     } else if (type === 'os') {
-        body.innerHTML = '<div class="server-info-facts detail-facts">' +
+        html = '<div class="server-info-facts detail-facts">' +
             '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div><div><span>内核版本</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
             '<div><span>主机名</span><b>' + esc(d.hostname || '-') + '</b></div><div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div>' +
             '<div><span>运行时间</span><b>' + esc(fmtUptimeLong(d.uptime)) + '</b></div><div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
             '</div>';
     } else if (type === 'facts') {
-        body.innerHTML = '<div class="server-info-facts detail-facts">' +
+        html = '<div class="server-info-facts detail-facts">' +
             '<div><span>CPU</span><b>' + esc(d.cpuModel || '-') + '</b><small>' + esc(d.cpuCores || '?') + ' 核 · 剩余 ' + cpuRemainPct + '</small></div>' +
             '<div><span>内存</span><b>' + fmtB(memAvail) + ' / ' + fmtB(d.memTotal) + '</b><small>剩余 ' + memRemainPct + '</small></div>' +
             '<div><span>硬盘</span><b>' + fmtB(d.diskFree) + ' / ' + fmtB(d.diskTotal) + '</b><small>剩余 ' + diskRemainPct + '</small></div>' +
@@ -2503,77 +2562,73 @@ function renderServerInfoDetail(type, d, session) {
             { label: '内存', value: memPct + '%', detail: fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal), key: 'mem', max: 100, cls: 'mem' },
             { label: '磁盘', value: diskPct + '%', detail: fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal), key: 'disk', max: 100, cls: 'disk' },
             { label: '连接', value: String(connTotal), detail: 'TCP ' + (d.tcpCount || '0') + ' · UDP ' + (d.udpCount || '0'), key: 'conn', max: 0, cls: 'conn' },
-            { label: 'Swap', value: percentOf(d.swapUsed, d.swapTotal) + '%', detail: fmtB(d.swapUsed) + ' / ' + fmtB(d.swapTotal), key: 'mem', max: 100, cls: 'swap' },
-            { label: '负载', value: d.load || '0 0 0', detail: '运行 ' + fmtUptimeLong(d.uptime), key: 'cpu', max: 100, cls: 'load' }
+            { label: 'Swap', value: percentOf(d.swapUsed, d.swapTotal) + '%', detail: fmtB(d.swapUsed) + ' / ' + fmtB(d.swapTotal), key: 'swap', max: 100, cls: 'swap' },
+            { label: '负载', value: d.load || '0 0 0', detail: '运行 ' + fmtUptimeLong(d.uptime), key: 'load', max: 0, cls: 'load' }
         ];
-        body.innerHTML = '<div class="server-detail-section resource-detail-section">' + resourceOverviewHtml(session, detailItems, 'detail-resource-overview') + '</div>';
+        html = '<div class="server-detail-section resource-detail-section">' + resourceOverviewHtml(session, detailItems, 'detail-resource-overview') + '</div>';
     }
+    patchServerInfoContent(body, html, String(session.id) + ':' + type);
 }
 
 function renderServerInfo(d, session) {
     var body = document.getElementById('serverInfoBody');
     if (!body) return;
-    if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('server-iface-select')) {
-        if (serverInfoDetailType) renderServerInfoDetail(serverInfoDetailType, d, session);
-        return;
-    }
-    var diskPct = percentOf(d.diskUsed, d.diskTotal);
-    var cpu = parseFloat(d.cpuUsage) || 0;
+    var cpu = Math.max(0, Math.min(100, parseFloat(d.cpuUsage) || 0));
+    var memPct = percentOf(d.memUsed, d.memTotal), diskPct = percentOf(d.diskUsed, d.diskTotal);
     var ifaces = Array.isArray(d.interfaces) ? d.interfaces : [];
-    var selectedIface = getSelectedInterface(d);
-    var ifaceName = selectedIface ? selectedIface.name : (d.mainIface || '-');
-    var displayIfaces = ifaces.slice().sort(function (a, b) {
+    var selected = getSelectedInterface(d);
+    var ifaceName = selected ? selected.name : (d.mainIface || '-');
+    var rxRate = selected ? selected.rxRate : d.rxRate, txRate = selected ? selected.txRate : d.txRate;
+    var rxTotal = selected ? selected.rxTotal : d.rxTotal, txTotal = selected ? selected.txTotal : d.txTotal;
+    var ifaceOptions = ifaces.slice().sort(function (a, b) {
         if (a.name === ifaceName) return -1;
         if (b.name === ifaceName) return 1;
-        if (a.name === 'lo') return 1;
-        if (b.name === 'lo') return -1;
-        return String(a.name || '').localeCompare(String(b.name || ''));
-    });
-    var ifaceOptions = displayIfaces.map(function (n) {
-        return '<option value="' + escAttr(n.name) + '"' + (selectedIface && n.name === selectedIface.name ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
+        return String(a.name).localeCompare(String(b.name));
+    }).map(function (n) {
+        return '<option value="' + escAttr(n.name) + '"' + (n.name === ifaceName ? ' selected' : '') + '>' + esc(n.name) + (n.main === 'true' ? ' · 主网卡' : '') + '</option>';
     }).join('');
-    var procRows = (Array.isArray(d.processes) ? d.processes : []).slice(0, 12).map(function (p) {
-        return '<tr><td>' + esc(p.pid) + '</td><td>' + esc(p.user) + '</td><td>' + esc(fmtKb(p.rss)) + '</td><td>' + esc(fmtPct(p.cpu)) + '</td><td title="' + escAttr(p.cmd || p.name) + '">' + esc(p.name || p.cmd || '-') + '</td></tr>';
-    }).join('') || '<tr><td colspan="5">暂无进程数据</td></tr>';
-    var fsRows = (Array.isArray(d.filesystems) ? d.filesystems : []).slice(0, 12).map(function (fs) {
-        return '<tr><td title="' + escAttr(fs.name) + '">' + esc(fs.mount || fs.name) + '</td><td>' + esc(fmtB(fs.used)) + '/' + esc(fmtB(fs.size)) + '</td><td>' + esc(fs.pct || '-') + '</td></tr>';
-    }).join('') || '<tr><td colspan="3">暂无文件系统数据</td></tr>';
-    var cb = d.cpuBreakdown || {};
-    var rxRate = selectedIface ? selectedIface.rxRate : d.rxRate;
-    var txRate = selectedIface ? selectedIface.txRate : d.txRate;
-    var rxTotal = selectedIface ? selectedIface.rxTotal : d.rxTotal;
-    var txTotal = selectedIface ? selectedIface.txTotal : d.txTotal;
-    var memPct = percentOf(d.memUsed, d.memTotal);
-    var connTotal = (parseInt(d.tcpCount) || 0) + (parseInt(d.udpCount) || 0);
-    var cpuRemainPct = fmtRemainPct(cpu);
-    var memRemainPct = fmtRemainPct(memPct);
-    var diskRemainPct = fmtRemainPct(diskPct);
-    var memAvail = d.memAvailable || d.memFree;
-    var netUnitToggle = '<div class="server-net-unit-toggle"><button type="button" class="' + (serverInfoNetUnit === 'bytes' ? 'active' : '') + '" onclick="event.stopPropagation();changeServerNetUnit(\'bytes\')">MB/s</button><button type="button" class="' + (serverInfoNetUnit === 'bits' ? 'active' : '') + '" onclick="event.stopPropagation();changeServerNetUnit(\'bits\')">Mbps</button></div>';
-    var summaryItems = [
-        { label: 'CPU', value: cpu.toFixed(1) + '%', key: 'cpu', max: 100, cls: 'cpu' },
-        { label: '内存', value: memPct + '%', key: 'mem', max: 100, cls: 'mem' },
-        { label: '磁盘', value: diskPct + '%', key: 'disk', max: 100, cls: 'disk' },
-        { label: '连接', value: String(connTotal), key: 'conn', max: 0, cls: 'conn' }
+    var unitToggle = '<div class="server-net-unit-toggle" role="group" aria-label="流量单位">' +
+        ['bytes', 'bits'].map(function (unit) { return '<button type="button" aria-pressed="' + (serverInfoNetUnit === unit) + '" class="' + (serverInfoNetUnit === unit ? 'active' : '') + '" onclick="changeServerNetUnit(\'' + unit + '\')">' + (unit === 'bytes' ? 'B/s' : 'bits/s') + '</button>'; }).join('') + '</div>';
+    var periods = '<div class="server-net-unit-toggle" role="group" aria-label="图表时间范围">' + [3, 10, 30].map(function (minutes) {
+        return '<button type="button" aria-pressed="' + (serverInfoChartMinutes === minutes) + '" class="' + (serverInfoChartMinutes === minutes ? 'active' : '') + '" onclick="changeServerInfoChart(' + minutes + ')">' + minutes + ' 分钟</button>';
+    }).join('') + '</div>';
+    var styles = '<div class="server-net-unit-toggle" role="group" aria-label="网络图表类型">' + ['bars', 'lines'].map(function (style) {
+        return '<button type="button" aria-pressed="' + (serverInfoChartStyle === style) + '" class="' + (serverInfoChartStyle === style ? 'active' : '') + '" onclick="changeServerInfoChart(null,\'' + style + '\')">' + (style === 'bars' ? '条形图' : '趋势图') + '</button>';
+    }).join('') + '</div>';
+    function card(key, title, content, detailType, cls) {
+        return '<section class="server-info-card monitor-card ' + (cls || '') + '" data-server-key="' + key + '"><div class="monitor-card-head"><h4>' + title + '</h4>' +
+            (detailType ? '<button type="button" class="monitor-detail-button" onclick="openServerInfoDetailModal(\'' + detailType + '\')" aria-label="查看' + title + '详情">详情 ↗</button>' : '') + '</div>' + content + '</section>';
+    }
+    var sampleTime = session._lastResourceUpdatedAt || Date.parse(d.updatedAt) || Date.now();
+    var hardware = '<div class="monitor-facts">' + serverInfoFactHtml('CPU 型号', d.cpuModel || '-', true) + serverInfoFactHtml('架构', d.arch || '-') + serverInfoFactHtml('CPU 核心', (d.cpuCores || '-') + ' 核') + '</div>';
+    var system = '<div class="monitor-facts">' + serverInfoFactHtml('操作系统', d.os || '-', true) + serverInfoFactHtml('内核版本', d.kernelVersion || '-') + serverInfoFactHtml('主机名', d.hostname || '-') + serverInfoFactHtml('运行时间', fmtUptimeLong(d.uptime)) + serverInfoFactHtml('资源采样', formatBeijingMinute(sampleTime)) + '</div>';
+    var storage = '<div class="monitor-facts storage-facts">' + serverInfoFactHtml('内存总量', fmtB(d.memTotal)) + serverInfoFactHtml('Swap', fmtB(d.swapTotal)) + serverInfoFactHtml('硬盘总量', fmtB(d.diskTotal)) + '</div>';
+    var networkFacts = '<div class="monitor-facts">' + serverInfoFactHtml('总接收 / 总发送', fmtB(rxTotal) + ' / ' + fmtB(txTotal)) + serverInfoFactHtml('当前网卡', ifaceName) + '</div>';
+    var resourceItems = [
+        { key: 'cpu', title: 'CPU', value: cpu.toFixed(1) + '%', detail: (d.cpuCores || '?') + ' 核 · 负载 ' + (d.load || '0 0 0'), pct: cpu, type: 'cpu' },
+        { key: 'mem', title: '内存', value: memPct + '%', detail: fmtB(d.memUsed) + ' / ' + fmtB(d.memTotal), pct: memPct, type: 'memory' },
+        { key: 'disk', title: '磁盘', value: diskPct + '%', detail: fmtB(d.diskUsed) + ' / ' + fmtB(d.diskTotal), pct: diskPct, type: 'disk' },
+        { key: 'conn', title: '连接', value: String((parseInt(d.tcpCount) || 0) + (parseInt(d.udpCount) || 0)), detail: 'TCP ' + (d.tcpCount || '0') + ' · UDP ' + (d.udpCount || '0'), type: 'summary' },
+        { key: 'processes', title: '进程数量', value: d.processCount || '-', detail: 'CPU 占用最高的进程见下表', type: 'processes' },
+        { key: 'load', title: '负载', value: (d.load || '0').split(' ')[0], detail: '1 / 5 / 15 分钟：' + (d.load || '0 0 0'), type: 'cpu' }
     ];
-    body.innerHTML =
-        '<div class="server-info-grid">' +
-        '<div class="server-info-card wide server-facts-card server-expandable" onclick="openServerInfoDetailModal(\'facts\')" title="点击放大查看基础信息"><div class="server-card-open">放大</div><h4>基础信息</h4><div class="server-info-facts server-info-facts-main">' +
-        '<div><span>CPU</span><b>' + esc(d.cpuModel || '-') + '</b><small>' + esc(d.cpuCores || '?') + ' 核 · 剩余 ' + cpuRemainPct + '</small></div>' +
-        '<div><span>内存</span><b>' + fmtB(memAvail) + ' / ' + fmtB(d.memTotal) + '</b><small>剩余 ' + memRemainPct + '</small></div>' +
-        '<div><span>硬盘</span><b>' + fmtB(d.diskFree) + ' / ' + fmtB(d.diskTotal) + '</b><small>剩余 ' + diskRemainPct + '</small></div>' +
-        '<div><span>操作系统</span><b>' + esc(d.os || '-') + '</b></div>' +
-        '<div><span>运行时间</span><b>' + esc(fmtUptimeLong(d.uptime)) + '</b></div>' +
-        '<div><span>架构</span><b>' + esc(d.arch || '-') + '</b></div>' +
-        '<div><span>内核</span><b>' + esc(d.kernelVersion || '-') + '</b></div>' +
-        '<div><span>负载</span><b>' + esc(d.load || '0 0 0') + '</b></div>' +
-        '</div></div>' +
-        '<div class="server-info-card wide server-summary-card server-expandable" onclick="openServerInfoDetailModal(\'summary\')" title="点击放大查看资源概览"><div class="server-card-open">放大</div><h4>资源概览</h4>' + resourceOverviewHtml(session, summaryItems, 'compact-resource-overview') + '</div>' +
-        '<div class="server-info-card wide network-card server-expandable" onclick="openServerInfoDetailModal(\'network\')" title="点击放大查看网络"><div class="server-card-open">放大</div><div class="server-info-card-head network-head"><h4>网络</h4><div class="server-iface-control">' + netUnitToggle + (ifaces.length > 1 ? '<select class="server-iface-select" onclick="event.stopPropagation()" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div></div>' +
-        '<div class="server-net-pair"><div class="net-stat rx"><span>接收速度</span><b>↓ ' + fmtNetRate(rxRate) + '</b><small>' + fmtNetRateAlt(rxRate) + '</small></div><div class="net-stat tx"><span>发送速度</span><b>↑ ' + fmtNetRate(txRate) + '</b><small>' + fmtNetRateAlt(txRate) + '</small></div><div><span>总接收</span><b>' + fmtB(rxTotal) + '</b></div><div><span>总发送</span><b>' + fmtB(txTotal) + '</b></div></div>' + networkChartHtml(session, ifaceName, SERVER_INFO_CHART_MINUTES) + '</div>' +
-        '<div class="server-info-card wide server-priority-card server-expandable" onclick="openServerInfoDetailModal(\'processes\')" title="点击放大查看进程"><div class="server-card-open">放大</div><h4>进程</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>命令</th></tr></thead><tbody>' + procRows + '</tbody></table></div></div>' +
-        '<div class="server-info-card wide server-priority-card server-expandable" onclick="openServerInfoDetailModal(\'filesystems\')" title="点击放大查看文件系统"><div class="server-card-open">放大</div><h4>文件系统</h4><div class="server-table-wrap"><table class="server-table"><thead><tr><th>挂载点</th><th>已用/大小</th><th>使用率</th></tr></thead><tbody>' + fsRows + '</tbody></table></div></div>' +
-        '</div>';
+    var resources = resourceItems.map(function (item) {
+        var meter = item.pct === undefined ? '' : '<div class="monitor-usage-bar" role="progressbar" aria-label="' + item.title + '使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + item.pct + '"><i style="width:' + item.pct + '%"></i></div>';
+        return card('resource-' + item.key, item.title, '<div class="monitor-resource-value">' + esc(item.value) + '</div><p class="monitor-resource-note">' + esc(item.detail) + '</p>' + meter + serverResourceChartHtml(session, item.key, item.pct === undefined ? 0 : 100), item.type, 'monitor-resource ' + item.key);
+    }).join('');
+    var netControl = '<div class="monitor-network-controls">' + unitToggle + styles + (ifaces.length > 1 ? '<select class="server-iface-select" aria-label="监控网卡" onchange="changeServerInfoIface(this.value)">' + ifaceOptions + '</select>' : '<span class="server-iface-chip">' + esc(ifaceName) + '</span>') + '</div>';
+    var netStats = '<div class="server-net-pair"><div class="net-stat rx"><span>接收速度</span><b>↓ ' + fmtNetRate(rxRate) + '</b><small>' + fmtNetRateAlt(rxRate) + '</small></div><div class="net-stat tx"><span>发送速度</span><b>↑ ' + fmtNetRate(txRate) + '</b><small>' + fmtNetRateAlt(txRate) + '</small></div><div><span>累计接收</span><b>' + fmtB(rxTotal) + '</b></div><div><span>累计发送</span><b>' + fmtB(txTotal) + '</b></div></div>';
+    var processes = Array.isArray(d.processes) ? d.processes : [], filesystems = Array.isArray(d.filesystems) ? d.filesystems : [];
+    var processTable = '<div class="server-table-wrap" data-server-key="process-scroll" tabindex="0" role="region" aria-label="进程列表"><table class="server-table"><thead><tr><th>PID</th><th>用户</th><th>内存</th><th>CPU</th><th>命令</th></tr></thead><tbody>' + serverInfoTableRows(processes, 'processes', false) + '</tbody></table></div><p class="monitor-table-note">按 CPU 占用排序 · 显示 ' + processes.length + ' 个</p>';
+    var fsTable = '<div class="server-table-wrap" data-server-key="filesystem-scroll" tabindex="0" role="region" aria-label="文件系统列表"><table class="server-table"><thead><tr><th>挂载点</th><th>已用 / 大小</th><th>使用率</th></tr></thead><tbody>' + serverInfoTableRows(filesystems, 'filesystems', false) + '</tbody></table></div><p class="monitor-table-note">显示 ' + filesystems.length + ' 个挂载点</p>';
+    var html = '<div class="monitor-dashboard" data-server-key="dashboard">' +
+        '<div class="monitor-info-grid">' + card('hardware', '硬件信息', hardware, 'cpu') + card('system', '系统信息', system, 'os') + card('storage', '存储信息', storage, 'disk') + card('network-info', '网络信息', networkFacts, 'network') + '</div>' +
+        '<div class="monitor-section-head"><div><b>资源监控</b><span>资源每 5 秒采样 · 网络每秒更新</span></div>' + periods + '</div>' +
+        '<div class="monitor-resource-grid">' + resources + '</div>' +
+        card('network', '网络流量', netControl + netStats + networkChartHtml(session, ifaceName, serverInfoChartMinutes), 'network', 'monitor-network') +
+        '<div class="monitor-table-grid">' + card('processes', '进程', processTable, 'processes') + card('filesystems', '文件系统', fsTable, 'filesystems') + '</div>' +
+        '<p class="monitor-footnote">图表保留当前会话最近 30 分钟的采样，打开后开始累计。时间均为北京时间。</p></div>';
+    patchServerInfoContent(body, html, String(session.id));
     if (serverInfoDetailType) renderServerInfoDetail(serverInfoDetailType, d, session);
 }
 
