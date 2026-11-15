@@ -202,6 +202,7 @@ textarea{padding:11px 12px;resize:vertical;min-height:72px;font-family:'WebSSH J
 .tb-btn:active{transform:scale(.93)}
 .tb-btn.sm{width:30px;height:30px}
 .upload-label{cursor:pointer}
+.sftp-actions .tb-btn.folder-action{width:auto;padding:0 8px;white-space:nowrap;font-size:11px}
 
 /* ==================== COMMAND INPUT BAR ==================== */
 .cmd-bar{display:flex;align-items:flex-end;gap:8px;padding:6px 16px;background:var(--card);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-top:1px solid var(--brd);flex-shrink:0;z-index:15}
@@ -229,12 +230,12 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 /* ==================== SFTP ==================== */
 .sftp-panel{position:absolute;right:0;top:0;bottom:0;width:0;overflow:hidden;transition:width var(--tr);z-index:25;display:flex;flex-direction:column;background:var(--card);backdrop-filter:blur(var(--blur));-webkit-backdrop-filter:blur(var(--blur));border-left:1px solid var(--brd)}
 .sftp-panel.open{width:340px}
-.sftp-header{display:flex;align-items:center;padding:6px 10px;gap:6px;flex-shrink:0;justify-content:space-between}
+.sftp-header{display:flex;flex-direction:column;align-items:stretch;padding:6px 10px;gap:6px;flex-shrink:0;justify-content:space-between}
 .sftp-path-bar{display:flex;align-items:center;gap:5px;flex:1;min-width:0}
 .sftp-path-bar svg{flex-shrink:0;color:var(--c1)}
 .sftp-path-input{flex:1;padding:5px 8px;background:var(--inp);border:1px solid var(--brd);border-radius:var(--rx);color:var(--t1);font-size:11px;font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace;outline:none;min-width:0}
 .sftp-path-input:focus{border-color:var(--brf)}
-.sftp-actions{display:flex;gap:4px;flex-shrink:0}
+.sftp-actions{display:flex;gap:4px;flex-shrink:0;justify-content:flex-end;flex-wrap:wrap}
 .sftp-search-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-shrink:0;border-top:1px solid rgba(255,255,255,.04);border-bottom:1px solid var(--brd);background:rgba(0,0,0,.08)}
 .sftp-search-input-wrap{height:29px;min-width:0;flex:1;display:flex;align-items:center;gap:6px;padding:0 7px;border:1px solid var(--brd);border-radius:7px;background:var(--inp);color:var(--t3);transition:border-color var(--tr),box-shadow var(--tr)}
 .sftp-search-input-wrap:focus-within{border-color:var(--brf);box-shadow:0 0 0 2px rgba(0,212,255,.1)}

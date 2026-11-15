@@ -1069,28 +1069,10 @@ func (f fileSplice) Less(i, j int) bool {
 }
 
 const (
-	uploadBodyReadIdleTimeout  = 60 * time.Second
-	uploadBodyMaxReadTime      = 30 * time.Minute
 	uploadMetadataMaxBytes     = 256 << 10
 	uploadProgressWriteTimeout = 10 * time.Second
 	downloadWriteIdleTimeout   = 2 * time.Minute
 )
-
-type idleReadCloser struct {
-	body    io.ReadCloser
-	timeout time.Duration
-}
-
-func (reader *idleReadCloser) Read(buffer []byte) (int, error) {
-	timer := time.AfterFunc(reader.timeout, func() { _ = reader.body.Close() })
-	count, err := reader.body.Read(buffer)
-	timer.Stop()
-	return count, err
-}
-
-func (reader *idleReadCloser) Close() error {
-	return reader.body.Close()
-}
 
 func validateUploadSubdirectory(value string) (string, error) {
 	if value == "" {
@@ -1129,9 +1111,6 @@ func UploadFile(c *gin.Context) *ResponseBody {
 	// metadata before the file part, so file bytes go directly to the remote
 	// SFTP temp file instead of being spooled on this server's disk.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, uploadMaxBytes()+(1<<20))
-	c.Request.Body = &idleReadCloser{body: c.Request.Body, timeout: uploadBodyReadIdleTimeout}
-	bodyTimer := time.AfterFunc(uploadBodyMaxReadTime, func() { _ = c.Request.Body.Close() })
-	defer bodyTimer.Stop()
 	multipartReader, err := c.Request.MultipartReader()
 	if err != nil {
 		responseBody.Msg = fmt.Errorf("invalid multipart upload: %w", err).Error()
@@ -1208,7 +1187,11 @@ func UploadFile(c *gin.Context) *ResponseBody {
 				return &responseBody
 			}
 			pathArr = append(pathArr, filename)
-			err = client.UploadChecked(c.Request.Context(), part, fields["id"], strings.Join(pathArr, "/"), func() error {
+			limitedFile := &io.LimitedReader{R: part, N: uploadMaxBytes() + 1}
+			err = client.UploadChecked(c.Request.Context(), limitedFile, fields["id"], strings.Join(pathArr, "/"), func() error {
+				if limitedFile.N == 0 {
+					return fmt.Errorf("upload file too large")
+				}
 				extraPart, extraErr := multipartReader.NextPart()
 				if errors.Is(extraErr, io.EOF) {
 					return nil
@@ -2318,8 +2301,8 @@ func FileList(c *gin.Context) *ResponseBody {
 
 func uploadMaxBytes() int64 {
 	const (
-		defaultLimit = int64(1 << 30)
-		hardLimit    = int64(8 << 30)
+		defaultLimit = int64(10 << 30)
+		hardLimit    = int64(10 << 30)
 	)
 	raw := strings.TrimSpace(os.Getenv("WEBSSH_UPLOAD_MAX_BYTES"))
 	if raw == "" {

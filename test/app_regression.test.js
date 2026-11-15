@@ -521,7 +521,7 @@ test('terminal close marks the session offline and cancels dependent work', () =
     assert.match(connectSource, /session\._connected = false;/);
     assert.match(connectSource, /session\.ws = null;/);
     assert.match(connectSource, /stopServerInfoNetStream\(session\);/);
-    assert.match(connectSource, /cancelSessionSftpRequests\(session, false\);/);
+    assert.match(connectSource, /cancelSessionSftpRequests\(session, false, true\);/);
 });
 
 test('terminal admission errors stay visible without success or fallback reconnects', () => {
@@ -1307,7 +1307,7 @@ test('SFTP transfer controls support pause, resume and cancellation', () => {
 test('terminal disconnect does not cancel an independent SFTP download', () => {
     const closeHandler = extractFunction('connectSession');
     const cancelSource = extractFunction('cancelSessionSftpRequests');
-    assert.match(closeHandler, /cancelSessionSftpRequests\(session, false\)/);
+    assert.match(closeHandler, /cancelSessionSftpRequests\(session, false, true\)/);
     assert.match(cancelSource, /if \(cancelDownloads\) \{/);
 });
 
@@ -2190,7 +2190,7 @@ test('index.html carries no mojibake placeholders and every inline handler resol
         );
     }
 
-    const scriptSource = [appSource, rdpSource, shareSource].join('\n');
+    const scriptSource = referenced.map(file => fs.readFileSync(path.join(__dirname, '..', 'public', 'static', 'js', file), 'utf8')).join('\n');
     const builtin = new Set(['if', 'for', 'while', 'return', 'typeof', 'alert', 'confirm',
         'Number', 'String', 'parseInt', 'parseFloat', 'JSON', 'Math', 'Boolean', 'Array', 'Object']);
     const handlers = new Set();

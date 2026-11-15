@@ -541,6 +541,8 @@
                         <button class="tb-btn sm" onclick="sftpUp()" title="上级"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M18 15l-6-6-6 6"/></svg></button>
                     </div>
                     <div class="sftp-actions">
+                        <button class="tb-btn sm folder-action" onclick="openNewRemoteFolder()" title="新建文件夹" aria-label="新建文件夹">新建文件夹</button>
+                        <button class="tb-btn sm folder-action" onclick="selectSftpUploadFolder()" title="上传文件夹，保留目录结构">上传文件夹</button><input type="file" id="sftpUploadFolderInput" onchange="sftpUpload('sftpUploadFolderInput')" hidden webkitdirectory multiple>
                         <button class="tb-btn sm sftp-new-file" onclick="openNewRemoteFile()" title="在当前目录新建文件" aria-label="新建文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg></button>
                         <button class="tb-btn sm" onclick="showSftpRemoteModal()" title="远程下载"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M16 16l-4 4-4-4M12 20V10"/><path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3"/></svg></button>
                         <label class="tb-btn sm upload-label" title="上传文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg><input type="file" id="sftpUploadInput" onchange="sftpUpload()" hidden multiple></label>
@@ -605,7 +607,7 @@
                 <div class="sftp-download-confirm-icon sftp-delete-confirm-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
                 <div class="sftp-download-confirm-copy">
                     <b id="sftpDeleteConfirmName">-</b>
-                    <p>确定要永久删除这个远端文件吗？此操作无法恢复。</p>
+                    <p id="sftpDeleteConfirmDescription">确定要永久删除这个远端文件吗？此操作无法恢复。</p>
                 </div>
                 <dl class="sftp-download-confirm-details">
                     <div><dt>远端路径</dt><dd id="sftpDeleteConfirmPath">-</dd></div>
@@ -1640,6 +1642,7 @@
     <script src="/static/vendor/xterm/xterm-addon-fit.min.js?v=0.8.0"></script>
     <script src="/static/vendor/xterm/xterm-addon-web-links.min.js?v=0.9.0"></script>
     <script>window.__WEBSSH_APP_VERSION__ = "__APP_VERSION__"; window.__WEBSSH_TERMINAL_WS_URL__ = __TERMINAL_WEBSOCKET_URL__;</script>
+    <script src="/static/js/upload.js?v=__APP_VERSION__"></script>
     <script src="/static/js/app.js?v=__APP_VERSION__"></script>
     <script src="/static/js/rdp.js?v=__APP_VERSION__"></script>
     <script src="/static/js/share.js?v=__APP_VERSION__"></script>

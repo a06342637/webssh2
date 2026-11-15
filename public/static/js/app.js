@@ -1275,7 +1275,7 @@ function connectSession(session) {
             session.ws = null;
             if (wasConnected && session.hostKeyDecision) clearHostKeyDecision(session);
             stopServerInfoNetStream(session);
-            cancelSessionSftpRequests(session, false);
+            cancelSessionSftpRequests(session, false, true);
             handleRemoteEditorsSessionDisconnected(session);
             if (wasConnected && sessions.indexOf(session) !== -1) {
                 showToast(session.hostname + ' 连接已关闭', 'info');
@@ -5757,7 +5757,7 @@ function cancelSessionSftpBrowsing(session) {
     abortSessionController(session, '_sftpDirController');
 }
 
-function cancelSessionSftpRequests(session, cancelDownloads) {
+function cancelSessionSftpRequests(session, cancelDownloads, preserveUploads) {
     if (!session) return;
     cancelSessionSftpBrowsing(session);
     if (session._sftpWarmTimer) {
@@ -5789,6 +5789,7 @@ function cancelSessionSftpRequests(session, cancelDownloads) {
     });
     session._remoteEditorControllers = [];
     (session._sftpUploads || []).forEach(function (upload) {
+        if (preserveUploads && upload.resumable) return;
         if (upload.status === 'queued' || upload.status === 'running' || upload.status === 'processing') {
             upload.abortReason = 'SSH 连接已中断，上传已停止';
             upload.status = 'error';
@@ -5797,9 +5798,10 @@ function cancelSessionSftpRequests(session, cancelDownloads) {
         }
     });
     (session._sftpUploadControllers || []).forEach(function (controller) {
+        if (preserveUploads && controller.resumable) return;
         try { controller.abort(); } catch (e) { }
     });
-    session._sftpUploadControllers = [];
+    session._sftpUploadControllers = (session._sftpUploadControllers || []).filter(function (controller) { return preserveUploads && controller.resumable; });
     if (cancelDownloads) {
         (session._sftpDownloads || []).slice().forEach(cancelSftpDownload);
     }
@@ -5874,7 +5876,7 @@ function renderSftpRow(f, actualPath) {
     var rename = '<button class="sftp-rename" onclick="event.stopPropagation();requestSftpRename(' + fpArg + ',' + (isDir ? 'true' : 'false') + ')" title="重命名" aria-label="' + escAttr('重命名 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" width="12" height="12"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/></svg></button>';
     var dlTitle = downloadable ? (isDir ? '压缩并下载文件夹' : '下载') : (f.DownloadReason || '此项目不支持下载');
     var dl = '<button class="sftp-dl' + (isDir ? ' directory' : '') + (downloadable ? '' : ' disabled') + '" ' + (downloadable ? 'onclick="event.stopPropagation();sftpDownload(' + fpArg + ',' + (isDir ? 0 : sizeBytes) + ',' + (isDir ? 'true' : 'false') + ')"' : 'data-message="' + escAttr(dlTitle) + '" onclick="event.stopPropagation();showSftpFileActionMessage(event)"') + ' title="' + escAttr(dlTitle) + '" aria-label="' + escAttr(dlTitle + ' ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>';
-    var del = isDir ? '' : '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ')" title="删除" aria-label="' + escAttr('删除 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+    var del = '<button class="sftp-delete" onclick="event.stopPropagation();requestSftpDelete(' + fpArg + ',' + (isDir ? 'true' : 'false') + ')" title="删除" aria-label="' + escAttr('删除 ' + name) + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
     var linkMark = f.IsSymlink ? '<span class="sftp-link-mark" title="符号链接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>' : '';
     return '<div class="sftp-row" ' + click + '>' + icon + '<span class="sftp-name">' + esc(name) + '</span>' + linkMark + '<span class="sftp-meta">' + esc(f.Size) + '</span>' + preview + edit + rename + dl + del + '</div>';
 }
@@ -6102,12 +6104,12 @@ function setRemoteEditorDeletePending(editor, pending, statusText, statusType) {
     if (statusText) remoteEditorSetStatus(editor, statusText, statusType || 'info');
 }
 
-function requestSftpDelete(path) {
+function requestSftpDelete(path, isDirectory) {
     var session = getActiveSession();
     if (!session || !session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     path = normalizeRemoteFilePath(path);
     if (!path || path === '/') { showToast('文件路径无效', 'error'); return; }
-    var editors = typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, path) : (remoteEditorFor(session, path) ? [remoteEditorFor(session, path)] : []);
+    var editors = isDirectory ? remoteEditorsAffectedByRename(session, path, true) : (typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, path) : (remoteEditorFor(session, path) ? [remoteEditorFor(session, path)] : []));
     var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending || item.renamePending; });
     if (editor) {
         restoreRemoteEditor(editor);
@@ -6122,6 +6124,7 @@ function requestSftpDelete(path) {
     }
     var slash = path.lastIndexOf('/');
     sftpDeleteConfirmRequest = {
+        isDirectory: !!isDirectory,
         sessionId: session.id,
         path: path,
         parentPath: normalizeSftpDir(slash <= 0 ? '/' : path.substring(0, slash)),
@@ -6132,6 +6135,10 @@ function requestSftpDelete(path) {
     };
     document.getElementById('sftpDeleteConfirmName').textContent = sftpDeleteConfirmRequest.name;
     document.getElementById('sftpDeleteConfirmPath').textContent = path;
+    var title = document.getElementById('sftpDeleteConfirmTitle');
+    if (title) title.textContent = isDirectory ? '删除文件夹及全部内容' : '删除文件';
+    var description = document.getElementById('sftpDeleteConfirmDescription');
+    if (description) description.textContent = isDirectory ? '确定永久删除此文件夹及其全部子文件夹和文件吗？此操作无法恢复。' : '确定要永久删除这个远端文件吗？此操作无法恢复。';
     var status = document.getElementById('sftpDeleteConfirmStatus');
     if (status) { status.textContent = '删除后无法恢复，请确认远端路径无误。'; status.className = 'sftp-delete-confirm-status'; }
     setSftpDeleteConfirmBusy(false);
@@ -6157,7 +6164,7 @@ function confirmSftpDelete() {
         hideSftpDeleteConfirm(true);
         return Promise.resolve(false);
     }
-    var editors = typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, request.path) : (remoteEditorFor(session, request.path) ? [remoteEditorFor(session, request.path)] : []);
+    var editors = request.isDirectory ? remoteEditorsAffectedByRename(session, request.path, true) : (typeof remoteEditorsForPath === 'function' ? remoteEditorsForPath(session, request.path) : (remoteEditorFor(session, request.path) ? [remoteEditorFor(session, request.path)] : []));
     var editor = editors.find(function (item) { return remoteEditorIsDirty(item) || item.saving || item.deletePending || item.renamePending || !item.loaded || item.controller; });
     if (editor) {
         hideSftpDeleteConfirm(true);
@@ -6175,7 +6182,9 @@ function confirmSftpDelete() {
     var controller = new AbortController();
     request.controller = controller;
     session._sftpDeleteController = controller;
-    return remoteEditorRequest('/file/delete', { sshInfo: session.sshInfo, path: request.path }, controller.signal)
+    var deletePayload = { sshInfo: session.sshInfo, path: request.path };
+    if (request.isDirectory) deletePayload.confirmed = true;
+    return remoteEditorRequest(request.isDirectory ? '/file/rmdir' : '/file/delete', deletePayload, controller.signal)
         .then(function () {
             if (sftpDeleteConfirmRequest !== request) return false;
             request.deleting = false;
@@ -6186,7 +6195,7 @@ function confirmSftpDelete() {
             hideSftpDeleteConfirm(true);
             showToast('已删除: ' + request.name, 'success');
             if (sessions.indexOf(session) >= 0 && session._connected && normalizeSftpDir(session.sftpPath || '/') === request.parentPath) {
-                invalidateSftpDirectoryCache(session, request.parentPath, false);
+                invalidateSftpDirectoryCache(session, request.parentPath, !!request.isDirectory);
                 sftpLoad(request.parentPath, session, { force: true });
             }
             return true;
@@ -6518,7 +6527,7 @@ function sftpUploadStatusLabel(upload) {
     if (upload.status === 'queued') return '等待上传';
     if (upload.status === 'processing') return '写入远端';
     if (upload.status === 'completed') return '上传完成';
-    if (upload.status === 'cancelled') return '已取消';
+    if (upload.status === 'cancelled') return upload.resumable ? '已暂停' : '已取消';
     if (upload.status === 'error') return '上传失败';
     return '正在上传';
 }
@@ -6526,7 +6535,7 @@ function sftpUploadStatusLabel(upload) {
 function sftpUploadSpeed(upload, now) {
     if (!upload || !upload.startedAt || upload.status !== 'running') return 0;
     var elapsed = Math.max(0.001, ((now || Date.now()) - upload.startedAt) / 1000);
-    return upload.sent / elapsed;
+    return Math.max(0, upload.sent - (upload.startedOffset || 0)) / elapsed;
 }
 
 function renderSftpUploadTransfer(upload) {
@@ -6543,10 +6552,11 @@ function renderSftpUploadTransfer(upload) {
     } else if (upload.status === 'completed') {
         detail = (total ? fmtB(total) + ' · ' : '') + '远端文件写入完成';
     } else if (upload.status === 'cancelled') {
-        detail = '上传已取消';
+        detail = upload.resumable ? '已保留进度，可继续上传' : '上传已取消';
     } else if (upload.status === 'error') {
         detail = upload.error || '上传失败';
     }
+    if (upload.phase) detail = upload.phase;
     var sendDone = upload.status === 'processing' || upload.status === 'completed' || (upload.status === 'error' && percent >= 100);
     var sendClass = upload.status === 'running' ? 'active' : (sendDone ? 'done' : (upload.status === 'error' ? 'error' : (upload.status === 'cancelled' ? 'cancelled' : '')));
     var writeClass = upload.status === 'processing' ? 'active' : (upload.status === 'completed' ? 'done' : (upload.status === 'error' && sendDone ? 'error' : (upload.status === 'cancelled' && sendDone ? 'cancelled' : '')));
@@ -6554,6 +6564,10 @@ function renderSftpUploadTransfer(upload) {
     var cancel = upload.status === 'queued' || upload.status === 'running' || upload.status === 'processing'
         ? '<button class="danger" type="button" onclick="event.stopPropagation();cancelSftpUploadById(\'' + escAttr(upload.id) + '\')">取消</button>'
         : '<button type="button" onclick="event.stopPropagation();dismissSftpUpload(\'' + escAttr(upload.id) + '\')">关闭</button>';
+    if (upload.resumable) {
+        retry = upload.status === 'error' || upload.status === 'cancelled' ? '<button type="button" onclick="event.stopPropagation();retrySftpUpload(\'' + escAttr(upload.id) + '\')">继续上传</button><button type="button" onclick="event.stopPropagation();discardSftpUpload(\'' + escAttr(upload.id) + '\')">放弃上传</button>' : '';
+        cancel = cancel.replace('>取消</button>', '>暂停</button>');
+    }
     var progressLabel = upload.status === 'queued' ? '…' : percent + '%';
     return '<div class="sftp-transfer-item upload ' + escAttr(upload.status) + '">' +
         '<div class="sftp-transfer-stages"><span class="' + sendClass + '"><i>1</i>发送</span><b></b><span class="' + writeClass + '"><i>2</i>远端写入</span></div>' +
@@ -8763,6 +8777,7 @@ function scheduleSftpUploadRefresh(session, path) {
 }
 
 function runSftpUpload(upload) {
+    if (upload && upload.resumable) return runSftpResumableUpload(upload);
     if (!upload || upload.xhr || upload.status !== 'queued') return;
     var session = getSessionById(upload.sessionId);
     if (!session || !session._connected) {
@@ -8878,10 +8893,10 @@ function cancelSftpUploadById(id) {
 
 function retrySftpUpload(id) {
     var upload = findSftpUpload(id);
-    if (!upload || upload.status !== 'error' || upload.xhr) return;
+    if (!upload || (upload.status !== 'error' && upload.status !== 'cancelled') || upload.xhr) return;
     upload.status = 'queued';
     upload.error = '';
-    upload.sent = 0;
+    upload.sent = upload.confirmed || 0;
     upload.startedAt = 0;
     upload.finishedAt = 0;
     upload.abortReason = '';
@@ -8899,14 +8914,18 @@ function dismissSftpUpload(id) {
     renderSftpTransfers(session);
 }
 
-function sftpUpload() {
-    var input = document.getElementById('sftpUploadInput');
+function sftpUpload(inputId) {
+    var input = document.getElementById(inputId || 'sftpUploadInput');
     var session = getActiveSession();
     if (!input.files.length || !session) return;
     if (!session._connected) { showToast('SSH 连接尚未就绪', 'error'); return; }
     var uploadPath = normalizeSftpDir(session.sftpPath);
     var uploads = Array.from(input.files).map(function (file) {
+        var relativePath = file.webkitRelativePath || file.name;
+        var slash = relativePath.lastIndexOf('/');
         return {
+            resumable: true,
+            dir: slash < 0 ? '' : relativePath.substring(0, slash),
             id: newSftpUploadId('upload'),
             sessionId: session.id,
             path: uploadPath,

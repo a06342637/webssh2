@@ -108,9 +108,24 @@ func TestTwelveLiveTerminalsConnectAndReleaseSlots(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		connection := dialTerminal(t, startFakeSSHServer(t), "")
 		_ = connection.SetReadDeadline(time.Now().Add(3 * time.Second))
-		_, message, err := connection.ReadMessage()
-		if err != nil || !strings.Contains(string(message), "connection-ready") {
-			t.Fatalf("terminal %d not ready: %q, %v", i+1, message, err)
+		// Shell output may arrive before the control message. The terminal
+		// protocol does not guarantee that connection-ready is the first frame.
+		for {
+			_, message, err := connection.ReadMessage()
+			if err != nil {
+				t.Fatalf("terminal %d not ready: %v", i+1, err)
+			}
+			if !strings.HasPrefix(string(message), terminalControlPrefix) {
+				continue
+			}
+			var control struct{ Type string }
+			if err := json.Unmarshal(message[len(terminalControlPrefix):], &control); err != nil {
+				t.Fatal(err)
+			}
+			if control.Type == "connection-ready" {
+				break
+			}
+			t.Fatalf("terminal %d unexpected control: %q", i+1, message)
 		}
 		connections = append(connections, connection)
 	}

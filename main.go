@@ -441,6 +441,34 @@ func main() {
 				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
 			}
 		})
+		file.POST("/upload/resume", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			c.Header("Cache-Control", "no-store")
+			responseBody := controller.ResumeUpload(c)
+			if !c.IsAborted() {
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+			}
+		})
+		file.POST("/mkdir", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.CreateFolder(c)
+			if !c.IsAborted() {
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+			}
+		})
+		file.POST("/rmdir", func(c *gin.Context) {
+			if !gatewayAuth(c) {
+				return
+			}
+			responseBody := controller.DeleteFolder(c)
+			if !c.IsAborted() {
+				c.JSON(controller.ResponseHTTPStatus(responseBody), responseBody)
+			}
+		})
 		file.POST("/remote", func(c *gin.Context) {
 			if !gatewayAuth(c) {
 				return
@@ -543,7 +571,7 @@ func securityHeaders() gin.HandlerFunc {
 
 func requestBodyLimit(limit int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.Body != nil && c.Request.URL.Path != "/file/upload" {
+		if c.Request.Body != nil && c.Request.URL.Path != "/file/upload" && c.Request.URL.Path != "/file/upload/resume" {
 			requestLimit := limit
 			if c.Request.URL.Path == "/api/scripts/sync" {
 				requestLimit = 16 << 20
