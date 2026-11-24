@@ -421,11 +421,13 @@ WEBSSH_MAX_SFTP_SESSIONS=32
 WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT=4
 ```
 
-网页上传支持单文件最大 **10 GiB（10,737,418,240 字节）**，以 4 MiB 分块传输，应用不设上传总时长或请求体读取超时。上传前检查本地文件，每块写入后读回校验 SHA-256，完成时核对按顺序记录的全部分块摘要，再替换目标文件。终端连接超时不会取消已开始的分块上传。点击“暂停”保留进度；断网自动尝试续传三次，仍失败可点击“继续上传”。刷新页面或服务重启后，在同一浏览器、同一账号重新连接目标服务器，进入相同目标目录并重新选择同一个文件，即可恢复；无需从头发送。浏览器仅保存续传标识，不保存文件内容或 SSH 密码。清除浏览器存储后无法自动找回续传标识。
+网页上传支持单文件最大 **10 GiB（10,737,418,240 字节）**，以 4 MiB 分块传输，应用不设上传总时长或请求体读取超时。上传前在后台线程计算文件及各分块的 SHA-256，发送时复用摘要；服务端核对每块摘要，并发写入成功后才更新断点，完成时核对完整的有序摘要再替换目标文件。默认不额外读回远端数据，以减少上传流量和等待；需要写入后逐块读回验证时，可设置 `WEBSSH_UPLOAD_VERIFY_REMOTE=true`。终端连接超时不会取消分块上传。点击“暂停”保留进度；断网自动尝试续传三次，仍失败可点击“继续上传”。刷新页面或服务重启后，在同一浏览器、同一账号重新连接目标服务器，进入相同目标目录并重新选择同一个文件，即可恢复；无需从头发送。旧版本断点可继续使用。浏览器仅保存续传标识，不保存文件内容或 SSH 密码。清除浏览器存储后无法自动找回续传标识。
 
 未完成的数据保留在目标目录下的 `.webssh-resume-*` 私有目录中，不因上传耗时或暂停而过期；点击“放弃上传”会清理它们。关闭进度卡片只隐藏任务。未完成数据会占用目标服务器磁盘，可在确认不再续传后删除对应临时目录。旧版整文件上传接口和远程下载仍会在失败时清理临时文件。浏览器下载采用流式传输。
 
 文件管理支持新建文件夹、进入目录/搜索、重命名、上传文件夹和递归删除文件夹。上传文件夹保留相对目录结构，每个文件独立续传。支持目录选择 API 的 HTTPS/本机浏览器也会创建空文件夹；其他浏览器的目录选择器仅能提供文件及其所属目录，纯空目录可用“新建文件夹”补建。文件夹删除需确认，会删除全部子项目；符号链接只删除链接本身，不遍历其目标。删除中断可能已有部分项目被删除，刷新后可继续处理。
+
+目录每页显示 100 项，搜索仍覆盖整个目录；传输列表每页显示 20 项，并合并刷新、局部更新进度。后台 SSH 任务不会清空当前标签的面板。重命名会先暂停相关上传、更新路径及续传标识，再继续原来正在运行的任务；原来暂停的任务保持暂停。支持保存文件接口的浏览器直接写入磁盘，其他浏览器采用原生表单下载，不再受 256 MiB 页面缓存限制；原生下载的进度、暂停和取消请在浏览器下载列表中操作。
 
 Nginx 代理网页分块上传时，请允许至少 5 MiB 的请求体，例如 `client_max_body_size 6m;`，并设置 `proxy_request_buffering off;`。完整性校验可能耗时，应相应放宽代理的 `proxy_read_timeout` / `proxy_send_timeout`；CDN/平台自身的硬超时不受应用控制。若仍使用旧 `/file/upload` 整文件接口，代理请求体上限需超过 10 GiB 并预留 multipart 开销。已有部署若在 `.env` 中显式配置较小的 `WEBSSH_UPLOAD_MAX_BYTES`，升级时将它改为上面的值，然后运行 `docker compose up -d --build --force-recreate`。
 
@@ -719,6 +721,7 @@ AUTH_INFO="admin:请替换为强密码"
 - 终端直连 WSS 在建立 SSH 会话前失败时会自动回退到页面同源 `/term`；回退时只提示线路切换，不再重复出现“连接失败/无法连接”错误。
 - 如果启用了顶部服务器状态检测，首次检测会延后到终端首屏建立后执行，避免登录初期额外 SSH 检测和终端抢占资源；后续仍按设置的间隔刷新。
 - 顶部服务器状态检测只在当前可见终端标签运行，切换到后台标签时会暂停，避免同时连接多台机器时额外创建后台 SSH 检测连接。
+- 资源监控复用短期 SSH 连接，静态系统信息缓存 5 分钟，空闲 90 秒后释放；默认最多保留 32 条、同一来源 4 条。CPU 和网速使用相邻采样计算，不再在每次刷新中固定 `sleep 1`。首次 CPU 采样建立基准，下一次刷新显示区间用量；网络实时推送仍按 1 秒更新，并拒绝旧连接的延迟消息。
 - 后端普通按键输入走字节快速路径，只对 resize 控制帧进行文本解析，减少多终端同时输入时的无效字符串分配。
 - 进入终端后会暂停粒子和渐变背景动画，减少浏览器主线程/GPU 占用，让输入、回显和命令输出更跟手；返回登录页后自动恢复。
 
@@ -760,6 +763,7 @@ go run . -a admin:password
 回归检查：`go test ./...`、`go vet ./...` 和 `node --test test/*.test.js`。设置 `WEBSSH_TEST_LARGE_UPLOAD=1` 后运行 `go test ./controller -run TestResumeUploadTenGiBOffsetsWithSparseFile -count=1` 可额外验证 10 GiB 文件末尾分块、64 位偏移和提交；此测试可能占用 10 GiB 临时磁盘空间。
 安装 Playwright 后，可运行 `node test/upload_browser.cjs` 验证真实浏览器分块请求、丢失响应后的续传、文件夹操作和手机布局。
 安装 Playwright 和 `ws` 后，可运行 `node test/terminal_disconnect_browser.cjs` 验证断开红字、复制、回车重连及超过 4 MiB 的多行粘贴；环境变量 `WEBSSH_PLAYWRIGHT` / `WEBSSH_WS` 可指定已安装的包目录。
+运行 `node test/optimization_browser.cjs` 可验证目录分页、传输局部更新、后台隔离和大文件原生下载；`node test/upload_browser.cjs` 同时检查后台文件校验线程。
 安装 Playwright 和 Chromium 后，可运行 `node test/terminal_browser.cjs` 和 `node test/boundary_browser.cjs` 验证终端缩放选区、标签换行、面板、剪贴板及分享代理；使用 Edge 时设置 `WEBSSH_BROWSER=msedge`。
 
 ## 配置参数
@@ -790,9 +794,12 @@ go run . -a admin:password
 | `WEBSSH_SFTP_SESSION_IDLE_SECONDS` | 120 | SFTP 目录浏览复用连接的空闲保留秒数（15 至 900） |
 | `WEBSSH_MAX_SFTP_SESSIONS` | 32 | 全站短期 SFTP 连接池上限 |
 | `WEBSSH_MAX_SFTP_SESSIONS_PER_CLIENT` | 4 | 同一来源客户端的短期 SFTP 连接池上限 |
+| `WEBSSH_MAX_SYSINFO_SESSIONS` | 32 | 资源监控复用 SSH 连接的全局上限 |
+| `WEBSSH_MAX_SYSINFO_SESSIONS_PER_CLIENT` | 4 | 同一来源的资源监控连接上限 |
 | `WEBSSH_HOST_KEY_POLICY` | tofu | SSH 主机密钥策略 |
 | `WEBSSH_ALLOW_LEGACY_CIPHERS` | false | 是否加入老旧 CBC cipher |
 | `WEBSSH_UPLOAD_MAX_BYTES` | 10737418240 | 单个上传文件上限（1 MiB 至 10 GiB），支持分块断点续传 |
+| `WEBSSH_UPLOAD_VERIFY_REMOTE` | false | 写入成功后额外读回分块校验，开启会增加网络与磁盘读取开销 |
 | `WEBSSH_REMOTE_DOWNLOAD_MAX_BYTES` | 1073741824 | 远程下载文件上限 |
 | `WEBSSH_EDITOR_MAX_BYTES` | 2097152 | SFTP 在线编辑器可打开和保存的 UTF-8 文本大小上限（1024 字节至 64 MiB） |
 | `WEBSSH_PREVIEW_MAX_BYTES` | 134217728 | SFTP 图片、图标和视频在线预览大小上限（1 MiB 至 1 GiB） |

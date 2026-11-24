@@ -120,6 +120,7 @@ func ShutdownBackgroundTasks(ctx context.Context) {
 	}
 	expireAllPreviewGrants()
 	closeRuntimeConnections()
+	closeAllSysInfoSessions(ctx)
 	closeAllSFTPSessions(ctx)
 
 	for _, job := range jobs {

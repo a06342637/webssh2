@@ -23,6 +23,7 @@ type resumeUploadRequest struct {
 	SSHInfo     string `json:"sshInfo"`
 	ID          string `json:"id"`
 	Path        string `json:"path"`
+	OriginPath  string `json:"originPath,omitempty"`
 	Dir         string `json:"dir"`
 	Name        string `json:"name"`
 	Size        int64  `json:"size"`
@@ -157,7 +158,15 @@ func ResumeUpload(c *gin.Context) *ResponseBody {
 		owner = "account:" + username
 	}
 	destination := path.Join(request.Path, directory, name)
-	identity, _ := json.Marshal([]any{owner, request.ID, destination, request.Size, request.Fingerprint})
+	origin := request.OriginPath
+	if origin == "" {
+		origin = destination
+	}
+	if !path.IsAbs(origin) || strings.ContainsRune(origin, 0) {
+		response.Msg = "invalid upload origin path"
+		return response
+	}
+	identity, _ := json.Marshal([]any{owner, request.ID, path.Clean(origin), request.Size, request.Fingerprint})
 	digest := sha256.Sum256(identity)
 	tempDir := path.Join(path.Dir(destination), ".webssh-resume-"+hex.EncodeToString(digest[:]))
 	unlock, err := acquireRemoteEditorTarget(c.Request.Context(), remoteEditorTargetKey(decoded, tempDir))
@@ -308,19 +317,21 @@ func resumeRemoteUpload(client *sftp.Client, request resumeUploadRequest, destin
 		if closeErr != nil {
 			return offset, false, closeErr
 		}
-		written, openErr := client.Open(dataPath)
-		if openErr != nil {
-			return offset, false, openErr
-		}
-		check := make([]byte, len(chunk))
-		_, err = written.ReadAt(check, offset)
-		_ = written.Close()
-		if err != nil {
-			return offset, false, err
-		}
 		digest := sha256.Sum256(chunk)
-		if sha256.Sum256(check) != digest {
-			return offset, false, fmt.Errorf("upload checksum conflict after remote write")
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("WEBSSH_UPLOAD_VERIFY_REMOTE")), "true") || os.Getenv("WEBSSH_UPLOAD_VERIFY_REMOTE") == "1" {
+			written, openErr := client.Open(dataPath)
+			if openErr != nil {
+				return offset, false, openErr
+			}
+			check := make([]byte, len(chunk))
+			_, err = written.ReadAt(check, offset)
+			_ = written.Close()
+			if err != nil {
+				return offset, false, err
+			}
+			if sha256.Sum256(check) != digest {
+				return offset, false, fmt.Errorf("upload checksum conflict after remote write")
+			}
 		}
 		journal, openErr := client.OpenFile(hashesPath, os.O_CREATE|os.O_WRONLY)
 		if openErr != nil {

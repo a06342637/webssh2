@@ -36,35 +36,91 @@ function sftpUploadHex(bytes) {
     return Array.from(bytes, function (value) { return value.toString(16).padStart(2, '0'); }).join('');
 }
 
+function sftpUploadDestination(upload) {
+    return (upload.path || '/').replace(/\/$/, '') + '/' + (upload.dir ? upload.dir.replace(/\/$/, '') + '/' : '') + (upload.name || '');
+}
+
+async function sftpResumeStorageKey(upload, session) {
+    var account = typeof currentAccount !== 'undefined' && currentAccount ? currentAccount.username : '';
+    var key = JSON.stringify([account, session.hostname, session.port, session.username, sftpUploadDestination(upload), upload.total, upload.fingerprint]);
+    return 'webssh.upload.v2.' + sftpUploadHex(await sftpUploadDigest(new TextEncoder().encode(key)));
+}
+
+function hashSftpFileInWorker(upload, session, operation) {
+    if (typeof Worker !== 'function' || typeof document === 'undefined') return null;
+    try {
+        var script = document.querySelector('script[src*="/static/js/upload.js"]');
+        var version = script ? new URL(script.src).search : '';
+        var worker = new Worker('/static/js/upload-hash-worker.js' + version);
+        return new Promise(function (resolve, reject) {
+            var finished = false;
+            function finish(error, data) {
+                if (finished) return; finished = true;
+                worker.terminate(); operation.cancelHash = null;
+                if (error) reject(error); else resolve(data);
+            }
+            operation.cancelHash = function () { finish(new Error('上传已暂停')); };
+            worker.onmessage = function (event) {
+                var data = event.data;
+                if (operation.cancelled) { finish(new Error('上传已暂停')); return; }
+                if (data.error) { finish(new Error(data.error)); return; }
+                if (data.fingerprint) { finish(null, data); return; }
+                upload.phase = '检查本地文件 ' + Math.round(data.processed / upload.total * 100) + '%';
+                renderSftpTransfers(session);
+            };
+            worker.onerror = function (event) { if (event.preventDefault) event.preventDefault(); finish(null, null); };
+            try { worker.postMessage({ file: upload.file }); } catch (error) { finish(null, null); }
+        });
+    } catch (error) { return null; }
+}
+
 async function prepareSftpResume(upload, session, operation) {
     var chunkSize = 4 * 1024 * 1024;
+    if (upload._resumeCacheUpdate) await upload._resumeCacheUpdate;
+    if (!upload.originPath) upload.originPath = sftpUploadDestination(upload);
     if (!upload.fingerprint) {
         upload.phase = '正在检查本地文件，准备断点续传…';
-        var digests = new Uint8Array(Math.ceil(upload.total / chunkSize) * 32);
-        for (var offset = 0; offset < upload.total; offset += chunkSize) {
-            if (operation.cancelled) throw new Error('上传已暂停');
-            var digest = await sftpUploadDigest(await upload.file.slice(offset, offset + chunkSize).arrayBuffer());
-            digests.set(digest, offset / chunkSize * 32);
-            upload.phase = '检查本地文件 ' + Math.round(Math.min(upload.total, offset + chunkSize) / upload.total * 100) + '%';
-            renderSftpTransfers(session);
-            // Yield for painting/cancellation even on the HTTP digest fallback.
-            await new Promise(function (resolve) { setTimeout(resolve, 0); });
+        var workerJob = hashSftpFileInWorker(upload, session, operation);
+        var result = workerJob ? await workerJob : null;
+        if (result) {
+            upload.fingerprint = result.fingerprint; upload.chunkHashes = result.hashes;
+        } else {
+            upload.chunkHashes = [];
+            var digests = new Uint8Array(Math.ceil(upload.total / chunkSize) * 32);
+            for (var offset = 0; offset < upload.total; offset += chunkSize) {
+                if (operation.cancelled) throw new Error('上传已暂停');
+                var digest = await sftpUploadDigest(await upload.file.slice(offset, offset + chunkSize).arrayBuffer());
+                digests.set(digest, offset / chunkSize * 32);
+                upload.chunkHashes.push(sftpUploadHex(digest));
+                upload.phase = '检查本地文件 ' + Math.round(Math.min(upload.total, offset + chunkSize) / upload.total * 100) + '%';
+                renderSftpTransfers(session);
+                // Yield for painting/cancellation even on the HTTP digest fallback.
+                await new Promise(function (resolve) { setTimeout(resolve, 0); });
+            }
+            upload.fingerprint = sftpUploadHex(await sftpUploadDigest(digests));
         }
-        upload.fingerprint = sftpUploadHex(await sftpUploadDigest(digests));
     }
     if (operation.cancelled) throw new Error('上传已暂停');
     if (!upload.resumeId) {
         var account = typeof currentAccount !== 'undefined' && currentAccount ? currentAccount.username : '';
         var key = JSON.stringify([account, session.hostname, session.port, session.username, upload.path, upload.dir || '', upload.name, upload.total, upload.fingerprint]);
-        upload.resumeKey = 'webssh.upload.v1.' + sftpUploadHex(await sftpUploadDigest(new TextEncoder().encode(key)));
-        try { upload.resumeId = localStorage.getItem(upload.resumeKey); } catch (e) { }
+        upload.legacyResumeKey = 'webssh.upload.v1.' + sftpUploadHex(await sftpUploadDigest(new TextEncoder().encode(key)));
+        upload.resumeKey = await sftpResumeStorageKey(upload, session);
+        try {
+            var stored = localStorage.getItem(upload.resumeKey);
+            if (stored) {
+                var saved = JSON.parse(stored);
+                if (saved && typeof saved === 'object' && typeof saved.id === 'string' && /^[a-f0-9]{64}$/.test(saved.id) && (!saved.originPath || (typeof saved.originPath === 'string' && saved.originPath[0] === '/'))) { upload.resumeId = saved.id; upload.originPath = saved.originPath || upload.originPath; }
+            }
+            if (!upload.resumeId) upload.resumeId = localStorage.getItem(upload.legacyResumeKey);
+        } catch (e) { }
         if (!/^[a-f0-9]{64}$/.test(upload.resumeId || '')) {
             var random = new Uint8Array(32);
             if (globalThis.crypto && globalThis.crypto.getRandomValues) globalThis.crypto.getRandomValues(random);
             else random = await sftpUploadDigest(new TextEncoder().encode(newSftpUploadId('resume') + Math.random()));
             upload.resumeId = sftpUploadHex(random);
-            try { localStorage.setItem(upload.resumeKey, upload.resumeId); } catch (e) { }
         }
+        try { localStorage.setItem(upload.resumeKey, JSON.stringify({ id: upload.resumeId, originPath: upload.originPath })); } catch (e) { }
     }
     upload.phase = '正在查询已上传进度…';
 }
@@ -74,7 +130,7 @@ function sftpResumeRequest(upload, session, operation, action, chunk, hash) {
         if (operation.cancelled) { reject(new Error('上传已暂停')); return; }
         var xhr = new XMLHttpRequest();
         operation.request = xhr;
-        var metadata = { sshInfo: session.sshInfo, id: upload.resumeId, path: upload.path, dir: upload.dir || '', name: upload.name, size: upload.total, fingerprint: upload.fingerprint, action: action, offset: upload.confirmed || 0, hash: hash || '' };
+        var metadata = { sshInfo: session.sshInfo, id: upload.resumeId, path: upload.path, originPath: upload.originPath || sftpUploadDestination(upload), dir: upload.dir || '', name: upload.name, size: upload.total, fingerprint: upload.fingerprint, action: action, offset: upload.confirmed || 0, hash: hash || '' };
         var body = new FormData();
         body.append('metadata', JSON.stringify(metadata));
         if (chunk) body.append('file', chunk, upload.name);
@@ -95,7 +151,8 @@ function sftpResumeRequest(upload, session, operation, action, chunk, hash) {
             if (operation.cancelled) { reject(new Error('上传已暂停')); return; }
             var response;
             try { response = JSON.parse(xhr.responseText); } catch (e) { response = {}; }
-            if (xhr.status >= 200 && xhr.status < 300 && response.Msg === 'success' && response.Data) resolve(response.Data);
+            if (!response || typeof response !== 'object' || Array.isArray(response)) response = {};
+            if (xhr.status >= 200 && xhr.status < 300 && response.Msg === 'success' && response.Data && typeof response.Data === 'object') resolve(response.Data);
             else {
                 var error = new Error(response.Msg || '上传失败（HTTP ' + xhr.status + '）');
                 error.retryable = xhr.status === 0 || xhr.status === 408 || xhr.status === 409 || xhr.status === 429 || xhr.status >= 500;
@@ -116,6 +173,7 @@ async function runSftpResumableUpload(upload) {
     if (upload.total > 10 * 1024 * 1024 * 1024) { upload.status = 'error'; upload.error = '单个文件最大支持 10 GiB'; renderSftpTransfers(session); return; }
     var operation = { resumable: true, cancelled: false, request: null, wake: null, abort: function () {
         this.cancelled = true;
+        if (this.cancelHash) this.cancelHash();
         if (this.request) this.request.abort();
         if (this.wake) this.wake();
     } };
@@ -135,7 +193,8 @@ async function runSftpResumableUpload(upload) {
                 while (!state.completed && upload.confirmed < upload.total && !operation.cancelled) {
                     upload.phase = ''; upload.status = 'running';
                     var chunk = upload.file.slice(upload.confirmed, Math.min(upload.total, upload.confirmed + state.chunkSize));
-                    var hash = sftpUploadHex(await sftpUploadDigest(await chunk.arrayBuffer()));
+                    var hash = upload.chunkHashes && upload.chunkHashes[upload.confirmed / state.chunkSize];
+                    if (!hash) hash = sftpUploadHex(await sftpUploadDigest(await chunk.arrayBuffer()));
                     var nextOffset = upload.confirmed + chunk.size;
                     state = await sftpResumeRequest(upload, session, operation, 'chunk', chunk, hash);
                     if (state.offset !== nextOffset) throw new Error('服务器返回了无效续传进度');
@@ -150,7 +209,7 @@ async function runSftpResumableUpload(upload) {
                 if (!state.completed) throw new Error('服务器尚未确认上传完成');
                 if (operation.cancelled || upload.status === 'error') break;
                 upload.status = 'completed'; upload.sent = upload.total; upload.confirmed = upload.total;
-                try { localStorage.removeItem(upload.resumeKey); } catch (e) { }
+                try { localStorage.removeItem(upload.resumeKey); if (upload.legacyResumeKey) localStorage.removeItem(upload.legacyResumeKey); } catch (e) { }
                 // The commit receipt is kept until success is acknowledged, so a
                 // lost response can be retried safely. Discard never deletes the destination.
                 try { await sftpResumeRequest(upload, session, operation, 'discard'); } catch (e) { }
@@ -191,10 +250,55 @@ async function discardSftpUpload(id) {
     upload.xhr = operation;
     try {
         if (upload.resumeId) await sftpResumeRequest(upload, session, operation, 'discard');
-        try { localStorage.removeItem(upload.resumeKey); } catch (e) { }
+        try { localStorage.removeItem(upload.resumeKey); if (upload.legacyResumeKey) localStorage.removeItem(upload.legacyResumeKey); } catch (e) { }
         dismissSftpUpload(id);
     } catch (error) { showToast(error.message || '删除上传进度失败', 'error'); }
     finally { if (upload.xhr === operation) upload.xhr = null; renderSftpTransfers(session); pumpSftpUploadQueue(); }
+}
+
+async function pauseSftpUploadsForRename(session, path, directory) {
+    var affected = (session._sftpUploads || []).filter(function (upload) {
+        if (!upload.resumable || upload.status === 'completed') return false;
+        var destination = sftpUploadDestination(upload);
+        return directory ? remotePathIsWithin(destination, path) : normalizeRemoteFilePath(destination) === path;
+    }).map(function (upload) {
+        var active = upload.status === 'queued' || upload.status === 'running' || upload.status === 'processing';
+        upload._renameHold = true;
+        if (active) cancelSftpUploadById(upload.id);
+        return { upload: upload, resume: active };
+    });
+    while (affected.some(function (item) { return !!item.upload.xhr; })) await new Promise(function (resolve) { setTimeout(resolve, 10); });
+    return affected;
+}
+
+async function updateSftpUploadsAfterRename(session, oldPath, newPath, directory, affected) {
+    await Promise.all(affected.map(async function (item) {
+        var upload = item.upload, previous = sftpUploadDestination(upload);
+        if (!upload.originPath) upload.originPath = previous;
+        var destination = directory ? replaceRemotePathPrefix(previous, oldPath, newPath) : newPath;
+        var slash = destination.lastIndexOf('/');
+        upload.path = normalizeSftpDir(slash <= 0 ? '/' : destination.substring(0, slash));
+        upload.dir = ''; upload.name = destination.substring(slash + 1);
+        if (upload.resumeId && upload.fingerprint) {
+            var oldKey = upload.resumeKey;
+            upload._resumeCacheUpdate = sftpResumeStorageKey(upload, session).then(function (key) {
+                upload.resumeKey = key;
+                try {
+                    localStorage.setItem(key, JSON.stringify({ id: upload.resumeId, originPath: upload.originPath }));
+                    if (oldKey && oldKey !== key) localStorage.removeItem(oldKey);
+                } catch (error) { showToast('目录已改名，当前页面可继续上传；浏览器未能保存新的续传位置', 'warning'); }
+            });
+            await upload._resumeCacheUpdate;
+        }
+    }));
+}
+
+function releaseSftpUploadsAfterRename(session, affected) {
+    (affected || []).forEach(function (item) {
+        item.upload._renameHold = false;
+        if (item.resume && item.upload.status !== 'completed') { item.upload.status = 'queued'; item.upload.error = ''; }
+    });
+    renderSftpTransfers(session); pumpSftpUploadQueue();
 }
 
 async function selectSftpUploadFolder() {

@@ -130,16 +130,17 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	if err := sshClient.GenerateClient(); err != nil {
+	commandContext, cancel := context.WithTimeout(c.Request.Context(), sysInfoCommandTimeout)
+	defer cancel()
+	entry, releaseSession, err := acquireSysInfoSession(commandContext, c, sshInfo, sshClient)
+	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	defer sshClient.Close()
+	defer func() { releaseSession(err != nil) }()
+	refreshStatic := entry.static == nil || time.Since(entry.staticAt) >= 5*time.Minute
 
-	commandContext, cancel := context.WithTimeout(c.Request.Context(), sysInfoCommandTimeout)
-	defer cancel()
-
-	cmd := strings.Join([]string{
+	parts := []string{
 		`echo "===OS==="`,
 		`(cat /etc/os-release 2>/dev/null | grep -m1 PRETTY_NAME | cut -d'"' -f2) || uname -s`,
 		`echo "===KERNEL==="`,
@@ -184,9 +185,10 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		`echo "===CONNECTIONS==="`,
 		`ss -tunH 2>/dev/null | awk 'BEGIN{tcp=0;udp=0} /^tcp/{tcp++} /^udp/{udp++} END{print tcp" "udp}' || echo "0 0"`,
 		`echo "===END==="`,
-	}, "; ")
+	}
+	cmd := strings.Join(sysInfoCommandParts(parts, !refreshStatic), "; ")
 
-	out, err := runSSHCommandBounded(commandContext, sshClient.Client, cmd, sysInfoOutputLimit)
+	out, err := runSSHCommandBounded(commandContext, entry.client.Client, cmd, sysInfoOutputLimit)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			responseBody.Msg = "system information command timed out"
@@ -198,7 +200,7 @@ func SysInfo(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 
-	responseBody.Data = parseSysInfo(string(out))
+	responseBody.Data = applySysInfoSample(entry, string(out), time.Now(), refreshStatic)
 	return &responseBody
 }
 

@@ -34,7 +34,7 @@ func (sclient *SSHClient) CreateSftpContext(ctx context.Context) (err error) {
 			sclient.Close()
 		}
 	}()
-	client, err := sftp.NewClient(transport)
+	client, err := sftp.NewClient(transport, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		sclient.Close()
 		return err

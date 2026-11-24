@@ -2,11 +2,33 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/pkg/sftp"
 )
+
+func TestNativeArchiveDownloadFormBinding(t *testing.T) {
+	for _, body := range []string{"jobId=test-id", "jobId=one&jobId=two", "jobId=one&unknown=two"} {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/file/archive/download", strings.NewReader(body))
+		ctx.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		var request folderArchiveJobRequest
+		err := bindFolderArchiveDownloadRequest(ctx, &request)
+		if body == "jobId=test-id" {
+			if err != nil || request.JobID != "test-id" {
+				t.Fatalf("native form: %s %v", request.JobID, err)
+			}
+		} else if err == nil {
+			t.Fatal("invalid form accepted")
+		}
+	}
+}
 
 func TestFolderCreateListRenameDeleteAndLinks(t *testing.T) {
 	handlers := sftp.InMemHandler()

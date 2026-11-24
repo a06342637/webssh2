@@ -113,3 +113,54 @@ test('an established upload may finish after its terminal disconnects', async ()
     await sandbox.runSftpResumableUpload(upload);
     assert.equal(upload.status, 'completed');
 });
+
+test('invalid upload JSON settles as a rejection, including null and arrays', async () => {
+    for (const text of ['null', '[]', '1', '{broken']) {
+        let xhr;
+        const { sandbox } = harness({
+            XMLHttpRequest: class { constructor() { this.upload = {}; xhr = this; } open() {} send() {} },
+            FormData: class { append() {} },
+        });
+        const pending = sandbox.sftpResumeRequest({ name: 'file', path: '/tmp', total: 1 }, {}, {}, 'status');
+        xhr.responseText = text; xhr.status = 200;
+        assert.doesNotThrow(() => xhr.onload());
+        await assert.rejects(pending, /上传失败/);
+    }
+});
+
+test('renamed folder keeps the same remote checkpoint and restores it after reselection', async () => {
+    const session = { id: 's', hostname: 'server', port: 22, username: 'root', _sftpUploads: [] };
+    const { sandbox, store } = harness({
+        normalizeSftpDir: value => value, normalizeRemoteFilePath: value => value,
+        remotePathIsWithin: (value, root) => value === root || value.startsWith(root + '/'),
+        replaceRemotePathPrefix: (value, oldPath, newPath) => newPath + value.slice(oldPath.length),
+    });
+    const upload = { file: new Blob(['abc']), total: 3, name: 'file', path: '/tmp', dir: 'old/nested', resumable: true, status: 'cancelled' };
+    session._sftpUploads.push(upload);
+    await sandbox.prepareSftpResume(upload, session, {});
+    const id = upload.resumeId, oldKey = upload.resumeKey;
+    const affected = await sandbox.pauseSftpUploadsForRename(session, '/tmp/old', true);
+    await sandbox.updateSftpUploadsAfterRename(session, '/tmp/old', '/tmp/new', true, affected);
+    sandbox.releaseSftpUploadsAfterRename(session, affected);
+    assert.equal(sandbox.sftpUploadDestination(upload), '/tmp/new/nested/file');
+    assert.equal(upload.originPath, '/tmp/old/nested/file'); assert.equal(upload.status, 'cancelled');
+    assert.equal(store.has(oldKey), false);
+    const selected = { file: new Blob(['abc']), total: 3, name: 'file', path: '/tmp', dir: 'new/nested' };
+    await sandbox.prepareSftpResume(selected, session, {});
+    assert.equal(selected.resumeId, id); assert.equal(selected.originPath, '/tmp/old/nested/file');
+});
+
+test('precomputed chunk digests are reused during upload', async () => {
+    const session = { _connected: true, _sftpUploadControllers: [] };
+    const { sandbox } = harness({ getSessionById: () => session });
+    let reads = 0;
+    const file = { size: 3, slice() { return { size: 3, arrayBuffer: async () => { reads++; return new TextEncoder().encode('abc').buffer; } }; } };
+    const upload = { status: 'queued', name: 'file', path: '/tmp', total: 3, file };
+    sandbox.sftpResumeRequest = async (item, sess, operation, action, chunk, hash) => {
+        if (action === 'status') return { offset: 0, chunkSize: 4194304 };
+        if (action === 'chunk') { assert.equal(hash, createHash('sha256').update('abc').digest('hex')); return { offset: 3 }; }
+        return { offset: 3, completed: true };
+    };
+    await sandbox.runSftpResumableUpload(upload);
+    assert.equal(upload.status, 'completed'); assert.equal(reads, 1);
+});

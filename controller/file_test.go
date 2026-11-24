@@ -897,7 +897,7 @@ func newEditorTestSFTPClient(t *testing.T) *sftp.Client {
 	return newEditorTestSFTPClientWithHandler(t, editorTestHandler{})
 }
 
-func newEditorTestSFTPClientWithHandler(t *testing.T, handler editorTestHandler) *sftp.Client {
+func newEditorTestSFTPClientWithHandler(t *testing.T, handler editorTestHandler, options ...sftp.ClientOption) *sftp.Client {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -935,7 +935,7 @@ func newEditorTestSFTPClientWithHandler(t *testing.T, handler editorTestHandler)
 	})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve() }()
-	client, err := sftp.NewClientPipe(clientConn, clientConn)
+	client, err := sftp.NewClientPipe(clientConn, clientConn, options...)
 	if err != nil {
 		_ = server.Close()
 		_ = clientConn.Close()

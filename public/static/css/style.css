@@ -236,6 +236,9 @@ html[data-theme="light"] .term-body{background:linear-gradient(180deg,rgba(248,2
 .sftp-path-input{flex:1;padding:5px 8px;background:var(--inp);border:1px solid var(--brd);border-radius:var(--rx);color:var(--t1);font-size:11px;font-family:'WebSSH JetBrains Mono','JetBrains Mono',monospace;outline:none;min-width:0}
 .sftp-path-input:focus{border-color:var(--brf)}
 .sftp-actions{display:flex;gap:4px;flex-shrink:0;justify-content:flex-end;flex-wrap:wrap}
+.sftp-page-bar{display:flex;align-items:center;justify-content:center;gap:8px;position:sticky;top:0;z-index:2;background:var(--card);padding:6px 4px;font-size:11px;color:var(--t2)}
+.sftp-page-bar button{width:26px;height:24px;border:1px solid var(--brd);border-radius:5px;background:var(--inp);color:var(--t1);cursor:pointer}
+.sftp-page-bar button:disabled{opacity:.35;cursor:default}
 .sftp-search-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-shrink:0;border-top:1px solid rgba(255,255,255,.04);border-bottom:1px solid var(--brd);background:rgba(0,0,0,.08)}
 .sftp-search-input-wrap{height:29px;min-width:0;flex:1;display:flex;align-items:center;gap:6px;padding:0 7px;border:1px solid var(--brd);border-radius:7px;background:var(--inp);color:var(--t3);transition:border-color var(--tr),box-shadow var(--tr)}
 .sftp-search-input-wrap:focus-within{border-color:var(--brf);box-shadow:0 0 0 2px rgba(0,212,255,.1)}

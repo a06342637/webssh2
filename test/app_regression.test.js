@@ -439,7 +439,7 @@ test('a cached directory navigation invalidates an older in-flight response in t
         _sftpListGeneration: 0, _sftpDirectoryCache: Object.create(null), _sftpDirectoryCacheOrder: [], _connected: true,
     };
     const sandbox = loadFunctions(
-        ['getActiveSession', 'getSftpDirectoryCache', 'rememberSftpDirectory', 'applySftpDirectoryCache', 'abortSessionController', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpLoad'],
+        ['getActiveSession', 'getSftpDirectoryCache', 'rememberSftpDirectory', 'applySftpDirectoryCache', 'abortSessionController', 'requestWasAborted', 'normalizeSftpDir', 'filterSftpList', 'syncSftpSearchControls', 'renderSftpList', 'sftpPageMarkup', 'sftpLoad'],
         {
             sessions: [session], activeIdx: 0,
             document: { getElementById: (id) => elements[id] },
@@ -742,6 +742,57 @@ test('a clipboard read that finishes after SSH reconnect never sends text to the
     assert.deepEqual(sent, []); assert.match(notices[0], /连接已关闭/);
 });
 
+test('background transfers cannot clear the active panel and large queues render one page', () => {
+    const active = { _sftpUploads: Array.from({ length: 500 }, (_, id) => ({ id })), _sftpDownloads: [] };
+    const background = { _sftpUploads: [{}], _sftpDownloads: [] }, panel = {};
+    let rendered = 0;
+    const sandbox = loadFunctions(['renderSftpTransfers', 'renderSftpTransfersNow', 'sftpPageMarkup'], {
+        document: { getElementById: () => panel }, getActiveSession: () => active,
+        renderSftpUploadTransfer: item => { rendered++; return '<div>upload ' + item.id + '</div>'; },
+    });
+    sandbox.renderSftpTransfers(active);
+    assert.equal(rendered, 20); assert.match(panel.innerHTML, /第 1 \/ 25 页/);
+    const before = panel.innerHTML;
+    sandbox.renderSftpTransfers(background);
+    assert.equal(panel.innerHTML, before); assert.equal(rendered, 20);
+});
+
+test('directory pagination bounds rows while search covers files on all pages', () => {
+    const session = { _sftpListState: 'ready', _sftpList: Array.from({ length: 2000 }, (_, id) => ({ Name: 'file-' + id })), sftpPath: '/' }, body = {};
+    const sandbox = loadFunctions(['renderSftpList', 'sftpPageMarkup', 'filterSftpList', 'normalizeSftpDir'], {
+        getActiveSession: () => session, document: { getElementById: () => body }, syncSftpSearchControls() {},
+        renderSftpRow: item => '<div class="row">' + item.Name + '</div>',
+    });
+    sandbox.renderSftpList(session);
+    assert.equal((body.innerHTML.match(/class="row"/g) || []).length, 100);
+    assert.match(body.innerHTML, /第 1 \/ 20 页/);
+    session.sftpSearchQuery = 'file-1999'; session.sftpSearchMode = 'exact';
+    sandbox.renderSftpList(session);
+    assert.match(body.innerHTML, /file-1999/); assert.equal((body.innerHTML.match(/class="row"/g) || []).length, 1);
+});
+
+test('late monitor messages and close events cannot change a replacement connection', () => {
+    const sockets = [], session = { sshInfo: 'test', _connected: true, _connectGeneration: 1, _lastMetrics: {} };
+    let recorded = 0, timers = 0;
+    const sandbox = loadFunctions(['startServerInfoNetStream', 'stopServerInfoNetStream', 'mergeNetworkMetrics'], {
+        location: { protocol: 'http:', host: 'localhost' }, serverInfoModalIdx: -1, sessions: [session],
+        WebSocket: function () { this.readyState = 1; this.close = () => {}; sockets.push(this); },
+        recordNetworkSample() { recorded++; }, clearTimeout() {}, setTimeout() { timers++; return 1; },
+    });
+    sandbox.startServerInfoNetStream(session); const old = sockets[0];
+    sandbox.stopServerInfoNetStream(session); session._connectGeneration++;
+    sandbox.startServerInfoNetStream(session);
+    sockets[1].onmessage({ data: JSON.stringify({ Msg: 'success', Data: { rxRate: 42, updatedAt: 2 } }) });
+    old.onmessage({ data: JSON.stringify({ Msg: 'success', Data: { rxRate: 999, updatedAt: 1 } }) }); old.onclose();
+    assert.equal(session._lastMetrics.rxRate, 42); assert.equal(session._lastMetrics.updatedAt, 2);
+    assert.equal(recorded, 1); assert.equal(timers, 0); assert.equal(session._serverInfoNetWs, sockets[1]);
+});
+
+test('file API rejects JSON null instead of throwing an unhandled callback exception', async () => {
+    const sandbox = loadFunctions(['remoteEditorRequest'], { fetch: () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('null') }) });
+    await assert.rejects(sandbox.remoteEditorRequest('/file/mkdir', {}), error => error.msg === '服务器返回了无效响应');
+});
+
 test('script bookmarks and SFTP panels close each other when opened', () => {
     function panel(open) {
         const state = new Set(open ? ['open'] : []);
@@ -949,7 +1000,7 @@ test('SFTP rename validates once, uses the pooled session and updates open edito
 
 test('SFTP folder downloads show real compression progress before byte download progress', () => {
     const statusSource = extractFunction('sftpDownloadStatusLabel');
-    const renderSource = extractFunction('renderSftpTransfers');
+    const renderSource = extractFunction('renderSftpDownloadTransfer');
     const prepareSource = extractFunction('runSftpArchivePreparation');
     const pollSource = extractFunction('pollSftpArchivePreparation');
     const runSource = extractFunction('runSftpDownload');
@@ -1143,7 +1194,7 @@ test('SFTP download requests preserve file and directory intent', async () => {
     let submitted;
     const session = { id: 'session-1', _connected: true, sshInfo: 'encoded-ssh-info' };
     const sandbox = loadFunctions(
-        ['runSftpDownload'],
+        ['runSftpDownload', 'sftpNativeDownloadAvailable'],
         {
             getSessionById: () => session,
             renderSftpTransfers: () => { },
@@ -3124,6 +3175,7 @@ function createWhitespaceFileOperationHarness() {
             abortSessionController() {}, invalidateSftpDirectoryCache() {}, requestWasAborted: () => false,
             remoteEditorRequest: (url, body) => { requests.push({ url, body: JSON.parse(JSON.stringify(body)) }); return Promise.resolve({}); },
             updateRemoteEditorsAfterRename: (target, oldPath, newPath) => renamed.push({ oldPath, newPath }),
+            pauseSftpUploadsForRename: () => Promise.resolve([]), updateSftpUploadsAfterRename: () => Promise.resolve(), releaseSftpUploadsAfterRename() {},
             sftpLoad: (remotePath) => refreshed.push(remotePath),
         },
     );

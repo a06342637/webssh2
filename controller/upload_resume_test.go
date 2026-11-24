@@ -78,6 +78,7 @@ func resumeTestRequest(t *testing.T, request resumeUploadRequest, chunk []byte, 
 }
 
 func TestResumeUploadReconnectIntegrityAndCommit(t *testing.T) {
+	t.Setenv("WEBSSH_UPLOAD_VERIFY_REMOTE", "true")
 	gin.SetMode(gin.TestMode)
 	handlers := resumeTestHandlers()
 	installMemorySFTPFileFactories(t, handlers)
@@ -280,5 +281,80 @@ func TestResumeRemoteEmptyFileAndInterruptedFinalJournal(t *testing.T) {
 		if _, _, err := resumeRemoteUpload(client, request, dest, temp, nil); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestConcurrentUploadWriteFailureKeepsPreviousCheckpoint(t *testing.T) {
+	local := t.TempDir()
+	dest := editorTestRemotePath(filepath.Join(local, "file.bin"))
+	temp := editorTestRemotePath(filepath.Join(local, ".webssh-resume"))
+	chunk := bytes.Repeat([]byte{73}, uploadChunkBytes)
+	request := resumeUploadRequest{Action: "status", Size: int64(len(chunk)), Fingerprint: resumeTestFingerprint(chunk)}
+	failing := newEditorTestSFTPClientWithHandler(t, editorTestHandler{failWrites: true}, sftp.UseConcurrentWrites(true))
+	if _, _, err := resumeRemoteUpload(failing, request, dest, temp, nil); err != nil {
+		t.Fatal(err)
+	}
+	request.Action = "chunk"
+	if _, _, err := resumeRemoteUpload(failing, request, dest, temp, chunk); err == nil {
+		t.Fatal("forced concurrent write succeeded")
+	}
+	working := newEditorTestSFTPClientWithHandler(t, editorTestHandler{}, sftp.UseConcurrentWrites(true))
+	request.Action = "status"
+	if offset, _, err := resumeRemoteUpload(working, request, dest, temp, nil); err != nil || offset != 0 {
+		t.Fatalf("failed write advanced checkpoint: %d %v", offset, err)
+	}
+	request.Action = "chunk"
+	if _, _, err := resumeRemoteUpload(working, request, dest, temp, chunk); err != nil {
+		t.Fatal(err)
+	}
+	request.Action = "complete"
+	if _, complete, err := resumeRemoteUpload(working, request, dest, temp, nil); err != nil || !complete {
+		t.Fatalf("retry commit: %v %v", complete, err)
+	}
+	actual, err := os.ReadFile(filepath.Join(local, "file.bin"))
+	if err != nil || !bytes.Equal(actual, chunk) {
+		t.Fatalf("retry file mismatch: %v", err)
+	}
+}
+
+func TestUploadResumesAfterParentRenameWithOriginalIdentity(t *testing.T) {
+	handlers := resumeTestHandlers()
+	installMemorySFTPFileFactories(t, handlers)
+	t.Cleanup(resetSFTPSessionRegistryForTest)
+	client, _ := newMemorySFTPTestClient(t, handlers)
+	content := append(bytes.Repeat([]byte{81}, uploadChunkBytes), []byte("tail")...)
+	request := resumeUploadRequest{SSHInfo: sftpSessionTestSSHInfo(t), ID: strings.Repeat("c", 64), Path: "/uploads/old", Name: "file", Size: int64(len(content)), Fingerprint: resumeTestFingerprint(content), Action: "status"}
+	owner := strings.Repeat("a", 32)
+	run := func(chunk []byte) *ResponseBody {
+		t.Helper()
+		if chunk != nil {
+			sum := sha256.Sum256(chunk)
+			request.Hash = hex.EncodeToString(sum[:])
+		}
+		result := resumeTestRequest(t, request, chunk, owner)
+		if result.Msg != "success" {
+			t.Fatal(result.Msg)
+		}
+		return result
+	}
+	run(nil)
+	request.Action = "chunk"
+	run(content[:uploadChunkBytes])
+	if err := client.Rename("/uploads/old", "/uploads/new"); err != nil {
+		t.Fatal(err)
+	}
+	request.OriginPath, request.Path, request.Action = "/uploads/old/file", "/uploads/new", "status"
+	if offset := run(nil).Data.(gin.H)["offset"]; offset != int64(uploadChunkBytes) {
+		t.Fatal(offset)
+	}
+	request.Action, request.Offset = "chunk", uploadChunkBytes
+	run(content[uploadChunkBytes:])
+	request.Action = "complete"
+	run(nil)
+	if actual := readMemorySFTPTestFile(t, client, "/uploads/new/file"); actual != string(content) {
+		t.Fatal("renamed upload content mismatch")
+	}
+	if _, err := client.Stat("/uploads/old"); !os.IsNotExist(err) {
+		t.Fatal("old folder was recreated")
 	}
 }

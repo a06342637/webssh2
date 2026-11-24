@@ -1022,7 +1022,7 @@ func CancelDirectoryArchive(c *gin.Context) {
 
 func DownloadPreparedDirectoryArchive(c *gin.Context) {
 	var request folderArchiveJobRequest
-	if err := bindStrictJSON(c, &request); err != nil {
+	if err := bindFolderArchiveDownloadRequest(c, &request); err != nil {
 		c.JSON(http.StatusBadRequest, ResponseBody{Msg: "invalid request: " + err.Error()})
 		return
 	}
@@ -1094,4 +1094,30 @@ func DownloadPreparedDirectoryArchive(c *gin.Context) {
 		return
 	}
 	job.markTerminal("completed", nil)
+}
+
+func bindFolderArchiveDownloadRequest(c *gin.Context, request *folderArchiveJobRequest) error {
+	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+	if err != nil {
+		return err
+	}
+	if mediaType == "application/json" {
+		return bindStrictJSON(c, request)
+	}
+	if mediaType != "application/x-www-form-urlencoded" {
+		return fmt.Errorf("invalid download content type")
+	}
+	timer := time.AfterFunc(30*time.Second, func() { _ = c.Request.Body.Close() })
+	defer timer.Stop()
+	if err := c.Request.ParseForm(); err != nil {
+		return err
+	}
+	if len(c.Request.PostForm) != 1 || len(c.Request.PostForm["jobId"]) != 1 {
+		return fmt.Errorf("invalid download fields")
+	}
+	request.JobID = c.Request.PostForm.Get("jobId")
+	if request.JobID == "" {
+		return fmt.Errorf("missing jobId")
+	}
+	return nil
 }

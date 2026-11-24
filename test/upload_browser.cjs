@@ -44,6 +44,8 @@ const root = path.resolve(__dirname, '../public');
         });
         await page.goto('http://localhost/?preview=terminal&drawer=none');
         await page.evaluate(() => {
+            const BaseWorker = window.Worker; window.hashWorkerCount = 0;
+            window.Worker = function (url) { window.hashWorkerCount++; return new BaseWorker(url); };
             document.getElementById('splash')?.remove();
             document.getElementById('terminalContainer').innerHTML = '';
             createSession('test-host', 22, 'test-user', 'test-ssh'); switchTab(0);
@@ -58,6 +60,8 @@ const root = path.resolve(__dirname, '../public');
         assert.deepEqual(chunks, [0, 4194304], 'lost chunk response must resume from server offset');
         assert.equal(received, 4194304 + 37);
         assert.ok(requests.includes('complete'));
+        assert.ok(await page.evaluate(() => hashWorkerCount > 0), 'upload fingerprint must run in a worker');
+        assert.equal(await page.evaluate(() => sessions[0]._sftpUploads[0].chunkHashes.length), 2);
         page.once('dialog', dialog => dialog.accept('new folder'));
         await page.getByRole('button', { name: '新建文件夹', exact: true }).click();
         await page.waitForResponse(response => response.url().endsWith('/file/list'));
