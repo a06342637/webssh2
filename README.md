@@ -710,6 +710,9 @@ AUTH_INFO="admin:请替换为强密码"
 - SSH 输出使用二进制 WebSocket 帧直接交给 xterm.js，减少 UTF-8 重复校验、字符串转换和大输出时的浏览器开销，并可正确处理跨数据块的多字节字符。
 - SSH TCP 连接显式启用 `TCP_NODELAY`；域名双栈连接的备用地址族回退时间缩短到 100 ms。
 - 大段命令粘贴会循环写完全部数据，避免底层发生短写时命令被截断。
+- 浏览器大段粘贴会按 Unicode 字符边界分块发送，遇到 WebSocket 发送积压时稍后继续，避免一次编码/发送大消息卡住页面；多行内容、括号粘贴和后续按键保持原有顺序。连接中断会清理待发送数据，重连后不会继续发送旧命令。
+- SSH 断开后，终端末尾连续显示三行红色“当前 SSH 已断开，按回车自动重新连接。”，对应标签也显示红色“已断开”。在终端按回车可重连当前 SSH，连接过程中重复回车不会启动多条连接。
+- SSH 断开或重连失败后仍可选择、自动复制、右键复制终端历史；选中内容可按 Ctrl/Cmd+C 复制，没有选区时 Ctrl+C 继续作为远端中断键。拖动选区时合并重复复制操作，降低剪贴板操作对交互的影响。
 - WebSocket 使用共享的 32 KiB 写缓冲池，提高连续命令输出吞吐，同时不启用可能增加交互延迟的 WebSocket 压缩。
 - 配置终端直连地址后，首页会提前发送 DNS prefetch / preconnect 提示，尽早预热 WSS 的 DNS、TCP 和 TLS 连接，减少首次登录等待。
 - 配置终端直连地址后，页面还会以低优先级静默请求直连入口的 `/healthz`，进一步预热连接；请求失败不会影响正常登录。
@@ -756,6 +759,7 @@ go run . -a admin:password
 
 回归检查：`go test ./...`、`go vet ./...` 和 `node --test test/*.test.js`。设置 `WEBSSH_TEST_LARGE_UPLOAD=1` 后运行 `go test ./controller -run TestResumeUploadTenGiBOffsetsWithSparseFile -count=1` 可额外验证 10 GiB 文件末尾分块、64 位偏移和提交；此测试可能占用 10 GiB 临时磁盘空间。
 安装 Playwright 后，可运行 `node test/upload_browser.cjs` 验证真实浏览器分块请求、丢失响应后的续传、文件夹操作和手机布局。
+安装 Playwright 和 `ws` 后，可运行 `node test/terminal_disconnect_browser.cjs` 验证断开红字、复制、回车重连及超过 4 MiB 的多行粘贴；环境变量 `WEBSSH_PLAYWRIGHT` / `WEBSSH_WS` 可指定已安装的包目录。
 安装 Playwright 和 Chromium 后，可运行 `node test/terminal_browser.cjs` 和 `node test/boundary_browser.cjs` 验证终端缩放选区、标签换行、面板、剪贴板及分享代理；使用 Edge 时设置 `WEBSSH_BROWSER=msedge`。
 
 ## 配置参数

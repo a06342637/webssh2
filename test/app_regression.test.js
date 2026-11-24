@@ -510,7 +510,7 @@ test('SFTP search UI is session-scoped and clears when navigating to another dir
 
 test('one-time host-key trust remains available only for the live SSH tab', () => {
     const connectSource = extractFunction('connectSession');
-    const reconnectSource = extractFunction('reconnectTab');
+    const reconnectSource = extractFunction('reconnectSshSession');
     assert.match(connectSource, /if \(session\.hostKeyDecision === ['"]replace['"]\) clearHostKeyDecision\(session\);/);
     assert.match(connectSource, /if \(wasConnected && session\.hostKeyDecision\) clearHostKeyDecision\(session\);/);
     assert.match(reconnectSource, /if \(s\.hostKeyDecision\) clearHostKeyDecision\(s\);/);
@@ -527,12 +527,13 @@ test('terminal close marks the session offline and cancels dependent work', () =
 test('terminal admission errors stay visible without success or fallback reconnects', () => {
     const sockets = [], notices = [], output = [];
     const session = { hostname: 'server', term: { cols: 80, rows: 24, onData: () => ({dispose() {}}), write: data => output.push(data) } };
-    const sandbox = loadFunctions(['connectSession', 'parseTerminalControlMessage'], {
+    const sandbox = loadFunctions(['connectSession', 'parseTerminalControlMessage', 'showSshDisconnected', 'clearTerminalInputQueue'], {
         sessions: [session], activeIdx: 0, TERMINAL_CONTROL_PREFIX: '__WEBSSH_CONTROL__:',
         WebSocket: function () { this.readyState = 0; sockets.push(this); },
         buildTerminalWebSocketURL: (cols, rows, fallback) => fallback ? 'ws://fallback/term' : 'ws://direct/term',
         stopTopbarMetricsPolling() {}, stopServerInfoNetStream() {}, cancelSessionSftpRequests() {},
         handleRemoteEditorsSessionDisconnected() {}, addEventListener() {},
+        renderTabs() {},
         setTimeout: () => 1, clearTimeout() {},
         showToast: (message, kind) => notices.push({message, kind}),
     });
@@ -542,7 +543,9 @@ test('terminal admission errors stay visible without success or fallback reconne
     assert.equal(sockets.length, 1);
     assert.equal(session._connected, false);
     assert.equal(session.ws, null);
-    assert.deepEqual(output, []);
+    assert.equal(output.length, 1);
+    assert.equal(output[0].split('当前 SSH 已断开').length - 1, 3);
+    assert.equal(session._connectionState, 'disconnected');
     assert.deepEqual(notices, [{message:'server 连接失败：SSH 终端数量已达上限',kind:'error'}]);
 });
 
@@ -633,16 +636,110 @@ test('guest-enabled deployments open the terminal without a bookmark account', (
     const sandbox = loadFunctions(
         ['ensureGatewayAccount', 'startSessionConnection'],
         {
-            requireGatewayAccount: false, currentAccount: null,
+            requireGatewayAccount: false, currentAccount: null, sessions: [],
             openAuthModal: () => { modalOpened++; }, showToast: () => {},
             connectSession: () => { connected++; },
             document: { visibilityState: 'hidden' }, setTimeout: (fn) => fn(),
         },
     );
     const session = { fitAddon: { fit: () => {} } };
+    sandbox.sessions.push(session);
     assert.equal(sandbox.startSessionConnection(session), true);
     assert.equal(modalOpened, 0);
     assert.equal(connected, 1);
+});
+
+test('SSH close appends exactly three red notices without changing another session', () => {
+    const output = [];
+    const current = { _connected: true, _connectGeneration: 2, term: { write(text, done) { output.push(text); done(); }, scrollToBottom() {} } };
+    const other = { _connected: true, _connectionState: 'connected' };
+    const sandbox = loadFunctions(['showSshDisconnected', 'clearTerminalInputQueue'], { sessions: [current, other], renderTabs() {}, clearTimeout() {} });
+    sandbox.showSshDisconnected(current);
+    sandbox.showSshDisconnected(current);
+    assert.equal(output.length, 1);
+    assert.equal(output[0].split('当前 SSH 已断开，按回车自动重新连接。').length - 1, 3);
+    assert.equal(output[0].split('\x1b[0;38;2;255;77;79m').length - 1, 3);
+    assert.equal(other._connected, true);
+    assert.equal(other._connectionState, 'connected');
+});
+
+test('Enter reconnects its own SSH session once and is never sent during reconnect', () => {
+    const session = { _connectionState: 'disconnected', term: { getSelection: () => '' } };
+    const attempts = [];
+    const sandbox = loadFunctions(['handleTerminalKey'], { reconnectSshSession(target) { attempts.push(target); target._connectionState = 'connecting'; } });
+    const event = { type: 'keydown', key: 'Enter', preventDefault() {}, stopPropagation() {} };
+    assert.equal(sandbox.handleTerminalKey(session, event), false);
+    assert.equal(sandbox.handleTerminalKey(session, { ...event, repeat: true }), false);
+    assert.equal(sandbox.handleTerminalKey(session, event), false);
+    assert.deepEqual(attempts, [session]);
+});
+
+test('Ctrl+C copies offline history while an unselected Ctrl+C remains a remote interrupt', () => {
+    let selection = 'offline history';
+    const copied = [];
+    const session = { _connectionState: 'disconnected', term: { getSelection: () => selection } };
+    const sandbox = loadFunctions(['handleTerminalKey'], { copyTextToClipboard(text) { copied.push(text); }, clearTimeout() {}, showToast() {} });
+    const event = { type: 'keydown', key: 'c', ctrlKey: true, preventDefault() {}, stopPropagation() {} };
+    assert.equal(sandbox.handleTerminalKey(session, event), false);
+    assert.deepEqual(copied, ['offline history']);
+    selection = ''; session._connectionState = 'connected';
+    assert.equal(sandbox.handleTerminalKey(session, event), true);
+});
+
+test('auto-copy coalesces drag selections and remains installed while SSH is offline', () => {
+    let onChange, selection = '', installs = 0;
+    const timers = new Map(), copied = [];
+    let nextTimer = 0;
+    const session = { _connected: false, term: { getSelection: () => selection, onSelectionChange(fn) { installs++; onChange = fn; return {}; } } };
+    const sandbox = loadFunctions(['setupAutoCopy'], { sessions: [session], activeIdx: 0,
+        setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout(id) { timers.delete(id); }, copyTextToClipboard(text) { copied.push(text); } });
+    sandbox.setupAutoCopy(session);
+    sandbox.setupAutoCopy(session);
+    for (let i = 0; i < 100; i++) { selection = 'selected ' + i; onChange(); }
+    assert.equal(installs, 1); assert.equal(timers.size, 1); assert.equal(copied.length, 0);
+    [...timers.values()][0]();
+    assert.deepEqual(copied, ['selected 99']);
+});
+
+test('large SSH paste yields, preserves Unicode and keeps subsequent keystrokes in order', () => {
+    const frames = [], timers = new Map(); let nextTimer = 0;
+    const session = { ws: { readyState: 1, bufferedAmount: 0, send(data) { frames.push(Buffer.from(data)); } } };
+    const sandbox = loadFunctions(['sendTerminalInput', 'flushTerminalInput', 'clearTerminalInputQueue'], { _termEncoder: new TextEncoder(),
+        setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout(id) { timers.delete(id); } });
+    const text = 'x'.repeat(16383) + '😀' + '\x1b[200~' + '中文\n'.repeat(120000) + '\x1b[201~';
+    assert.equal(sandbox.sendTerminalInput(session, text), true);
+    assert.ok(Buffer.concat(frames).length < Buffer.byteLength(text), 'first paste batch must yield');
+    assert.equal(sandbox.sendTerminalInput(session, 'tail\r'), true);
+    while (timers.size) { const [id, fn] = timers.entries().next().value; timers.delete(id); fn(); }
+    assert.equal(Buffer.concat(frames).toString(), text + 'tail\r');
+    assert.ok(frames.every(frame => frame.length <= 65536));
+    assert.equal(session._inputQueue, null);
+});
+
+test('queued SSH paste honors backpressure and is discarded when its socket changes', () => {
+    const oldFrames = [], newFrames = [], timers = new Map(); let nextTimer = 0;
+    const socket = { readyState: 1, bufferedAmount: 300000, send(data) { oldFrames.push(data); } };
+    const session = { ws: socket };
+    const sandbox = loadFunctions(['sendTerminalInput', 'flushTerminalInput', 'clearTerminalInputQueue'], { _termEncoder: new TextEncoder(),
+        setTimeout(fn) { timers.set(++nextTimer, fn); return nextTimer; }, clearTimeout(id) { timers.delete(id); } });
+    sandbox.sendTerminalInput(session, 'old paste');
+    assert.equal(oldFrames.length, 0);
+    session.ws = { readyState: 1, bufferedAmount: 0, send(data) { newFrames.push(data); } };
+    sandbox.flushTerminalInput(session);
+    assert.equal(session._inputQueue, null); assert.equal(timers.size, 0); assert.equal(newFrames.length, 0);
+    sandbox.sendTerminalInput(session, 'new key');
+    assert.equal(Buffer.from(newFrames[0]).toString(), 'new key');
+});
+
+test('a clipboard read that finishes after SSH reconnect never sends text to the new socket', async () => {
+    const pending = deferred(), sent = [], notices = [];
+    const session = { kind: 'ssh', term: { paste: text => sent.push(text) }, ws: { readyState: 1 }, _connectGeneration: 1 };
+    const sandbox = loadFunctions(['termPaste', 'sshSessionCanPaste'], { sessions: [session], activeIdx: 0, hideCtxMenu() {}, sshClipboardReadAvailable: () => true,
+        navigator: { clipboard: { readText: () => pending.promise } }, pasteTextToSshSession: (_, text) => sent.push(text), showToast: text => notices.push(text) });
+    sandbox.termPaste();
+    session.ws = { readyState: 1 }; session._connectGeneration++;
+    pending.resolve('stale command\r'); await flushPromises();
+    assert.deepEqual(sent, []); assert.match(notices[0], /连接已关闭/);
 });
 
 test('script bookmarks and SFTP panels close each other when opened', () => {

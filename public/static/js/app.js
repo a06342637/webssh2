@@ -545,10 +545,112 @@ var _termEncoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
 function sendTerminalInput(session, data) {
     var ws = session && session.ws;
     if (!ws || ws.readyState !== 1 || !data) return false;
+    if (session._inputQueue && session._inputQueueSocket !== ws) clearTerminalInputQueue(session);
+    if (data.length > 16384 || session._inputQueue || ws.bufferedAmount > 262144) {
+        if (!session._inputQueue) {
+            session._inputQueue = [];
+            session._inputQueueHead = 0;
+            session._inputQueueSocket = ws;
+        }
+        session._inputQueue.push({ text: data, offset: 0 });
+        return session._inputFlushTimer != null ? true : flushTerminalInput(session);
+    }
     try {
         ws.send(_termEncoder ? _termEncoder.encode(data) : data);
         return true;
     } catch (e) { return false; }
+}
+
+function clearTerminalInputQueue(session) {
+    if (!session) return;
+    if (session._inputFlushTimer != null) clearTimeout(session._inputFlushTimer);
+    session._inputFlushTimer = null;
+    session._inputQueue = null;
+    session._inputQueueSocket = null;
+    session._inputQueueHead = 0;
+}
+
+function flushTerminalInput(session) {
+    if (!session._inputQueue) return true;
+    var ws = session.ws;
+    if (!ws || ws !== session._inputQueueSocket || ws.readyState !== 1) {
+        clearTerminalInputQueue(session);
+        return false;
+    }
+    // Keep typing immediate, but yield between paste batches and respect
+    // WebSocket backpressure. A Unicode code point stays in one frame.
+    var sent = 0;
+    try {
+        while (session._inputQueueHead < session._inputQueue.length && sent < 65536 && (ws.bufferedAmount || 0) < 262144) {
+            var item = session._inputQueue[session._inputQueueHead];
+            var end = Math.min(item.text.length, item.offset + 16384);
+            if (end < item.text.length) {
+                var last = item.text.charCodeAt(end - 1);
+                if (last >= 0xd800 && last <= 0xdbff) end--;
+            }
+            var chunk = item.text.slice(item.offset, end);
+            var encoded = _termEncoder ? _termEncoder.encode(chunk) : chunk;
+            ws.send(encoded);
+            sent += encoded.byteLength || encoded.length;
+            item.offset = end;
+            if (end === item.text.length) {
+                session._inputQueue[session._inputQueueHead++] = null;
+            }
+        }
+    } catch (error) {
+        clearTerminalInputQueue(session);
+        try { ws.close(); } catch (e) { }
+        return false;
+    }
+    if (session._inputQueueHead === session._inputQueue.length) {
+        clearTerminalInputQueue(session);
+    } else if (session._inputFlushTimer == null) {
+        session._inputFlushTimer = setTimeout(function () {
+            session._inputFlushTimer = null;
+            flushTerminalInput(session);
+        }, ws.bufferedAmount >= 262144 ? 8 : 0);
+    }
+    return true;
+}
+
+function showSshDisconnected(session) {
+    if (!session || sessions.indexOf(session) < 0) return;
+    session._connected = false;
+    session._connectionState = 'disconnected';
+    clearTerminalInputQueue(session);
+    renderTabs();
+    if (session._disconnectNoticeShown || !session.term) return;
+    session._disconnectNoticeShown = true;
+    var generation = session._connectGeneration;
+    var line = '\x1b[0;38;2;255;77;79m当前 SSH 已断开，按回车自动重新连接。\x1b[0m\r\n';
+    session.term.write('\x1b[?2004l\r\n' + line + line + line, function () {
+        if (sessions.indexOf(session) >= 0 && session._connectGeneration === generation && session._connectionState === 'disconnected') session.term.scrollToBottom();
+    });
+}
+
+function handleTerminalKey(session, event) {
+    if (event.type !== 'keydown' || event.isComposing) return true;
+    var key = String(event.key || '').toLowerCase();
+    var modifier = (event.ctrlKey && !event.metaKey) || (event.metaKey && !event.ctrlKey);
+    if (key === 'c' && modifier && !event.altKey) {
+        var selected = session.term.getSelection();
+        if (selected || event.shiftKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (session._selectionCopyTimer != null) clearTimeout(session._selectionCopyTimer);
+            session._selectionCopyTimer = null;
+            if (selected) copyTextToClipboard(selected);
+            else showToast('没有选中内容', 'info');
+            return false;
+        }
+    }
+    if (key === 'enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && (session._connectionState === 'disconnected' || session._connectionState === 'connecting')) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat && session._connectionState === 'disconnected') reconnectSshSession(session);
+        return false;
+    }
+    return true;
 }
 
 // 把一条命令交给远端 shell 执行。多行命令必须用 bracketed paste 包住：
@@ -603,6 +705,8 @@ function createSession(hostname, port, username, sshInfo, opts) {
         hostKeyMismatch: null,
         hostKeyDecision: '',
         _connected: false,
+        _connectionState: 'idle',
+        _disconnectNoticeShown: false,
         _connectGeneration: 0,
         _dataDisposable: null,
         _selectionDisposable: null,
@@ -641,6 +745,15 @@ function createSession(hostname, port, username, sshInfo, opts) {
     session.resizeObs.observe(termDiv);
 
     sessions.push(session);
+    setupAutoCopy(session);
+    t.attachCustomKeyEventHandler(function (event) { return handleTerminalKey(session, event); });
+    session._dataDisposable = t.onData(function (data) {
+        if (session._connectionState === 'disconnected') {
+            if (data === '\r') reconnectSshSession(session);
+            return;
+        }
+        sendTerminalInput(session, data);
+    });
 
     // 字体是 font-display:swap 异步加载的，换上后字符宽度会变，
     // 但容器尺寸不变、ResizeObserver 不会触发，必须主动重算一次列数。
@@ -738,8 +851,12 @@ function renderTabs() {
                 '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
                 '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>';
         }
-        return '<div class="' + cls + '" onclick="switchTab(' + i + ',true)">' +
+        var state = s._connectionState || (s._connected ? 'connected' : 'idle');
+        var stateLabel = state === 'disconnected' ? '已断开' : (state === 'connecting' ? '连接中' : '');
+        var stateBadge = stateLabel ? '<span class="ssh-state-label" role="status">' + stateLabel + '</span>' : '';
+        return '<div class="' + cls + ' ssh-' + state + '" onclick="switchTab(' + i + ',true)">' +
             '<span class="tab-main"><span class="tab-ip" ondblclick="event.stopPropagation();copyIP(sessions[' + i + '].hostname)" title="单击切换标签，双击复制 IP">' + esc(formatHostForInput(s.hostname)) + '</span>' +
+            stateBadge +
             '<button class="tab-info" onclick="event.stopPropagation();openServerInfoModal(' + i + ')" title="服务器详情">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="10" x2="12" y2="16"/><circle cx="12" cy="7" r="1"/></svg></button></span>' +
             '<button class="tab-close" onclick="event.stopPropagation();closeTab(' + i + ')">' +
@@ -1066,6 +1183,7 @@ function startSessionConnection(session, afterStart) {
         return false;
     }
     var start = function () {
+        if (sessions.indexOf(session) < 0) return;
         try { session.fitAddon.fit(); } catch (e) { }
         session._lastSentSize = null;
         connectSession(session);
@@ -1128,6 +1246,7 @@ function warmTerminalEndpoint() {
 function invalidateSessionConnection(session) {
     if (!session) return;
     session._connectGeneration = (session._connectGeneration || 0) + 1;
+    clearTerminalInputQueue(session);
     stopServerInfoNetStream(session);
     stopTopbarMetricsPolling(session);
 }
@@ -1141,14 +1260,7 @@ function connectSession(session) {
     }
     if (session._sizeSyncTimer) { clearTimeout(session._sizeSyncTimer); session._sizeSyncTimer = null; }
     session._lastSentSize = null;
-    if (session._dataDisposable && typeof session._dataDisposable.dispose === 'function') {
-        try { session._dataDisposable.dispose(); } catch (e) { }
-        session._dataDisposable = null;
-    }
-    if (session._selectionDisposable && typeof session._selectionDisposable.dispose === 'function') {
-        try { session._selectionDisposable.dispose(); } catch (e) { }
-        session._selectionDisposable = null;
-    }
+    clearTerminalInputQueue(session);
     // 容器还没布局完时 fit() 可能量不出尺寸，兜底成和后端一致的默认值，
     // 避免把 0 或 NaN 当作列数带进 pty。
     var cols = session.term.cols > 0 ? session.term.cols : 150;
@@ -1159,6 +1271,9 @@ function connectSession(session) {
     var connectionGeneration = (session._connectGeneration || 0) + 1;
     session._connectGeneration = connectionGeneration;
     session._connected = false;
+    session._connectionState = 'connecting';
+    session._disconnectNoticeShown = false;
+    renderTabs();
     var failedBeforeConnect = false;
 
     function isCurrentConnection() {
@@ -1176,6 +1291,8 @@ function connectSession(session) {
                 return;
             }
             showToast(session.hostname + ' 无法连接', 'error');
+            session.ws = null;
+            showSshDisconnected(session);
             return;
         }
         ws.binaryType = 'arraybuffer';
@@ -1190,6 +1307,9 @@ function connectSession(session) {
         function markConnected() {
             if (session._connected) return;
             session._connected = true;
+            session._connectionState = 'connected';
+            session._disconnectNoticeShown = false;
+            renderTabs();
             // A persisted replacement can be removed from the payload as soon
             // as the terminal handshake succeeds.  A one-time decision must
             // remain available to SFTP/editor/sysinfo connections opened by
@@ -1201,7 +1321,6 @@ function connectSession(session) {
             updateSSHAuthRetryModalForActive();
             updateHostKeyMismatchModalForActive();
             showToast(session.hostname + ' 连接成功', 'success');
-            setupAutoCopy(session);
             maybeShowFirstServerInfoGuide(session);
             session.heartbeat = setInterval(function () { if (ws.readyState === 1) ws.send('ping'); }, 30000);
             startTopbarMetricsPolling(session);
@@ -1273,6 +1392,7 @@ function connectSession(session) {
             var wasConnected = session._connected;
             session._connected = false;
             session.ws = null;
+            showSshDisconnected(session);
             if (wasConnected && session.hostKeyDecision) clearHostKeyDecision(session);
             stopServerInfoNetStream(session);
             cancelSessionSftpRequests(session, false, true);
@@ -1289,10 +1409,6 @@ function connectSession(session) {
     }
 
     openSocket(directWsUrl, false);
-
-    session._dataDisposable = session.term.onData(function (data) {
-        sendTerminalInput(session, data);
-    });
 
     var resizeHandler = function () { scheduleTermSizeSync(session); };
     addEventListener('resize', resizeHandler);
@@ -1426,6 +1542,7 @@ function closeTab(idx) {
     if (s._sizeSyncTimer) { clearTimeout(s._sizeSyncTimer); s._sizeSyncTimer = null; }
     if (s._dataDisposable && typeof s._dataDisposable.dispose === 'function') { try { s._dataDisposable.dispose(); } catch (e) { } }
     if (s._selectionDisposable && typeof s._selectionDisposable.dispose === 'function') { try { s._selectionDisposable.dispose(); } catch (e) { } }
+    if (s._selectionCopyTimer != null) clearTimeout(s._selectionCopyTimer);
     if (s.term) s.term.dispose();
     if (s.termDiv) s.termDiv.remove();
     sessions.splice(idx, 1);
@@ -1461,17 +1578,27 @@ function reconnectTab() {
         reconnectRdpTab();
         return;
     }
+    reconnectSshSession(s);
+}
+
+function reconnectSshSession(s) {
+    if (!s || s.kind === 'rdp' || sessions.indexOf(s) < 0 || s._connectionState === 'connecting') return false;
+    if (!ensureGatewayAccount()) return false;
     if (sftpRemoteSessionId === s.id) hideSftpRemoteModal();
     if (sftpDirPickerSessionId === s.id) hideSftpDirPicker();
     if (s.hostKeyDecision) clearHostKeyDecision(s);
-    cancelSessionSftpRequests(s, false);
+    cancelSessionSftpRequests(s, false, true);
     invalidateSessionConnection(s);
     handleRemoteEditorsSessionDisconnected(s);
     if (s.ws) s.ws.close();
+    s.ws = null;
+    s._connected = false;
+    s._connectionState = 'connecting';
+    renderTabs();
     if (s.heartbeat) { clearInterval(s.heartbeat); s.heartbeat = null; }
     stopTopbarMetricsPolling(s);
     showToast('重新连接 ' + s.hostname + '...', 'info');
-    startSessionConnection(s);
+    return startSessionConnection(s);
 }
 
 // ==================== 新建连接弹窗 ====================
@@ -8980,6 +9107,8 @@ function termCopy() {
         return;
     }
     if (!session.term) return;
+    if (session._selectionCopyTimer != null) clearTimeout(session._selectionCopyTimer);
+    session._selectionCopyTimer = null;
     var sel = session.term.getSelection();
     if (!sel) { showToast('没有选中内容', 'info'); return; }
     copyTextToClipboard(sel);
@@ -9124,11 +9253,12 @@ function openClipboardPasteFallback(handlers) {
 }
 
 function openSshClipboardPasteFallback(session) {
+    var socket = session.ws, generation = session._connectGeneration;
     return openClipboardPasteFallback({
         kind: 'ssh',
         label: ' SSH 终端',
         closedMessage: '发起粘贴的 SSH 连接已关闭，内容未发送',
-        canPaste: function () { return sshSessionCanPaste(session); },
+        canPaste: function () { return sshSessionCanPaste(session) && session.ws === socket && session._connectGeneration === generation; },
         onText: function (text) { pasteTextToSshSession(session, text); }
     });
 }
@@ -9149,9 +9279,13 @@ function termPaste() {
         showToast('SSH 连接尚未就绪，无法粘贴', 'error');
         return;
     }
+    var socket = targetSession.ws, generation = targetSession._connectGeneration;
+    function sameConnection() {
+        return sshSessionCanPaste(targetSession) && targetSession.ws === socket && targetSession._connectGeneration === generation;
+    }
 
     function useManualPaste() {
-        if (sshSessionCanPaste(targetSession)) openSshClipboardPasteFallback(targetSession);
+        if (sameConnection()) openSshClipboardPasteFallback(targetSession);
         else showToast('发起粘贴的 SSH 连接已关闭，内容未发送', 'error');
     }
 
@@ -9168,6 +9302,10 @@ function termPaste() {
         return;
     }
     Promise.resolve(readResult).then(function (text) {
+        if (!sameConnection()) {
+            showToast('发起粘贴的 SSH 连接已关闭，内容未发送', 'error');
+            return;
+        }
         if (typeof text !== 'string') {
             useManualPaste();
             return;
@@ -9235,13 +9373,18 @@ function showCopyToast() {
 
 // Auto-copy on selection
 function setupAutoCopy(session) {
-    if (session._selectionDisposable && typeof session._selectionDisposable.dispose === 'function') {
-        try { session._selectionDisposable.dispose(); } catch (e) { }
-    }
+    if (session._selectionDisposable) return;
     session._selectionDisposable = session.term.onSelectionChange(function () {
+        if (session._selectionCopyTimer != null) clearTimeout(session._selectionCopyTimer);
+        session._selectionCopyTimer = null;
         var sel = session.term.getSelection();
         if (sel && sel.length > 0) {
-            copyTextToClipboard(sel);
+            // Dragging can produce a selection update for every mouse move.
+            // Copy the final selection once, keeping the terminal responsive.
+            session._selectionCopyTimer = setTimeout(function () {
+                session._selectionCopyTimer = null;
+                if (sessions.indexOf(session) >= 0 && sessions[activeIdx] === session && session.term.getSelection() === sel) copyTextToClipboard(sel);
+            }, 120);
         }
     });
 }

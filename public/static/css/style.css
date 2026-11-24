@@ -1338,6 +1338,10 @@ html[data-theme="light"]{--net-rx-line:#0f766e;--net-tx-line:#b45309;--net-rx-ba
 .ssh-tab.active{background:#111;border-color:rgba(255,255,255,.28);color:#fff}
 .ssh-tab.active .tab-ip{color:#fff}
 .ssh-tab .tab-info{background:#050505;color:#fff}
+.ssh-tab .ssh-state-label{font-size:10px;line-height:1.2;white-space:nowrap;flex-shrink:0}
+.ssh-tab.ssh-disconnected,.ssh-tab.ssh-disconnected.active{border-color:rgba(255,77,79,.7);background:rgba(255,77,79,.08)}
+.ssh-tab.ssh-disconnected .tab-ip,.ssh-tab.ssh-disconnected .ssh-state-label{color:#ff4d4f!important}
+.ssh-tab.ssh-connecting .ssh-state-label{color:#eab308}
 
 html[data-theme="light"] .term-topbar.glass-bar,html[data-theme="light"] .glass-bar.term-topbar{background:#fff;border-bottom-color:rgba(17,24,39,.1)}
 html[data-theme="light"] .term-body{background:#fff!important}
@@ -1345,6 +1349,8 @@ html[data-theme="light"] .tb-btn,html[data-theme="light"] .tab-add-btn,html[data
 html[data-theme="light"] .tb-btn:hover,html[data-theme="light"] .tab-add-btn:hover,html[data-theme="light"] .edge-btn:hover{background:#e5e7eb;color:#111827;border-color:rgba(17,24,39,.2);box-shadow:none}
 html[data-theme="light"] .ssh-tab,html[data-theme="light"] .ssh-tab .tab-ip,html[data-theme="light"] .ssh-tab.active .tab-ip{color:#111827}
 html[data-theme="light"] .ssh-tab.active{background:#e5e7eb;border-color:rgba(17,24,39,.22);color:#111827}
+html[data-theme="light"] .ssh-tab.ssh-disconnected{border-color:#dc2626;background:#fff1f2}
+html[data-theme="light"] .ssh-tab.ssh-disconnected .tab-ip,html[data-theme="light"] .ssh-tab.ssh-disconnected .ssh-state-label{color:#dc2626!important}
 html[data-theme="light"] .cmd-bar{background:#e5e7eb;border-top-color:rgba(17,24,39,.1);backdrop-filter:none;-webkit-backdrop-filter:none}
 html[data-theme="light"] .cmd-input{background:var(--terminal-light-command);border-color:rgba(17,24,39,.12);color:#fff;box-shadow:none}
 html[data-theme="light"] .cmd-input::placeholder{color:rgba(255,255,255,.72)}
